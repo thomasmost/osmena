@@ -101,7 +101,9 @@ osmena-shell = { path = "/Users/you/vibes/osmena/crates/osmena-shell" }
 osmena-xtask = { path = "/Users/you/vibes/osmena/tools/osmena-xtask" }
 ```
 
-Then commit in osmena, push, and move the browser's `rev` to the new sha.
+Cargo still resolves the pinned revision from GitHub even when every crate
+is patched, so the repository must be reachable. Then commit in osmena,
+push, and move the browser's `rev` to the new sha.
 
 ## Development
 
