@@ -5,7 +5,8 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-10-19 (handoff after the extraction)._
+_Last updated: 2026-10-19 (frameless windows, Chromium shortcuts, the
+shortcut editor)._
 
 ## Architecture
 
@@ -46,7 +47,19 @@ No engine is needed; the workspace builds in under a minute.
   committing; only the README and this file may name them.
 - **Every user action is a `Command`.** New chrome controls and shortcuts
   add a `Command` (and a `CommandKind` if it needs a hotkey), never a
-  direct engine call.
+  direct engine call. A new `CommandKind` needs a `name` (stable: it is
+  the key in `keymap.toml`), a `label`, a place in `CommandKind::ALL`
+  (the editor's row order), and a default chord on both platforms (a test
+  checks); the editor and the keymap file pick it up from there.
+- **The keymap file is an overlay.** `Keymap::parse` lays `keymap.toml`
+  over the platform defaults: an action named in the file gets exactly
+  the chords listed, an action left out keeps its default. The editor
+  always writes every action, so a saved file is complete.
+- **The native window is asked, never driven, by the chrome.** The strip
+  records a `WindowRequest` (drag, minimize, maximize, system menu) the
+  way it records a `MenuRequest`; `BrowserWindow` acts on it after the
+  frame. Frameless windows handle their own resize borders
+  (`routing::resize_edge`), except on macOS where the system keeps them.
 - **Menus are native, the rest of the chrome is egui.** A menu is a
   `Vec<MenuEntry>` from `menus.rs`, shown by `native_menu::NativeMenu`
   after the frame is painted; the chrome only records a `MenuRequest`.
@@ -93,12 +106,20 @@ both of which now build on them and pin the same revision. The repository is
 public at <https://github.com/thomasmost/osmena>; CI (fmt, clippy, tests on
 macOS and Windows runners, no engine needed) was green on every push.
 
-Verified: `cargo test` (142 tests), clippy with `-D warnings`, formatting; both
-browsers launch and render pages through this shell on Windows (screenshots
-of example.com with each brand's title and icon). Not verified since the
-extraction: the browsers' manual checklists beyond launch (tab selection,
-moves between windows, menus, settings) moved with their unit tests but were
-not exercised by hand; anything on macOS.
+Added the same day: frameless browser windows (the tab strip as title bar,
+window controls, resize borders, a setting to restore the system frame),
+Chromium-style default shortcuts with the new commands behind them (reopen
+closed tab, tab 1–8 and last, home, full screen), and the shortcut editor
+in the settings window with `keymap.toml` persistence.
+
+Verified: `cargo test` (165 tests), clippy with `-D warnings`, formatting;
+both browsers build against this revision; Nautilus on Windows launches
+frameless with the controls at the strip's right end, opens the settings
+window on `Ctrl+,`, captures a chord in the editor (New tab rebound to
+`Ctrl+Y`), writes it to `keymap.toml`, and the new chord opens a tab.
+Not verified: dragging and resizing a frameless window by hand, Aero snap,
+full screen, the macOS title bar style (nothing has run on macOS since the
+extraction), and the browsers' manual checklists beyond launch.
 
 Decisions, with reasons:
 - Separate repositories, not a monorepo: Paladin's Servo build (60 git crates,
@@ -115,7 +136,9 @@ Decisions, with reasons:
   are free and the manifests are ready.
 
 Open items, most useful first:
-1. Run both browsers' manual checklists against the current revision.
+1. Run both browsers' manual checklists against the current revision, with
+   the frameless window first: move, resize from every edge, maximize by
+   double-click and by the control, snap, full screen and back.
 2. An integration test of `osmena-shell` with a fake `Engine` (no window
    system is needed for the model and routing, but the window code itself has
    no test).

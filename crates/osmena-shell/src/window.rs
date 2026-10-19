@@ -8,10 +8,10 @@ use std::sync::Arc;
 
 use egui::{Color32, LayerId, PaintCallback, Rect as EguiRect, pos2};
 use egui_glow::{CallbackFn, EguiGlow};
-use osmena_chrome::chrome::{self, ChromeState};
+use osmena_chrome::chrome::{self, ChromeState, WindowRequest};
 use osmena_chrome::routing::{
     KeyRouter, KeyStroke, KeyTarget, PointerCapture, PointerContext, PointerTarget, content_pixels,
-    route_pointer,
+    resize_edge, route_pointer,
 };
 use osmena_chrome::{icon, input, keyutils, menus, native_menu};
 use osmena_core::{
@@ -19,13 +19,17 @@ use osmena_core::{
 };
 use osmena_engine::{BlitRect, Engine, EngineError, PagePaint, PhysicalSize, Surface, TabHost};
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::ModifiersState;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use winit::window::{CursorIcon, Window};
+use winit::window::{CursorIcon, Fullscreen, ResizeDirection, Window, WindowAttributes};
 
 use crate::page::PageTexture;
+
+/// How close to a frameless window's edge (physical pixels at 1x) the
+/// pointer resizes it instead of acting on what is under it.
+const RESIZE_BORDER_PX: f32 = 6.0;
 
 pub struct BrowserWindow<E: Engine> {
     id: WindowId,
@@ -33,6 +37,12 @@ pub struct BrowserWindow<E: Engine> {
     chrome: ChromeState,
     modifiers: ModifiersState,
     cursor: Option<PhysicalPosition<f64>>,
+    /// The window has no system title bar: the chrome's tab strip stands
+    /// in for it, and the window handles the resize borders itself.
+    frameless: bool,
+    /// The edge the pointer is on, when a frameless window would resize
+    /// from it on a press.
+    resize_edge: Option<ResizeDirection>,
     /// Physical-pixel height of the chrome above the page, from the last
     /// frame. Events below it go to the page, above it to egui.
     content_top_px: f32,
@@ -64,12 +74,14 @@ impl<E: Engine> BrowserWindow<E> {
         brand: &Brand,
         engine_info: &'static EngineInfo,
         id: WindowId,
+        frameless: bool,
     ) -> Result<BrowserWindow<E>, EngineError> {
         let attributes = Window::default_attributes()
             .with_title(brand.name)
             .with_inner_size(LogicalSize::new(1024.0, 768.0))
             .with_min_inner_size(LogicalSize::new(400.0, 300.0))
             .with_window_icon(icon::window_icon(brand));
+        let attributes = frameless_attributes(attributes, frameless);
         let window = event_loop
             .create_window(attributes)
             .map_err(|e| EngineError(format!("creating window: {e}")))?;
@@ -95,6 +107,8 @@ impl<E: Engine> BrowserWindow<E> {
             chrome: ChromeState::default(),
             modifiers: ModifiersState::default(),
             cursor: None,
+            frameless,
+            resize_edge: None,
             content_top_px: 0.0,
             content_is_egui: false,
             pointer_in_content: false,
@@ -146,6 +160,63 @@ impl<E: Engine> BrowserWindow<E> {
     pub fn focus_address_bar(&mut self) {
         self.chrome.focus_address = true;
         self.window.request_redraw();
+    }
+
+    /// Give the window the system title bar, or take it away. On macOS
+    /// the title bar style is fixed when the window is created, so the
+    /// change applies to windows opened from now on.
+    pub fn set_frameless(&mut self, frameless: bool) {
+        if self.frameless == frameless {
+            return;
+        }
+        self.frameless = frameless;
+        self.resize_edge = None;
+        if !cfg!(target_os = "macos") {
+            self.window.set_decorations(!frameless);
+        }
+        self.window.request_redraw();
+    }
+
+    /// Fill the screen (borderless) or go back to a normal window.
+    pub fn set_fullscreen(&self, fullscreen: bool) {
+        self.window
+            .set_fullscreen(fullscreen.then_some(Fullscreen::Borderless(None)));
+        self.window.request_redraw();
+    }
+
+    /// The pointer is over an edge of this window that a press would
+    /// resize from: a frameless window that is neither maximized nor
+    /// full screen. On macOS the system keeps the resize borders.
+    fn edge_under_pointer(&self, browser: &Browser) -> Option<ResizeDirection> {
+        if !self.frameless
+            || cfg!(target_os = "macos")
+            || self.window.is_maximized()
+            || browser.window(self.id).is_some_and(|w| w.fullscreen)
+        {
+            return None;
+        }
+        let p = self.cursor?;
+        let border = RESIZE_BORDER_PX * self.window.scale_factor() as f32;
+        resize_edge(p.x as f32, p.y as f32, self.window.inner_size(), border)
+    }
+
+    /// Hand the pointer to the system for a move or resize of the window.
+    /// The system keeps it until the button is released, and that release
+    /// never reaches us, so egui and the capture are told it happened now.
+    fn start_system_drag(
+        &mut self,
+        drag: impl FnOnce(&Window) -> Result<(), winit::error::ExternalError>,
+    ) {
+        if let Err(e) = drag(&self.window) {
+            log::warn!("window drag not supported: {e}");
+        }
+        self.capture.clear();
+        let release = WindowEvent::MouseInput {
+            device_id: DeviceId::dummy(),
+            state: ElementState::Released,
+            button: MouseButton::Left,
+        };
+        let _ = self.egui.on_window_event(&self.window, &release);
     }
 
     /// The page in `tab` asked for a pointer shape.
@@ -278,7 +349,25 @@ impl<E: Engine> BrowserWindow<E> {
                 // egui always sees cursor movement so it can hide tooltips
                 // and hover state when the pointer leaves the chrome.
                 self.cursor = Some(*position);
-                if self.pointer_target() == PointerTarget::Page {
+                // A frameless window's edges resize it; while the pointer
+                // is on one it belongs to neither the chrome nor the page.
+                let edge = if self.capture.captured().is_none() {
+                    self.edge_under_pointer(browser)
+                } else {
+                    None
+                };
+                if edge != self.resize_edge {
+                    self.resize_edge = edge;
+                    if let Some(edge) = edge {
+                        self.leave_content(active);
+                        self.window.set_cursor(resize_cursor(edge));
+                    } else {
+                        self.window.set_cursor(CursorIcon::Default);
+                    }
+                }
+                if edge.is_some() {
+                    // Nothing else to do: the pointer is on the border.
+                } else if self.pointer_target() == PointerTarget::Page {
                     if let Some((x, y)) = self.content_point() {
                         self.enter_content(active, x, y);
                     }
@@ -288,6 +377,18 @@ impl<E: Engine> BrowserWindow<E> {
             }
             WindowEvent::CursorLeft { .. } => {
                 self.leave_content(active);
+                if self.resize_edge.take().is_some() {
+                    self.window.set_cursor(CursorIcon::Default);
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } if self.resize_edge.is_some() => {
+                let edge = self.resize_edge.expect("checked by the guard");
+                forward_to_egui = false;
+                self.start_system_drag(|w| w.drag_resize_window(edge));
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let current = self.pointer_target();
@@ -423,6 +524,8 @@ impl<E: Engine> BrowserWindow<E> {
         let engine_error = browser.engine_error.as_deref();
         let chrome_color = browser.settings.chrome_color;
         let engine_info = self.engine_info;
+        let frameless = self.frameless;
+        let maximized = self.window.is_maximized();
         let mut commands = Vec::new();
         let mut content_top_px = 0.0;
 
@@ -445,6 +548,8 @@ impl<E: Engine> BrowserWindow<E> {
                 color: chrome_color,
                 engine: engine_info,
                 engine_error,
+                frameless,
+                maximized,
             };
             commands = chrome::draw(ui, model, &context, chrome_state, keymap);
             let rect = ui.available_rect_before_wrap();
@@ -550,7 +655,23 @@ impl<E: Engine> BrowserWindow<E> {
         if registered || self.egui.egui_ctx.has_requested_repaint() {
             self.window.request_redraw();
         }
-        // After the frame is on screen: a native menu blocks until it closes.
+        // After the frame is on screen: the strip used as a title bar.
+        if let Some(request) = self.chrome.take_window_request() {
+            match request {
+                WindowRequest::Drag => self.start_system_drag(Window::drag_window),
+                WindowRequest::Minimize => self.window.set_minimized(true),
+                WindowRequest::ToggleMaximize => {
+                    self.window.set_maximized(!self.window.is_maximized());
+                }
+                WindowRequest::SystemMenu { position } => {
+                    self.window.show_window_menu(LogicalPosition::new(
+                        f64::from(position.x),
+                        f64::from(position.y),
+                    ));
+                }
+            }
+        }
+        // A native menu blocks until it closes.
         if let Some(request) = self.chrome.take_menu_request()
             && let Some(command) = self.show_menu(browser, keymap, request)
         {
@@ -570,9 +691,10 @@ impl<E: Engine> BrowserWindow<E> {
     ) -> Option<Command> {
         let model = browser.window(self.id)?;
         let (entries, position) = match request {
-            chrome::MenuRequest::Window { position } => {
-                (menus::window_menu(model, keymap), position)
-            }
+            chrome::MenuRequest::Window { position } => (
+                menus::window_menu(model, keymap, !browser.closed_tabs.is_empty()),
+                position,
+            ),
             chrome::MenuRequest::Tab { targets, position } => {
                 let others: Vec<(WindowId, String)> = browser
                     .windows
@@ -612,6 +734,47 @@ impl<E: Engine> Drop for BrowserWindow<E> {
 /// GL surfaces reject zero-sized targets; a minimized window reports 0x0.
 fn non_zero(size: winit::dpi::PhysicalSize<u32>) -> PhysicalSize<u32> {
     PhysicalSize::new(size.width.max(1), size.height.max(1))
+}
+
+/// The window attributes for a window without the system title bar. On
+/// Windows and Linux the decorations go entirely (Windows keeps a shadow
+/// and snap behaviour); on macOS the title bar stays but turns
+/// transparent and the content extends under it, so the traffic lights
+/// sit over the tab strip as they do in other browsers.
+fn frameless_attributes(attributes: WindowAttributes, frameless: bool) -> WindowAttributes {
+    #[cfg(windows)]
+    let attributes = {
+        use winit::platform::windows::WindowAttributesExtWindows;
+        attributes.with_undecorated_shadow(true)
+    };
+    if !frameless {
+        return attributes;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::WindowAttributesExtMacOS;
+        attributes
+            .with_titlebar_transparent(true)
+            .with_fullsize_content_view(true)
+            .with_title_hidden(true)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        attributes.with_decorations(false)
+    }
+}
+
+fn resize_cursor(edge: ResizeDirection) -> CursorIcon {
+    match edge {
+        ResizeDirection::North => CursorIcon::NResize,
+        ResizeDirection::South => CursorIcon::SResize,
+        ResizeDirection::East => CursorIcon::EResize,
+        ResizeDirection::West => CursorIcon::WResize,
+        ResizeDirection::NorthEast => CursorIcon::NeResize,
+        ResizeDirection::NorthWest => CursorIcon::NwResize,
+        ResizeDirection::SouthEast => CursorIcon::SeResize,
+        ResizeDirection::SouthWest => CursorIcon::SwResize,
+    }
 }
 
 fn cursor_icon(cursor: Cursor) -> CursorIcon {

@@ -1,12 +1,15 @@
 //! The settings window: a winit window with egui only (no tabs). It edits
-//! `Settings` in place and reports when they should be saved. A later
-//! phase adds the hotkey and profile editors here.
+//! `Settings` and the `Keymap` in place and reports when they should be
+//! saved. The shortcut editor works like a game's controls screen: every
+//! action has a primary and a secondary slot; clicking a slot captures
+//! the next key chord, which is taken from whatever action held it.
 
 use egui_glow::EguiGlow;
-use osmena_chrome::chrome::{self, location_input_to_url};
+use osmena_chrome::chrome::{self, describe_chord, location_input_to_url};
 use osmena_chrome::input::{self, KeyRoute};
+use osmena_chrome::keyboard_types::{Code, Modifiers};
 use osmena_chrome::{icon, keyutils};
-use osmena_core::{Brand, ChromeColor, CommandKind, Keymap, Settings};
+use osmena_core::{Brand, ChromeColor, CommandKind, KeyChord, Keymap, Platform, Settings};
 use osmena_engine::{Engine, EngineError, PhysicalSize, Surface};
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, WindowEvent};
@@ -18,11 +21,16 @@ use winit::window::Window;
 #[derive(Debug, PartialEq, Eq)]
 pub enum SettingsOutcome {
     Nothing,
-    /// An edited field was committed (focus left it, or a checkbox
-    /// toggled); the caller should persist the settings.
-    Changed,
-    /// The user closed the window; the caller should drop it, saving first
-    /// if `save` (an edit was still uncommitted).
+    /// Something was committed: `settings` says the settings changed (an
+    /// edited field lost focus, or a checkbox toggled) and should be
+    /// persisted and applied; `keymap` says a shortcut changed and the
+    /// keymap should be persisted.
+    Changed {
+        settings: bool,
+        keymap: bool,
+    },
+    /// The user closed the window; the caller should drop it, saving the
+    /// settings first if `save` (an edit was still uncommitted).
     Close {
         save: bool,
     },
@@ -36,6 +44,12 @@ pub struct SettingsWindow<S: Surface> {
     /// A text field was edited and has not lost focus yet.
     dirty: bool,
     modifiers: ModifiersState,
+    /// The shortcut slot waiting for a key chord, if any: the action and
+    /// its slot (0 is primary).
+    capture: Option<(CommandKind, usize)>,
+    /// What the last rebinding did besides binding, shown under the table
+    /// until the next one.
+    notice: Option<String>,
     egui: EguiGlow,
     surface: S,
     // Dropped last, after the GL state that depends on it.
@@ -49,6 +63,20 @@ struct FormActivity {
     edited: bool,
     /// A field lost focus or a checkbox toggled: time to save.
     committed: bool,
+    /// A shortcut was cleared or the keymap reset.
+    keymap_changed: bool,
+}
+
+/// What a key press does while a shortcut slot is capturing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CaptureAction {
+    /// A modifier on its own: keep waiting for the rest of the chord.
+    Ignore,
+    /// Escape: leave the slot as it was.
+    Cancel,
+    /// Backspace or Delete: empty the slot.
+    Clear,
+    Bind(KeyChord),
 }
 
 impl<S: Surface> SettingsWindow<S> {
@@ -59,8 +87,8 @@ impl<S: Surface> SettingsWindow<S> {
     ) -> Result<SettingsWindow<S>, EngineError> {
         let attributes = Window::default_attributes()
             .with_title(format!("{} Settings", brand.name))
-            .with_inner_size(LogicalSize::new(480.0, 320.0))
-            .with_min_inner_size(LogicalSize::new(320.0, 200.0))
+            .with_inner_size(LogicalSize::new(640.0, 680.0))
+            .with_min_inner_size(LogicalSize::new(420.0, 320.0))
             .with_window_icon(icon::window_icon(brand));
         let window = event_loop
             .create_window(attributes)
@@ -79,6 +107,8 @@ impl<S: Surface> SettingsWindow<S> {
         Ok(SettingsWindow {
             dirty: false,
             modifiers: ModifiersState::default(),
+            capture: None,
+            notice: None,
             egui,
             surface,
             window,
@@ -102,7 +132,7 @@ impl<S: Surface> SettingsWindow<S> {
         &mut self,
         event: &WindowEvent,
         settings: &mut Settings,
-        keymap: &Keymap,
+        keymap: &mut Keymap,
     ) -> SettingsOutcome {
         match event {
             WindowEvent::CloseRequested => {
@@ -120,16 +150,36 @@ impl<S: Surface> SettingsWindow<S> {
                 self.window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
-                let activity = self.frame(settings);
+                let activity = self.frame(settings, keymap);
                 let (dirty, outcome) = after_frame(self.dirty, activity);
                 self.dirty = dirty;
                 return outcome;
+            }
+            WindowEvent::Focused(false) => {
+                // A click elsewhere ends a capture.
+                self.capture = None;
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
             }
             WindowEvent::KeyboardInput { event: key, .. } => {
                 let key_input = keyutils::key_input_from_winit(key, self.modifiers);
+                if let Some((kind, slot)) = self.capture {
+                    // Every key belongs to the capture while it lasts, so
+                    // neither egui nor the keymap acts on it.
+                    if key.state == ElementState::Pressed && !key.repeat {
+                        let outcome = self.capture_key(
+                            kind,
+                            slot,
+                            key_input.code,
+                            key_input.modifiers,
+                            keymap,
+                        );
+                        self.window.request_redraw();
+                        return outcome;
+                    }
+                    return SettingsOutcome::Nothing;
+                }
                 let route = input::route_key(
                     self.egui.egui_ctx.egui_wants_keyboard_input(),
                     key.state == ElementState::Pressed,
@@ -151,10 +201,53 @@ impl<S: Surface> SettingsWindow<S> {
         SettingsOutcome::Nothing
     }
 
-    fn frame(&mut self, settings: &mut Settings) -> FormActivity {
+    /// A key pressed while `slot` of `kind` is capturing.
+    fn capture_key(
+        &mut self,
+        kind: CommandKind,
+        slot: usize,
+        code: Code,
+        modifiers: Modifiers,
+        keymap: &mut Keymap,
+    ) -> SettingsOutcome {
+        match capture_action(code, modifiers) {
+            CaptureAction::Ignore => SettingsOutcome::Nothing,
+            CaptureAction::Cancel => {
+                self.capture = None;
+                SettingsOutcome::Nothing
+            }
+            CaptureAction::Clear => {
+                keymap.set_slot(kind, slot, None);
+                self.capture = None;
+                self.notice = None;
+                SettingsOutcome::Changed {
+                    settings: false,
+                    keymap: true,
+                }
+            }
+            CaptureAction::Bind(chord) => {
+                let displaced = keymap.set_slot(kind, slot, Some(chord));
+                self.notice = binding_notice(chord, displaced);
+                self.capture = None;
+                SettingsOutcome::Changed {
+                    settings: false,
+                    keymap: true,
+                }
+            }
+        }
+    }
+
+    fn frame(&mut self, settings: &mut Settings, keymap: &mut Keymap) -> FormActivity {
         let mut activity = FormActivity::default();
-        self.egui.run(&self.window, |ui| {
-            activity = draw_settings(ui, settings);
+        let Self {
+            egui,
+            window,
+            capture,
+            notice,
+            ..
+        } = self;
+        egui.run(window, |ui| {
+            activity = draw_settings(ui, settings, keymap, capture, notice);
         });
         self.surface.begin_frame();
         // egui_glow paints over whatever the framebuffer holds, so clear it
@@ -181,13 +274,19 @@ impl<S: Surface> Drop for SettingsWindow<S> {
 }
 
 /// The save rule after one frame of the form. An edit marks the form dirty;
-/// a committed field (or toggled checkbox) while dirty is a change that the
-/// caller persists, which clears the dirty flag. Returns the new dirty flag
-/// and what the window reports.
+/// a committed field (or toggled checkbox) while dirty is a settings change
+/// that the caller persists, which clears the dirty flag. A keymap change
+/// is reported as it is. Returns the new dirty flag and what the window
+/// reports.
 fn after_frame(dirty: bool, activity: FormActivity) -> (bool, SettingsOutcome) {
     let dirty = dirty || activity.edited;
-    if activity.committed && dirty {
-        (false, SettingsOutcome::Changed)
+    let settings = activity.committed && dirty;
+    let keymap = activity.keymap_changed;
+    if settings || keymap {
+        (
+            dirty && !settings,
+            SettingsOutcome::Changed { settings, keymap },
+        )
     } else {
         (dirty, SettingsOutcome::Nothing)
     }
@@ -196,6 +295,69 @@ fn after_frame(dirty: bool, activity: FormActivity) -> (bool, SettingsOutcome) {
 /// Closing reports the uncommitted edit, if any, so the caller saves it.
 fn on_close(dirty: bool) -> SettingsOutcome {
     SettingsOutcome::Close { save: dirty }
+}
+
+/// What a key press does while a slot is capturing. Modifier keys on
+/// their own are part of a chord still being pressed; bare Escape
+/// cancels; bare Backspace or Delete clears the slot; anything else, with
+/// whatever modifiers are held, is the new chord.
+fn capture_action(code: Code, modifiers: Modifiers) -> CaptureAction {
+    let modifiers = modifiers & KeyChord::RELEVANT_MODIFIERS;
+    if is_modifier_key(code) {
+        return CaptureAction::Ignore;
+    }
+    if modifiers.is_empty() {
+        match code {
+            Code::Escape => return CaptureAction::Cancel,
+            Code::Backspace | Code::Delete => return CaptureAction::Clear,
+            _ => {}
+        }
+    }
+    CaptureAction::Bind(KeyChord::new(modifiers, code))
+}
+
+fn is_modifier_key(code: Code) -> bool {
+    matches!(
+        code,
+        Code::ControlLeft
+            | Code::ControlRight
+            | Code::ShiftLeft
+            | Code::ShiftRight
+            | Code::AltLeft
+            | Code::AltRight
+            | Code::MetaLeft
+            | Code::MetaRight
+            | Code::CapsLock
+            | Code::NumLock
+            | Code::ScrollLock
+            | Code::Fn
+            | Code::FnLock
+    )
+}
+
+/// What to tell the user after binding `chord`: that it was taken from
+/// another action, and that a chord without a modifier no longer reaches
+/// pages.
+fn binding_notice(chord: KeyChord, displaced: Option<(KeyChord, CommandKind)>) -> Option<String> {
+    let mut notes = Vec::new();
+    if let Some((taken, from)) = displaced {
+        notes.push(format!(
+            "{} was taken from \"{}\", which lost it.",
+            describe_chord(taken),
+            from.label()
+        ));
+    }
+    if chord.modifiers.is_empty() {
+        notes.push(format!(
+            "{} has no modifier, so pages will not see that key any more.",
+            describe_chord(chord)
+        ));
+    }
+    if notes.is_empty() {
+        None
+    } else {
+        Some(notes.join(" "))
+    }
 }
 
 /// Stores a URL setting in normalised form when its text parses, so
@@ -223,90 +385,221 @@ fn url_hint(ui: &mut egui::Ui, text: &str, focused: bool) {
 
 /// The settings form, on the panel fill so the window background is never
 /// left to the framebuffer.
-fn draw_settings(ui: &mut egui::Ui, settings: &mut Settings) -> FormActivity {
+fn draw_settings(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    keymap: &mut Keymap,
+    capture: &mut Option<(CommandKind, usize)>,
+    notice: &mut Option<String>,
+) -> FormActivity {
     let mut activity = FormActivity::default();
     egui::CentralPanel::default().show_inside(ui, |ui| {
-        ui.heading("Settings");
-        ui.add_space(8.0);
-        egui::Grid::new("settings-grid")
-            .num_columns(2)
-            .spacing([12.0, 8.0])
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.label("Homepage");
-                ui.vertical(|ui| {
-                    let homepage = ui.add(
-                        egui::TextEdit::singleline(&mut settings.homepage).desired_width(300.0),
-                    );
-                    activity.edited |= homepage.changed();
-                    if homepage.lost_focus() {
-                        activity.committed = true;
-                        activity.edited |= normalise_url_setting(&mut settings.homepage);
-                    }
-                    url_hint(ui, &settings.homepage, homepage.has_focus());
-                });
-                ui.end_row();
-
-                ui.label("New tab URL");
-                ui.vertical(|ui| {
-                    let new_tab = ui.add(
-                        egui::TextEdit::singleline(&mut settings.new_tab_url).desired_width(300.0),
-                    );
-                    activity.edited |= new_tab.changed();
-                    if new_tab.lost_focus() {
-                        activity.committed = true;
-                        activity.edited |= normalise_url_setting(&mut settings.new_tab_url);
-                    }
-                    url_hint(ui, &settings.new_tab_url, new_tab.has_focus());
-                });
-                ui.end_row();
-
-                ui.label("Chrome colour");
-                ui.horizontal(|ui| {
-                    for color in ChromeColor::ALL {
-                        let [r, g, b] = color.rgb();
-                        let selected = settings.chrome_color == color;
-                        let stroke = if selected {
-                            egui::Stroke::new(2.0_f32, ui.visuals().strong_text_color())
-                        } else {
-                            egui::Stroke::new(1.0_f32, egui::Color32::from_black_alpha(40))
-                        };
-                        let swatch = ui
-                            .add(
-                                egui::Button::new("")
-                                    .fill(egui::Color32::from_rgb(r, g, b))
-                                    .stroke(stroke)
-                                    .corner_radius(6.0)
-                                    .min_size(egui::Vec2::splat(26.0)),
-                            )
-                            .on_hover_text(color.label());
-                        if swatch.clicked() && !selected {
-                            settings.chrome_color = color;
-                            activity.edited = true;
-                            activity.committed = true;
-                        }
-                    }
-                });
-                ui.end_row();
-
-                ui.label("On launch");
-                let restore = ui.checkbox(
-                    &mut settings.restore_windows_on_launch,
-                    "Restore previous windows (not yet implemented)",
+                ui.heading("General");
+                ui.add_space(8.0);
+                draw_general(ui, settings, &mut activity);
+                ui.add_space(20.0);
+                ui.heading("Keyboard shortcuts");
+                ui.label(
+                    egui::RichText::new(
+                        "Click a shortcut, then press the new keys. Esc keeps the old one, \
+                         Backspace clears it; right-click a shortcut to clear it. A shortcut \
+                         already in use moves to the action you give it to.",
+                    )
+                    .small()
+                    .weak(),
                 );
-                if restore.changed() {
+                ui.add_space(8.0);
+                draw_shortcuts(ui, keymap, capture, notice, &mut activity);
+            });
+    });
+    activity
+}
+
+fn draw_general(ui: &mut egui::Ui, settings: &mut Settings, activity: &mut FormActivity) {
+    egui::Grid::new("settings-grid")
+        .num_columns(2)
+        .spacing([12.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Homepage");
+            ui.vertical(|ui| {
+                let homepage =
+                    ui.add(egui::TextEdit::singleline(&mut settings.homepage).desired_width(300.0));
+                activity.edited |= homepage.changed();
+                if homepage.lost_focus() {
+                    activity.committed = true;
+                    activity.edited |= normalise_url_setting(&mut settings.homepage);
+                }
+                url_hint(ui, &settings.homepage, homepage.has_focus());
+            });
+            ui.end_row();
+
+            ui.label("New tab URL");
+            ui.vertical(|ui| {
+                let new_tab = ui.add(
+                    egui::TextEdit::singleline(&mut settings.new_tab_url).desired_width(300.0),
+                );
+                activity.edited |= new_tab.changed();
+                if new_tab.lost_focus() {
+                    activity.committed = true;
+                    activity.edited |= normalise_url_setting(&mut settings.new_tab_url);
+                }
+                url_hint(ui, &settings.new_tab_url, new_tab.has_focus());
+            });
+            ui.end_row();
+
+            ui.label("Chrome colour");
+            ui.horizontal(|ui| {
+                for color in ChromeColor::ALL {
+                    let [r, g, b] = color.rgb();
+                    let selected = settings.chrome_color == color;
+                    let stroke = if selected {
+                        egui::Stroke::new(2.0_f32, ui.visuals().strong_text_color())
+                    } else {
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_black_alpha(40))
+                    };
+                    let swatch = ui
+                        .add(
+                            egui::Button::new("")
+                                .fill(egui::Color32::from_rgb(r, g, b))
+                                .stroke(stroke)
+                                .corner_radius(6.0)
+                                .min_size(egui::Vec2::splat(26.0)),
+                        )
+                        .on_hover_text(color.label());
+                    if swatch.clicked() && !selected {
+                        settings.chrome_color = color;
+                        activity.edited = true;
+                        activity.committed = true;
+                    }
+                }
+            });
+            ui.end_row();
+
+            ui.label("Window");
+            ui.vertical(|ui| {
+                let title_bar = ui.checkbox(
+                    &mut settings.system_title_bar,
+                    "Use the system title bar and borders",
+                );
+                if title_bar.changed() {
                     activity.edited = true;
                     activity.committed = true;
                 }
-                ui.end_row();
+                let note = if cfg!(target_os = "macos") {
+                    "Off, the tabs sit beside the window buttons. Applies to new windows."
+                } else {
+                    "Off, the tab strip is the title bar: drag it to move the window."
+                };
+                ui.label(egui::RichText::new(note).small().weak());
             });
-        ui.add_space(12.0);
-        ui.label(
-            egui::RichText::new("Keyboard shortcuts and profiles arrive in a later phase.")
-                .small()
-                .weak(),
-        );
+            ui.end_row();
+
+            ui.label("On launch");
+            let restore = ui.checkbox(
+                &mut settings.restore_windows_on_launch,
+                "Restore previous windows (not yet implemented)",
+            );
+            if restore.changed() {
+                activity.edited = true;
+                activity.committed = true;
+            }
+            ui.end_row();
+        });
+}
+
+/// The controls table: one row per action, a primary and a secondary
+/// slot each, and a reset button under it.
+fn draw_shortcuts(
+    ui: &mut egui::Ui,
+    keymap: &mut Keymap,
+    capture: &mut Option<(CommandKind, usize)>,
+    notice: &mut Option<String>,
+    activity: &mut FormActivity,
+) {
+    egui::Grid::new("shortcuts-grid")
+        .num_columns(3)
+        .striped(true)
+        .spacing([16.0, 4.0])
+        .min_col_width(140.0)
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new("Action").strong());
+            ui.label(egui::RichText::new("Primary").strong());
+            ui.label(egui::RichText::new("Secondary").strong());
+            ui.end_row();
+            for kind in CommandKind::ALL {
+                ui.label(kind.label());
+                for slot in 0..2 {
+                    slot_button(ui, keymap, kind, slot, capture, notice, activity);
+                }
+                ui.end_row();
+            }
+        });
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        if ui.button("Reset to defaults").clicked() {
+            *keymap = Keymap::defaults(Platform::current());
+            *capture = None;
+            *notice = None;
+            activity.keymap_changed = true;
+        }
+        if capture.is_some() {
+            ui.label(
+                egui::RichText::new("Press the new keys…").color(ui.visuals().strong_text_color()),
+            );
+        } else if let Some(text) = notice.as_deref() {
+            ui.label(egui::RichText::new(text).small());
+        }
     });
-    activity
+}
+
+/// One slot of the controls table. Shows the chord, or "—" when empty,
+/// or "Press keys…" while capturing. A click starts capturing; a right
+/// click clears the slot.
+fn slot_button(
+    ui: &mut egui::Ui,
+    keymap: &mut Keymap,
+    kind: CommandKind,
+    slot: usize,
+    capture: &mut Option<(CommandKind, usize)>,
+    notice: &mut Option<String>,
+    activity: &mut FormActivity,
+) {
+    let chord = keymap.chords_for(kind).get(slot).copied();
+    let capturing = *capture == Some((kind, slot));
+    let text = if capturing {
+        egui::RichText::new("Press keys…")
+            .italics()
+            .color(ui.visuals().strong_text_color())
+    } else {
+        match chord {
+            Some(chord) => egui::RichText::new(describe_chord(chord)).monospace(),
+            None => egui::RichText::new("—").weak(),
+        }
+    };
+    let mut button = egui::Button::new(text).min_size(egui::Vec2::new(140.0, 24.0));
+    if capturing {
+        let selection = ui.visuals().selection;
+        button = button.fill(selection.bg_fill).stroke(selection.stroke);
+    }
+    let response = ui.add(button).on_hover_text(if chord.is_some() {
+        "Click to change, right-click to clear"
+    } else {
+        "Click to set"
+    });
+    if response.clicked() {
+        *capture = Some((kind, slot));
+        *notice = None;
+    } else if response.secondary_clicked() && chord.is_some() {
+        keymap.set_slot(kind, slot, None);
+        if capturing {
+            *capture = None;
+        }
+        *notice = None;
+        activity.keymap_changed = true;
+    }
 }
 
 #[cfg(test)]
@@ -331,8 +624,25 @@ mod tests {
         FormActivity {
             edited: true,
             committed: true,
+            ..Default::default()
         }
     }
+
+    fn rebound() -> FormActivity {
+        FormActivity {
+            keymap_changed: true,
+            ..Default::default()
+        }
+    }
+
+    const SETTINGS_CHANGED: SettingsOutcome = SettingsOutcome::Changed {
+        settings: true,
+        keymap: false,
+    };
+    const KEYMAP_CHANGED: SettingsOutcome = SettingsOutcome::Changed {
+        settings: false,
+        keymap: true,
+    };
 
     #[test]
     fn an_edit_without_a_blur_marks_dirty_and_reports_nothing() {
@@ -352,19 +662,34 @@ mod tests {
 
     #[test]
     fn a_toggle_reports_a_change_at_once() {
-        assert_eq!(
-            after_frame(false, toggled()),
-            (false, SettingsOutcome::Changed)
-        );
+        assert_eq!(after_frame(false, toggled()), (false, SETTINGS_CHANGED));
     }
 
     #[test]
     fn an_edit_then_a_blur_reports_a_change_and_clears_dirty() {
         let (dirty, outcome) = after_frame(false, edited());
         assert_eq!(outcome, SettingsOutcome::Nothing);
+        assert_eq!(after_frame(dirty, committed()), (false, SETTINGS_CHANGED));
+    }
+
+    #[test]
+    fn a_keymap_change_is_reported_and_leaves_a_pending_edit_alone() {
+        assert_eq!(after_frame(false, rebound()), (false, KEYMAP_CHANGED));
+        assert_eq!(after_frame(true, rebound()), (true, KEYMAP_CHANGED));
+        let both = FormActivity {
+            edited: true,
+            committed: true,
+            keymap_changed: true,
+        };
         assert_eq!(
-            after_frame(dirty, committed()),
-            (false, SettingsOutcome::Changed)
+            after_frame(false, both),
+            (
+                false,
+                SettingsOutcome::Changed {
+                    settings: true,
+                    keymap: true
+                }
+            )
         );
     }
 
@@ -382,7 +707,7 @@ mod tests {
     #[test]
     fn a_close_after_a_committed_change_does_not_save_again() {
         let (dirty, outcome) = after_frame(false, toggled());
-        assert_eq!(outcome, SettingsOutcome::Changed);
+        assert_eq!(outcome, SETTINGS_CHANGED);
         assert_eq!(on_close(dirty), SettingsOutcome::Close { save: false });
     }
 
@@ -415,5 +740,65 @@ mod tests {
             assert_eq!(text, raw);
             assert!(location_input_to_url(&text).is_none(), "{raw:?} is flagged");
         }
+    }
+
+    #[test]
+    fn capturing_waits_through_modifiers_and_binds_the_full_chord() {
+        assert_eq!(
+            capture_action(Code::ControlLeft, Modifiers::CONTROL),
+            CaptureAction::Ignore
+        );
+        assert_eq!(
+            capture_action(Code::ShiftRight, Modifiers::CONTROL | Modifiers::SHIFT),
+            CaptureAction::Ignore
+        );
+        assert_eq!(
+            capture_action(Code::KeyT, Modifiers::CONTROL | Modifiers::SHIFT),
+            CaptureAction::Bind(KeyChord::new(
+                Modifiers::CONTROL | Modifiers::SHIFT,
+                Code::KeyT
+            ))
+        );
+        // Lock keys held do not end up in the chord.
+        assert_eq!(
+            capture_action(Code::F5, Modifiers::CAPS_LOCK),
+            CaptureAction::Bind(KeyChord::new(Modifiers::empty(), Code::F5))
+        );
+    }
+
+    #[test]
+    fn bare_escape_cancels_and_bare_backspace_clears_but_with_modifiers_they_bind() {
+        assert_eq!(
+            capture_action(Code::Escape, Modifiers::empty()),
+            CaptureAction::Cancel
+        );
+        assert_eq!(
+            capture_action(Code::Backspace, Modifiers::empty()),
+            CaptureAction::Clear
+        );
+        assert_eq!(
+            capture_action(Code::Delete, Modifiers::empty()),
+            CaptureAction::Clear
+        );
+        assert_eq!(
+            capture_action(Code::Escape, Modifiers::CONTROL),
+            CaptureAction::Bind(KeyChord::new(Modifiers::CONTROL, Code::Escape))
+        );
+        assert_eq!(
+            capture_action(Code::Backspace, Modifiers::ALT),
+            CaptureAction::Bind(KeyChord::new(Modifiers::ALT, Code::Backspace))
+        );
+    }
+
+    #[test]
+    fn the_notice_names_the_action_that_lost_the_chord_and_warns_on_bare_keys() {
+        let ctrl_t = KeyChord::new(Modifiers::CONTROL, Code::KeyT);
+        assert_eq!(binding_notice(ctrl_t, None), None);
+        let note = binding_notice(ctrl_t, Some((ctrl_t, CommandKind::NewTab))).unwrap();
+        assert!(note.contains("Ctrl+T"), "{note}");
+        assert!(note.contains("New tab"), "{note}");
+        let bare = KeyChord::new(Modifiers::empty(), Code::KeyA);
+        let note = binding_notice(bare, None).unwrap();
+        assert!(note.contains("no modifier"), "{note}");
     }
 }

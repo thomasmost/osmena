@@ -116,8 +116,17 @@ pub fn run<E: Engine>(launch: Launch<E>) -> ExitCode {
         }
     }
 
+    let keymap = match Keymap::load(&profile.keymap_path(), Platform::current()) {
+        Ok(k) => k,
+        Err(e) => {
+            report_fatal(
+                brand,
+                &format!("{bin}: {e} (in {})", profile.keymap_path().display()),
+            );
+            return ExitCode::FAILURE;
+        }
+    };
     let mut browser = Browser::new(profile, settings);
-    let keymap = Keymap::defaults(Platform::current());
     let first: Url = urls.first().cloned().unwrap_or_else(|| browser.homepage());
     let mut actions = open_window(&mut browser, first);
     let window = browser.windows[0].id;

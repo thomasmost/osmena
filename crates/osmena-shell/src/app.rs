@@ -158,8 +158,15 @@ impl<E: Engine> App<E> {
         };
         match action {
             EngineAction::OpenWindow { window, tab, url } => {
-                match BrowserWindow::open(event_loop, engine, self.brand, self.engine_info, window)
-                {
+                let frameless = !self.browser.settings.system_title_bar;
+                match BrowserWindow::open(
+                    event_loop,
+                    engine,
+                    self.brand,
+                    self.engine_info,
+                    window,
+                    frameless,
+                ) {
                     Ok(mut bw) => {
                         bw.host_mut().create_tab(tab, url);
                         bw.host().set_focused(tab, true);
@@ -279,6 +286,11 @@ impl<E: Engine> App<E> {
                     w.focus_address_bar();
                 }
             }
+            EngineAction::SetFullscreen { window, fullscreen } => {
+                if let Some(w) = self.window_for_core_id(window) {
+                    w.set_fullscreen(fullscreen);
+                }
+            }
             EngineAction::OpenSettings => match &self.settings_window {
                 Some(sw) => sw.focus(),
                 None => match SettingsWindow::open(event_loop, engine, self.brand) {
@@ -354,6 +366,24 @@ impl<E: Engine> App<E> {
         let path = self.browser.profile.settings_path();
         if let Err(e) = self.browser.settings.save(&path) {
             log::error!("cannot save settings to {}: {e}", path.display());
+        }
+    }
+
+    fn save_keymap(&self) {
+        let path = self.browser.profile.keymap_path();
+        if let Err(e) = self.keymap.save(&path) {
+            log::error!("cannot save keymap to {}: {e}", path.display());
+        }
+    }
+
+    /// Settings changed in the settings window: persist them and apply
+    /// what the open windows show.
+    fn settings_changed(&mut self) {
+        self.save_settings();
+        let frameless = !self.browser.settings.system_title_bar;
+        for w in self.windows.values_mut() {
+            w.set_frameless(frameless);
+            w.request_redraw();
         }
     }
 
@@ -456,9 +486,19 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
             .is_some_and(|sw| sw.winit_id() == window_id)
         {
             let sw = self.settings_window.as_mut().expect("checked above");
-            match sw.handle_event(&event, &mut self.browser.settings, &self.keymap) {
+            match sw.handle_event(&event, &mut self.browser.settings, &mut self.keymap) {
                 SettingsOutcome::Nothing => {}
-                SettingsOutcome::Changed => self.save_settings(),
+                SettingsOutcome::Changed { settings, keymap } => {
+                    if settings {
+                        self.settings_changed();
+                    }
+                    if keymap {
+                        self.save_keymap();
+                        for w in self.windows.values() {
+                            w.request_redraw();
+                        }
+                    }
+                }
                 SettingsOutcome::Close { save } => {
                     if save {
                         self.save_settings();

@@ -45,6 +45,16 @@ pub enum Command {
     },
     NextTab(WindowId),
     PreviousTab(WindowId),
+    /// Activate the tab at `index` in `window`'s strip; nothing if there
+    /// is no such tab.
+    ActivateTabAt {
+        window: WindowId,
+        index: usize,
+    },
+    ActivateLastTab(WindowId),
+    /// Open the most recently closed tab (its URL) as a new tab of
+    /// `window`; nothing if no tab was closed.
+    ReopenClosedTab(WindowId),
     Navigate {
         tab: TabId,
         url: Url,
@@ -53,9 +63,13 @@ pub enum Command {
     Forward(TabId),
     Reload(TabId),
     Stop(TabId),
+    /// Load the homepage in `tab`.
+    Home(TabId),
     FocusAddressBar(WindowId),
     NewWindow,
     CloseWindow(WindowId),
+    /// Toggle `window` between full screen (no chrome) and normal.
+    ToggleFullscreen(WindowId),
     OpenSettings,
     /// Clear the engine error shown in the status area.
     DismissEngineError,
@@ -64,9 +78,10 @@ pub enum Command {
 
 /// What the application must do after [`dispatch`] (or [`crate::apply`])
 /// has updated the model. Most variants are forwarded to the engine's tab
-/// host; `OpenWindow`, `CloseWindow`, `FocusAddressBar`, `OpenSettings`, and
-/// `Quit` are handled by the app itself. Returning these instead of calling
-/// the engine directly keeps `dispatch` pure and testable.
+/// host; `OpenWindow`, `CloseWindow`, `FocusAddressBar`, `SetFullscreen`,
+/// `OpenSettings`, and `Quit` are handled by the app itself. Returning
+/// these instead of calling the engine directly keeps `dispatch` pure and
+/// testable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EngineAction {
     /// Create and show a new engine tab for `tab` in `window`, loading `url`.
@@ -101,6 +116,12 @@ pub enum EngineAction {
     },
     CloseWindow(WindowId),
     FocusAddressBar(WindowId),
+    /// Put the native window into or out of full screen; the model's
+    /// `Window::fullscreen` already says which.
+    SetFullscreen {
+        window: WindowId,
+        fullscreen: bool,
+    },
     OpenSettings,
     /// Start a `<binary> --profile <profile> <urls>` process.
     OpenInProfile {
@@ -114,7 +135,10 @@ pub enum EngineAction {
 pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
     match cmd {
         Command::NewTab { window, url } => new_tab(browser, *window, url.clone()),
-        Command::CloseTab(tab) => close_tab(browser, *tab),
+        Command::CloseTab(tab) => {
+            remember_closed(browser, &[*tab]);
+            close_tab(browser, *tab)
+        }
         Command::ActivateTab(tab) => activate_tab(browser, *tab),
         Command::ToggleTabSelection(tab) => {
             toggle_tab_selection(browser, *tab);
@@ -124,7 +148,10 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             select_tab_range(browser, *tab);
             Vec::new()
         }
-        Command::CloseTabs(tabs) => close_tabs(browser, tabs),
+        Command::CloseTabs(tabs) => {
+            remember_closed(browser, tabs);
+            close_tabs(browser, tabs)
+        }
         Command::MoveTabsToNewWindow(tabs) => move_tabs_to_new_window(browser, tabs),
         Command::MoveTabsToWindow { tabs, window } => move_tabs_to_window(browser, tabs, *window),
         Command::OpenTabsInProfile { tabs, profile } => {
@@ -132,6 +159,41 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
         }
         Command::NextTab(window) => step_tab(browser, *window, 1),
         Command::PreviousTab(window) => step_tab(browser, *window, -1),
+        Command::ActivateTabAt { window, index } => {
+            match browser.window(*window).and_then(|w| w.tabs.get(*index)) {
+                Some(t) => activate_tab(browser, t.id),
+                None => Vec::new(),
+            }
+        }
+        Command::ActivateLastTab(window) => {
+            match browser.window(*window).and_then(|w| w.tabs.last()) {
+                Some(t) => activate_tab(browser, t.id),
+                None => Vec::new(),
+            }
+        }
+        Command::ReopenClosedTab(window) => {
+            if browser.window(*window).is_none() {
+                return Vec::new();
+            }
+            match browser.closed_tabs.pop() {
+                Some(url) => new_tab(browser, *window, Some(url)),
+                None => Vec::new(),
+            }
+        }
+        Command::Home(tab) => {
+            let url = browser.homepage();
+            dispatch(browser, &Command::Navigate { tab: *tab, url })
+        }
+        Command::ToggleFullscreen(window) => match browser.window_mut(*window) {
+            Some(w) => {
+                w.fullscreen = !w.fullscreen;
+                vec![EngineAction::SetFullscreen {
+                    window: *window,
+                    fullscreen: w.fullscreen,
+                }]
+            }
+            None => Vec::new(),
+        },
         Command::Navigate { tab, url } => match browser.tab_mut(*tab) {
             Some(t) => {
                 t.url = url.clone();
@@ -166,7 +228,14 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             let url = browser.new_tab_url();
             open_window(browser, url)
         }
-        Command::CloseWindow(window) => close_window(browser, *window),
+        Command::CloseWindow(window) => {
+            let tabs: Vec<TabId> = browser
+                .window(*window)
+                .map(|w| w.tabs.iter().map(|t| t.id).collect())
+                .unwrap_or_default();
+            remember_closed(browser, &tabs);
+            close_window(browser, *window)
+        }
         Command::OpenSettings => vec![EngineAction::OpenSettings],
         Command::DismissEngineError => {
             browser.engine_error = None;
@@ -186,6 +255,19 @@ pub fn open_window(browser: &mut Browser, url: Url) -> Vec<EngineAction> {
         .windows
         .push(Window::with_tab(window, Tab::new(tab, url.clone())));
     vec![EngineAction::OpenWindow { window, tab, url }]
+}
+
+/// Remember the URLs of `tabs` (those that exist, in the given order) for
+/// "Reopen closed tab". Only tabs the user closes are remembered: a tab
+/// moved to another window or profile is closed here too, but not lost.
+fn remember_closed(browser: &mut Browser, tabs: &[TabId]) {
+    let urls: Vec<Url> = tabs
+        .iter()
+        .filter_map(|tab| browser.tab(*tab).map(|t| t.url.clone()))
+        .collect();
+    for url in urls {
+        browser.remember_closed(url);
+    }
 }
 
 fn pass_through(browser: &Browser, tab: TabId, action: EngineAction) -> Vec<EngineAction> {
@@ -1019,5 +1101,125 @@ mod tests {
             .is_empty()
         );
         assert_eq!(b.windows, before);
+    }
+
+    #[test]
+    fn activate_tab_at_index_and_last_tab() {
+        let (mut b, window, [a, bb, c]) = three_tabs();
+        let actions = dispatch(&mut b, &Command::ActivateTabAt { window, index: 0 });
+        assert_eq!(actions, vec![EngineAction::Hide(c), EngineAction::Show(a)]);
+        assert_eq!(b.window(window).unwrap().active, a);
+        // Past the end: nothing happens.
+        assert!(dispatch(&mut b, &Command::ActivateTabAt { window, index: 7 }).is_empty());
+        assert_eq!(b.window(window).unwrap().active, a);
+        let actions = dispatch(&mut b, &Command::ActivateLastTab(window));
+        assert_eq!(actions, vec![EngineAction::Hide(a), EngineAction::Show(c)]);
+        // The active tab again: nothing to do.
+        assert!(dispatch(&mut b, &Command::ActivateLastTab(window)).is_empty());
+        let _ = bb;
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::ActivateTabAt {
+                    window: WindowId(99),
+                    index: 0
+                }
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn closed_tabs_are_remembered_and_reopened_most_recent_first() {
+        let (mut b, window, [a, bb, c]) = three_tabs();
+        assert!(b.closed_tabs.is_empty());
+        assert!(dispatch(&mut b, &Command::ReopenClosedTab(window)).is_empty());
+        dispatch(&mut b, &Command::CloseTab(a));
+        dispatch(&mut b, &Command::CloseTabs(vec![bb]));
+        assert_eq!(
+            b.closed_tabs,
+            vec![url("https://a.example/"), url("https://b.example/")]
+        );
+        let actions = dispatch(&mut b, &Command::ReopenClosedTab(window));
+        let w = b.window(window).unwrap();
+        let reopened = w.tabs[1].id;
+        assert_eq!(w.active, reopened);
+        assert_eq!(w.tabs[1].url.as_str(), "https://b.example/");
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::Hide(c),
+                EngineAction::CreateTab {
+                    window,
+                    tab: reopened,
+                    url: url("https://b.example/"),
+                },
+            ],
+            "a reopened tab keeps the focus on the page"
+        );
+        assert_eq!(b.closed_tabs, vec![url("https://a.example/")]);
+        assert!(dispatch(&mut b, &Command::ReopenClosedTab(WindowId(99))).is_empty());
+        assert_eq!(b.closed_tabs.len(), 1, "an unknown window pops nothing");
+    }
+
+    #[test]
+    fn closing_a_window_remembers_its_tabs_but_moving_tabs_does_not() {
+        let (mut b, window, [a, bb, c]) = three_tabs();
+        dispatch(&mut b, &Command::MoveTabsToNewWindow(vec![a]));
+        assert!(b.closed_tabs.is_empty(), "a moved tab is not a closed tab");
+        let new_window = b.windows[1].id;
+        dispatch(&mut b, &Command::CloseWindow(window));
+        assert_eq!(
+            b.closed_tabs,
+            vec![url("https://b.example/"), url("https://c.example/")]
+        );
+        let _ = (bb, c);
+        let actions = dispatch(&mut b, &Command::ReopenClosedTab(new_window));
+        assert!(matches!(
+            actions.as_slice(),
+            [_, EngineAction::CreateTab { url, .. }] if url.as_str() == "https://c.example/"
+        ));
+    }
+
+    #[test]
+    fn home_navigates_the_tab_to_the_homepage() {
+        let (mut b, _, tab) = one_window();
+        b.settings.homepage = "https://home.example/".to_string();
+        let actions = dispatch(&mut b, &Command::Home(tab));
+        assert_eq!(
+            actions,
+            vec![EngineAction::Navigate {
+                tab,
+                url: url("https://home.example/")
+            }]
+        );
+        assert_eq!(b.tab(tab).unwrap().url.as_str(), "https://home.example/");
+        assert_eq!(b.tab(tab).unwrap().load, LoadState::Loading);
+        assert!(dispatch(&mut b, &Command::Home(TabId(99))).is_empty());
+    }
+
+    #[test]
+    fn toggle_fullscreen_flips_the_window_and_tells_the_app() {
+        let (mut b, window, _) = one_window();
+        assert!(!b.window(window).unwrap().fullscreen);
+        let actions = dispatch(&mut b, &Command::ToggleFullscreen(window));
+        assert_eq!(
+            actions,
+            vec![EngineAction::SetFullscreen {
+                window,
+                fullscreen: true
+            }]
+        );
+        assert!(b.window(window).unwrap().fullscreen);
+        let actions = dispatch(&mut b, &Command::ToggleFullscreen(window));
+        assert_eq!(
+            actions,
+            vec![EngineAction::SetFullscreen {
+                window,
+                fullscreen: false
+            }]
+        );
+        assert!(!b.window(window).unwrap().fullscreen);
+        assert!(dispatch(&mut b, &Command::ToggleFullscreen(WindowId(99))).is_empty());
     }
 }

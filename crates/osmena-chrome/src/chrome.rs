@@ -23,6 +23,12 @@ const TAB_HEIGHT: f32 = 32.0;
 const TAB_PADDING_X: f32 = 12.0;
 const TAB_CORNER: u8 = 8;
 const CLOSE_SIZE: f32 = 18.0;
+/// The "+" and "☰" buttons on the strip.
+const MENU_WIDTH: f32 = 28.0;
+/// One window control (minimize, maximize, close) on a frameless window.
+const CONTROL_WIDTH: f32 = 40.0;
+/// Room for macOS's traffic lights at the left of a frameless strip.
+const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
 
 /// The shades the chrome paints with, all derived from the profile's
 /// [`ChromeColor`]: the tab strip is the swatch itself, tabs are veils of
@@ -103,6 +109,9 @@ pub struct ChromeState {
     /// Set when the user asks for a menu; the window shows it as a native
     /// popup (`native_menu`) once the frame is painted.
     menu_request: Option<MenuRequest>,
+    /// Set when the user used the strip as a title bar; the window acts
+    /// on it once the frame is painted.
+    window_request: Option<WindowRequest>,
 }
 
 impl ChromeState {
@@ -114,6 +123,11 @@ impl ChromeState {
     /// The menu the user asked for since the last call, if any.
     pub fn take_menu_request(&mut self) -> Option<MenuRequest> {
         self.menu_request.take()
+    }
+
+    /// What the user asked of the native window since the last call.
+    pub fn take_window_request(&mut self) -> Option<WindowRequest> {
+        self.window_request.take()
     }
 }
 
@@ -155,6 +169,28 @@ pub struct ChromeContext<'a> {
     pub engine: &'a EngineInfo,
     /// The browser-wide engine error to show in the status area, if any.
     pub engine_error: Option<&'a str>,
+    /// The window has no system title bar, so the tab strip stands in for
+    /// it: its empty space drags the window and, except on macOS, it ends
+    /// in the minimize, maximize, and close controls.
+    pub frameless: bool,
+    /// The window is maximized (the maximize control shows "restore").
+    pub maximized: bool,
+}
+
+/// Something the chrome asks of the native window, recorded while drawing
+/// and taken by the window after the frame (see
+/// [`ChromeState::take_window_request`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WindowRequest {
+    /// Start moving the window with the pointer (the title bar drag).
+    Drag,
+    Minimize,
+    /// Maximize, or restore if already maximized.
+    ToggleMaximize,
+    /// Show the system's window menu at this position (egui points).
+    SystemMenu {
+        position: Pos2,
+    },
 }
 
 /// Draw the chrome for `window` and return the commands it produced.
@@ -169,6 +205,8 @@ pub fn draw(
         color,
         engine,
         engine_error,
+        frameless,
+        maximized,
     } = *context;
     let mut commands = Vec::new();
     let active = window.active_tab();
@@ -178,6 +216,11 @@ pub fn draw(
         .retain(|tab, _| window.index_of(*tab).is_some());
     let palette = Palette::new(color, ui.visuals().dark_mode);
 
+    // Full screen shows the page alone; every shortcut still works.
+    if window.fullscreen {
+        return commands;
+    }
+
     let strip_frame = Frame::new().fill(palette.strip).inner_margin(Margin {
         left: 8,
         right: 8,
@@ -185,114 +228,185 @@ pub fn draw(
         bottom: 0,
     });
     Panel::top("tabs").frame(strip_frame).show_inside(ui, |ui| {
-        egui::ScrollArea::horizontal()
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    // How many tabs a drag in progress carries, for the overlay.
-                    let mut dragging: Option<usize> = None;
-                    for tab in &window.tabs {
-                        let is_active = tab.id == window.active;
-                        let is_selected = window.is_selected(tab.id);
-                        let favicon = favicon_texture(ui, state, tab.id, tab.favicon.as_ref())
-                            .map(|t| t.id());
-                        let title = truncate(tab.display_title(), TAB_TITLE_MAX_CHARS);
-                        let (response, close_clicked) =
-                            tab_widget(ui, &palette, is_active, is_selected, favicon, &title);
-                        if close_clicked {
-                            commands.push(Command::CloseTab(tab.id));
-                        }
-                        // A plain click activates; Ctrl (Cmd on macOS) adds
-                        // or removes; Shift extends from the active tab.
-                        let modifiers = ui.input(|i| i.modifiers);
-                        if response.clicked() {
-                            if modifiers.shift {
-                                commands.push(Command::SelectTabRange(tab.id));
-                            } else if modifiers.command {
-                                commands.push(Command::ToggleTabSelection(tab.id));
-                            } else if !is_active || window.selected.len() > 1 {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if frameless && cfg!(target_os = "macos") {
+                // The system's traffic lights sit over the strip's left end.
+                ui.add_space(TRAFFIC_LIGHTS_INSET);
+            }
+            let on_strip = |text: &str, size: f32| {
+                Button::new(RichText::new(text).color(palette.text_on_strip).size(size))
+                    .frame(false)
+                    .min_size(Vec2::new(MENU_WIDTH, TAB_HEIGHT))
+            };
+            // The strip's right end holds the menu button and, on a
+            // frameless window (except on macOS, where the system keeps
+            // its own), the window controls. The tabs scroll within what
+            // is left of them, and the gap between is the title bar's
+            // drag area.
+            let controls = frameless && !cfg!(target_os = "macos");
+            let right_width = MENU_WIDTH
+                + if controls { 3.0 * CONTROL_WIDTH } else { 0.0 }
+                + 2.0 * ui.spacing().item_spacing.x;
+            let tabs_width = (ui.available_width() - right_width).max(0.0);
+            egui::ScrollArea::horizontal()
+                .max_width(tabs_width)
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        // How many tabs a drag in progress carries, for the overlay.
+                        let mut dragging: Option<usize> = None;
+                        for tab in &window.tabs {
+                            let is_active = tab.id == window.active;
+                            let is_selected = window.is_selected(tab.id);
+                            let favicon = favicon_texture(ui, state, tab.id, tab.favicon.as_ref())
+                                .map(|t| t.id());
+                            let title = truncate(tab.display_title(), TAB_TITLE_MAX_CHARS);
+                            let (response, close_clicked) =
+                                tab_widget(ui, &palette, is_active, is_selected, favicon, &title);
+                            if close_clicked {
+                                commands.push(Command::CloseTab(tab.id));
+                            }
+                            // A plain click activates; Ctrl (Cmd on macOS) adds
+                            // or removes; Shift extends from the active tab.
+                            let modifiers = ui.input(|i| i.modifiers);
+                            if response.clicked() {
+                                if modifiers.shift {
+                                    commands.push(Command::SelectTabRange(tab.id));
+                                } else if modifiers.command {
+                                    commands.push(Command::ToggleTabSelection(tab.id));
+                                } else if !is_active || window.selected.len() > 1 {
+                                    commands.push(Command::ActivateTab(tab.id));
+                                }
+                            }
+                            if response.middle_clicked() {
+                                commands.push(Command::CloseTab(tab.id));
+                            }
+                            // The context menu and a drag act on the whole
+                            // selection when this tab is part of it; otherwise
+                            // on this tab alone, which becomes the active one.
+                            let targets = if is_selected {
+                                window.selection()
+                            } else {
+                                vec![tab.id]
+                            };
+                            if response.secondary_clicked() {
+                                if !is_selected {
+                                    commands.push(Command::ActivateTab(tab.id));
+                                }
+                                state.menu_request = Some(MenuRequest::Tab {
+                                    targets: targets.clone(),
+                                    position: response
+                                        .interact_pointer_pos()
+                                        .unwrap_or_else(|| response.rect.left_bottom()),
+                                });
+                            }
+                            if response.drag_started() && !is_selected {
                                 commands.push(Command::ActivateTab(tab.id));
                             }
-                        }
-                        if response.middle_clicked() {
-                            commands.push(Command::CloseTab(tab.id));
-                        }
-                        // The context menu and a drag act on the whole
-                        // selection when this tab is part of it; otherwise
-                        // on this tab alone, which becomes the active one.
-                        let targets = if is_selected {
-                            window.selection()
-                        } else {
-                            vec![tab.id]
-                        };
-                        if response.secondary_clicked() {
-                            if !is_selected {
-                                commands.push(Command::ActivateTab(tab.id));
+                            if response.dragged() {
+                                dragging = Some(targets.len());
                             }
-                            state.menu_request = Some(MenuRequest::Tab {
-                                targets: targets.clone(),
-                                position: response
-                                    .interact_pointer_pos()
-                                    .unwrap_or_else(|| response.rect.left_bottom()),
-                            });
+                            if response.drag_stopped()
+                                && let Some(pointer) = response.interact_pointer_pos()
+                            {
+                                state.tab_drop = Some(TabDrop {
+                                    tabs: targets,
+                                    pointer,
+                                });
+                            }
                         }
-                        if response.drag_started() && !is_selected {
-                            commands.push(Command::ActivateTab(tab.id));
-                        }
-                        if response.dragged() {
-                            dragging = Some(targets.len());
-                        }
-                        if response.drag_stopped()
-                            && let Some(pointer) = response.interact_pointer_pos()
+                        if let (Some(count), Some(pointer)) =
+                            (dragging, ui.ctx().pointer_latest_pos())
                         {
-                            state.tab_drop = Some(TabDrop {
-                                tabs: targets,
-                                pointer,
-                            });
-                        }
-                    }
-                    if let (Some(count), Some(pointer)) = (dragging, ui.ctx().pointer_latest_pos())
-                    {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                        egui::Area::new(Id::new("tab-drag-overlay"))
-                            .order(egui::Order::Tooltip)
-                            .fixed_pos(pointer + Vec2::new(12.0, 12.0))
-                            .interactable(false)
-                            .show(ui.ctx(), |ui| {
-                                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                                    ui.label(if count == 1 {
-                                        "Move 1 tab".to_string()
-                                    } else {
-                                        format!("Move {count} tabs")
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                            egui::Area::new(Id::new("tab-drag-overlay"))
+                                .order(egui::Order::Tooltip)
+                                .fixed_pos(pointer + Vec2::new(12.0, 12.0))
+                                .interactable(false)
+                                .show(ui.ctx(), |ui| {
+                                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                        ui.label(if count == 1 {
+                                            "Move 1 tab".to_string()
+                                        } else {
+                                            format!("Move {count} tabs")
+                                        });
                                     });
                                 });
+                        }
+                        ui.add_space(4.0);
+                        if ui
+                            .add(on_strip("+", 20.0))
+                            .on_hover_text(hint(keymap, CommandKind::NewTab, "New tab"))
+                            .clicked()
+                        {
+                            commands.push(Command::NewTab {
+                                window: window.id,
+                                url: None,
                             });
-                    }
-                    ui.add_space(4.0);
-                    let on_strip = |text: &str, size: f32| {
-                        Button::new(RichText::new(text).color(palette.text_on_strip).size(size))
-                            .frame(false)
-                            .min_size(Vec2::new(28.0, TAB_HEIGHT))
-                    };
-                    if ui
-                        .add(on_strip("+", 20.0))
-                        .on_hover_text(hint(keymap, CommandKind::NewTab, "New tab"))
+                        }
+                    });
+                });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if controls {
+                    if control_button(ui, &palette, ControlGlyph::Close)
+                        .on_hover_text(hint(keymap, CommandKind::CloseWindow, "Close window"))
                         .clicked()
                     {
-                        commands.push(Command::NewTab {
-                            window: window.id,
-                            url: None,
+                        commands.push(Command::CloseWindow(window.id));
+                    }
+                    let (glyph, label) = if maximized {
+                        (ControlGlyph::Restore, "Restore")
+                    } else {
+                        (ControlGlyph::Maximize, "Maximize")
+                    };
+                    if control_button(ui, &palette, glyph)
+                        .on_hover_text(label)
+                        .clicked()
+                    {
+                        state.window_request = Some(WindowRequest::ToggleMaximize);
+                    }
+                    if control_button(ui, &palette, ControlGlyph::Minimize)
+                        .on_hover_text("Minimize")
+                        .clicked()
+                    {
+                        state.window_request = Some(WindowRequest::Minimize);
+                    }
+                }
+                let menu = ui.add(on_strip("☰", 16.0)).on_hover_text("Menu");
+                if menu.clicked() {
+                    state.menu_request = Some(MenuRequest::Window {
+                        position: menu.rect.left_bottom(),
+                    });
+                }
+                // Whatever is left between the tabs and the buttons moves
+                // the window, as a title bar would.
+                let sense = if frameless {
+                    Sense::click_and_drag()
+                } else {
+                    Sense::hover()
+                };
+                let (rect, response) = ui.allocate_exact_size(
+                    Vec2::new(ui.available_width().max(0.0), TAB_HEIGHT),
+                    sense,
+                );
+                if frameless {
+                    if response.double_clicked() {
+                        state.window_request = Some(WindowRequest::ToggleMaximize);
+                    } else if response.drag_started_by(egui::PointerButton::Primary) {
+                        state.window_request = Some(WindowRequest::Drag);
+                    } else if response.secondary_clicked() {
+                        state.window_request = Some(WindowRequest::SystemMenu {
+                            position: response
+                                .interact_pointer_pos()
+                                .unwrap_or_else(|| rect.left_bottom()),
                         });
                     }
-                    let menu = ui.add(on_strip("☰", 16.0)).on_hover_text("Menu");
-                    if menu.clicked() {
-                        state.menu_request = Some(MenuRequest::Window {
-                            position: menu.rect.left_bottom(),
-                        });
-                    }
-                });
+                }
             });
+        });
     });
 
     let toolbar_frame = Frame::new()
@@ -522,6 +636,106 @@ fn tab_widget(
     (response, close.clicked())
 }
 
+/// The glyph of a window control, drawn as lines so it never depends on
+/// a font having the symbol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ControlGlyph {
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+}
+
+/// One window control at the strip's right end: a flat button that fills
+/// on hover (red for close, as the system's does) with its glyph drawn as
+/// one-pixel strokes.
+fn control_button(ui: &mut Ui, palette: &Palette, glyph: ControlGlyph) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(CONTROL_WIDTH, TAB_HEIGHT), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let active = response.hovered() || response.is_pointer_button_down_on();
+        let (fill, ink) = match (active, glyph) {
+            (true, ControlGlyph::Close) => (Color32::from_rgb(196, 43, 28), Color32::WHITE),
+            (true, _) => (palette.tab_hover, palette.text_on_strip),
+            (false, _) => (Color32::TRANSPARENT, palette.text_on_strip),
+        };
+        let painter = ui.painter();
+        painter.rect_filled(rect, 0.0, fill);
+        let stroke = Stroke::new(1.0_f32, ink);
+        let c = rect.center();
+        let half = 5.0;
+        match glyph {
+            ControlGlyph::Minimize => {
+                painter.line_segment(
+                    [Pos2::new(c.x - half, c.y), Pos2::new(c.x + half, c.y)],
+                    stroke,
+                );
+            }
+            ControlGlyph::Maximize => {
+                painter.rect_stroke(
+                    Rect::from_center_size(c, Vec2::splat(2.0 * half)),
+                    0.0,
+                    stroke,
+                    StrokeKind::Inside,
+                );
+            }
+            ControlGlyph::Restore => {
+                let front = Rect::from_min_size(
+                    Pos2::new(c.x - half, c.y - half + 3.0),
+                    Vec2::splat(2.0 * half - 3.0),
+                );
+                // The back window peeks out above and to the right.
+                painter.line_segment(
+                    [
+                        Pos2::new(front.min.x + 3.0, front.min.y),
+                        Pos2::new(front.min.x + 3.0, front.min.y - 3.0),
+                    ],
+                    stroke,
+                );
+                painter.line_segment(
+                    [
+                        Pos2::new(front.min.x + 3.0, front.min.y - 3.0),
+                        Pos2::new(front.max.x + 3.0, front.min.y - 3.0),
+                    ],
+                    stroke,
+                );
+                painter.line_segment(
+                    [
+                        Pos2::new(front.max.x + 3.0, front.min.y - 3.0),
+                        Pos2::new(front.max.x + 3.0, front.max.y - 3.0),
+                    ],
+                    stroke,
+                );
+                painter.line_segment(
+                    [
+                        Pos2::new(front.max.x + 3.0, front.max.y - 3.0),
+                        Pos2::new(front.max.x, front.max.y - 3.0),
+                    ],
+                    stroke,
+                );
+                painter.rect_stroke(front, 0.0, stroke, StrokeKind::Inside);
+            }
+            ControlGlyph::Close => {
+                painter.line_segment(
+                    [
+                        Pos2::new(c.x - half, c.y - half),
+                        Pos2::new(c.x + half, c.y + half),
+                    ],
+                    stroke,
+                );
+                painter.line_segment(
+                    [
+                        Pos2::new(c.x - half, c.y + half),
+                        Pos2::new(c.x + half, c.y - half),
+                    ],
+                    stroke,
+                );
+            }
+        }
+    }
+    response
+}
+
 /// Replace the page area with an error panel. Returns true if the user
 /// asked to reload.
 pub fn draw_crash_panel(ui: &mut Ui, rect: Rect, reason: &str) -> bool {
@@ -689,8 +903,9 @@ fn hint(keymap: &Keymap, kind: CommandKind, label: &str) -> String {
 }
 
 /// A readable name for a chord: modifiers in Ctrl, Alt, Shift, Cmd order,
-/// then the key.
-fn describe_chord(chord: KeyChord) -> String {
+/// then the key, like "Ctrl+Shift+]" (the stored form is
+/// `KeyChord`'s `Display`, which names the key code instead).
+pub fn describe_chord(chord: KeyChord) -> String {
     use keyboard_types::Modifiers;
     let mut parts: Vec<String> = Vec::new();
     if chord.modifiers.contains(Modifiers::CONTROL) {
@@ -734,13 +949,32 @@ fn key_name(code: Code) -> String {
         Code::ArrowUp => "Up",
         Code::ArrowDown => "Down",
         Code::Escape => "Esc",
+        Code::PageUp => "PgUp",
+        Code::PageDown => "PgDn",
+        Code::Backspace => "Backspace",
+        Code::Delete => "Del",
+        Code::Insert => "Ins",
+        Code::Space => "Space",
+        Code::Enter => "Enter",
+        Code::Minus => "-",
+        Code::Equal => "=",
+        Code::Semicolon => ";",
+        Code::Quote => "'",
+        Code::Backquote => "`",
+        Code::Backslash => "\\",
+        Code::Slash => "/",
         other => {
             let debug = format!("{other:?}");
             return debug
                 .strip_prefix("Key")
                 .or_else(|| debug.strip_prefix("Digit"))
-                .unwrap_or(&debug)
-                .to_string();
+                .map(str::to_string)
+                .or_else(|| {
+                    debug
+                        .strip_prefix("Numpad")
+                        .map(|rest| format!("Num {rest}"))
+                })
+                .unwrap_or(debug);
         }
     };
     name.to_string()
@@ -913,6 +1147,18 @@ mod tests {
         assert_eq!(
             describe_chord(KeyChord::new(Modifiers::empty(), Code::F5)),
             "F5"
+        );
+        assert_eq!(
+            describe_chord(KeyChord::new(Modifiers::CONTROL, Code::PageDown)),
+            "Ctrl+PgDn"
+        );
+        assert_eq!(
+            describe_chord(KeyChord::new(Modifiers::ALT, Code::Home)),
+            "Alt+Home"
+        );
+        assert_eq!(
+            describe_chord(KeyChord::new(Modifiers::empty(), Code::Numpad5)),
+            "Num 5"
         );
     }
 }

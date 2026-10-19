@@ -11,6 +11,7 @@ use egui::Rect;
 use keyboard_types::{Code, Modifiers};
 use osmena_core::{CommandKind, Keymap, TabId};
 use winit::event::MouseButton;
+use winit::window::ResizeDirection;
 
 use crate::input::{self, KeyRoute};
 
@@ -225,6 +226,69 @@ pub fn content_pixels(rect: Rect, pixels_per_point: f32) -> (f32, PhysicalSize<u
         (bottom - top).max(1.0) as u32,
     );
     (top, size)
+}
+
+/// Which edge of a frameless window the pointer at `(x, y)` (physical
+/// pixels from the window's top-left) is on, within `border` pixels of
+/// the edge; `None` inside. The corners take precedence where two edges
+/// meet. A maximized or full-screen window has no edges to drag; the
+/// caller checks that.
+pub fn resize_edge(
+    x: f32,
+    y: f32,
+    size: PhysicalSize<u32>,
+    border: f32,
+) -> Option<ResizeDirection> {
+    let width = size.width as f32;
+    let height = size.height as f32;
+    if x < 0.0 || y < 0.0 || x >= width || y >= height {
+        return None;
+    }
+    let west = x < border;
+    let east = x >= width - border;
+    let north = y < border;
+    let south = y >= height - border;
+    match (north, south, west, east) {
+        (true, _, true, _) => Some(ResizeDirection::NorthWest),
+        (true, _, _, true) => Some(ResizeDirection::NorthEast),
+        (_, true, true, _) => Some(ResizeDirection::SouthWest),
+        (_, true, _, true) => Some(ResizeDirection::SouthEast),
+        (true, _, _, _) => Some(ResizeDirection::North),
+        (_, true, _, _) => Some(ResizeDirection::South),
+        (_, _, true, _) => Some(ResizeDirection::West),
+        (_, _, _, true) => Some(ResizeDirection::East),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+
+    const SIZE: PhysicalSize<u32> = PhysicalSize::new(800, 600);
+
+    #[test]
+    fn edges_and_corners_within_the_border() {
+        let edge = |x, y| resize_edge(x, y, SIZE, 6.0);
+        assert_eq!(edge(0.0, 0.0), Some(ResizeDirection::NorthWest));
+        assert_eq!(edge(799.0, 5.9), Some(ResizeDirection::NorthEast));
+        assert_eq!(edge(2.0, 599.0), Some(ResizeDirection::SouthWest));
+        assert_eq!(edge(795.0, 595.0), Some(ResizeDirection::SouthEast));
+        assert_eq!(edge(400.0, 3.0), Some(ResizeDirection::North));
+        assert_eq!(edge(400.0, 594.0), Some(ResizeDirection::South));
+        assert_eq!(edge(1.0, 300.0), Some(ResizeDirection::West));
+        assert_eq!(edge(794.0, 300.0), Some(ResizeDirection::East));
+    }
+
+    #[test]
+    fn the_interior_and_the_outside_are_not_edges() {
+        let edge = |x, y| resize_edge(x, y, SIZE, 6.0);
+        assert_eq!(edge(6.0, 6.0), None);
+        assert_eq!(edge(400.0, 300.0), None);
+        assert_eq!(edge(793.0, 593.0), None);
+        assert_eq!(edge(-1.0, 300.0), None);
+        assert_eq!(edge(400.0, 600.0), None);
+    }
 }
 
 #[cfg(test)]

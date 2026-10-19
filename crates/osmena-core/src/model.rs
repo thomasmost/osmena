@@ -90,6 +90,8 @@ pub struct Window {
     pub tabs: Vec<Tab>,
     pub active: TabId,
     pub selected: Vec<TabId>,
+    /// The window fills the screen and shows no chrome, only the page.
+    pub fullscreen: bool,
 }
 
 impl Window {
@@ -101,6 +103,7 @@ impl Window {
             tabs: vec![tab],
             active,
             selected: vec![active],
+            fullscreen: false,
         }
     }
 
@@ -154,20 +157,35 @@ pub struct Browser {
     pub windows: Vec<Window>,
     /// Last engine-level error reported by the engine, shown in the status area.
     pub engine_error: Option<String>,
+    /// The URLs of tabs the user closed, oldest first, at most
+    /// [`Browser::MAX_CLOSED_TABS`]; "Reopen closed tab" pops the last.
+    pub closed_tabs: Vec<Url>,
     next_window_id: u64,
     next_tab_id: u64,
 }
 
 impl Browser {
+    /// How many closed tabs are remembered for reopening.
+    pub const MAX_CLOSED_TABS: usize = 32;
+
     pub fn new(profile: Profile, settings: Settings) -> Browser {
         Browser {
             profile,
             settings,
             windows: Vec::new(),
             engine_error: None,
+            closed_tabs: Vec::new(),
             next_window_id: 1,
             next_tab_id: 1,
         }
+    }
+
+    /// Remember `url` as the most recently closed tab.
+    pub(crate) fn remember_closed(&mut self, url: Url) {
+        if self.closed_tabs.len() == Self::MAX_CLOSED_TABS {
+            self.closed_tabs.remove(0);
+        }
+        self.closed_tabs.push(url);
     }
 
     pub fn window(&self, id: WindowId) -> Option<&Window> {
@@ -273,6 +291,20 @@ mod tests {
         b.settings.homepage = "not a url".to_string();
         b.settings.new_tab_url = "https://n.example/".to_string();
         assert_eq!(b.homepage().as_str(), "https://n.example/");
+    }
+
+    #[test]
+    fn closed_tabs_are_capped_dropping_the_oldest() {
+        let mut b = browser();
+        for i in 0..=Browser::MAX_CLOSED_TABS {
+            b.remember_closed(url(&format!("https://{i}.example/")));
+        }
+        assert_eq!(b.closed_tabs.len(), Browser::MAX_CLOSED_TABS);
+        assert_eq!(b.closed_tabs[0].as_str(), "https://1.example/");
+        assert_eq!(
+            b.closed_tabs.last().unwrap().as_str(),
+            format!("https://{}.example/", Browser::MAX_CLOSED_TABS)
+        );
     }
 
     #[test]

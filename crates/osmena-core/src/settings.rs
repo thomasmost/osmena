@@ -23,6 +23,10 @@ pub struct Settings {
     /// The colour of this profile's chrome (tab strip, toolbar tint), one of
     /// a few swatches so windows of different profiles tell apart at a glance.
     pub chrome_color: ChromeColor,
+    /// Give browser windows the operating system's title bar and borders.
+    /// Off by default: the tab strip is then the title bar, as in Chromium,
+    /// with the window controls at its right end.
+    pub system_title_bar: bool,
 }
 
 impl Default for Settings {
@@ -32,6 +36,7 @@ impl Default for Settings {
             new_tab_url: "about:blank".to_string(),
             restore_windows_on_launch: false,
             chrome_color: ChromeColor::default(),
+            system_title_bar: false,
         }
     }
 }
@@ -151,24 +156,30 @@ impl Settings {
         }
     }
 
-    /// Write to `path`, creating parent directories as needed. The text goes
-    /// to a sibling `<path>.tmp` first, is synced to disk, and is then renamed
-    /// over `path`, so a crash mid-write leaves the previous file intact rather
-    /// than a truncated one. The temporary file is removed if any step fails.
+    /// Write to `path` atomically (see [`write_atomically`]), creating
+    /// parent directories as needed.
     pub fn save(&self, path: &Path) -> Result<(), SettingsError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let text = self.to_toml()?;
-        let tmp = temp_path(path);
-        let result =
-            write_and_sync(&tmp, text.as_bytes()).and_then(|()| std::fs::rename(&tmp, path));
-        if result.is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-        result?;
+        write_atomically(path, &text)?;
         Ok(())
     }
+}
+
+/// Write `text` to `path`, creating parent directories as needed. The text
+/// goes to a sibling `<path>.tmp` first, is synced to disk, and is then
+/// renamed over `path`, so a crash mid-write leaves the previous file intact
+/// rather than a truncated one. The temporary file is removed if any step
+/// fails.
+pub(crate) fn write_atomically(path: &Path, text: &str) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = temp_path(path);
+    let result = write_and_sync(&tmp, text.as_bytes()).and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// The sibling temporary path used while saving: `<path>.tmp`, in the same
@@ -197,9 +208,11 @@ mod tests {
             new_tab_url: "https://b.example/".to_string(),
             restore_windows_on_launch: true,
             chrome_color: ChromeColor::Plum,
+            system_title_bar: true,
         };
         let text = s.to_toml().unwrap();
         assert!(text.contains("chrome_color = \"plum\""), "{text}");
+        assert!(text.contains("system_title_bar = true"), "{text}");
         assert_eq!(Settings::parse(&text).unwrap(), s);
     }
 
@@ -228,7 +241,9 @@ mod tests {
 
     #[test]
     fn empty_file_is_all_defaults() {
-        assert_eq!(Settings::parse("").unwrap(), Settings::default());
+        let s = Settings::parse("").unwrap();
+        assert_eq!(s, Settings::default());
+        assert!(!s.system_title_bar, "windows are frameless by default");
     }
 
     #[test]

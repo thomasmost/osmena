@@ -77,6 +77,47 @@ The engine contract, in `osmena-engine`:
   engine paints into memory). The shell draws either under the toolbar.
 - `Surface`: make current, resize, the glow handle, begin frame, present.
 
+## What the user gets
+
+- **A frameless window.** Browser windows open without the system title
+  bar: the tab strip is the title bar (drag its empty space to move the
+  window, double-click it to maximize, right-click it on Windows for the
+  system menu) and, except on macOS, ends in minimize, maximize, and close
+  controls; the edges still resize. On macOS the title bar turns
+  transparent and the strip leaves room for the traffic lights. The
+  setting "Use the system title bar and borders" (`system_title_bar` in
+  `settings.toml`) restores the system frame; on macOS it applies to
+  windows opened afterwards.
+- **Chromium's shortcuts**, with Cmd for Ctrl on macOS: tabs (`Ctrl+T`,
+  `Ctrl+W`/`Ctrl+F4`, `Ctrl+Shift+T` reopens the last closed, `Ctrl+Tab`
+  and `Ctrl+PgDn`/`Ctrl+PgUp` cycle, `Ctrl+1`–`Ctrl+8` and `Ctrl+9` jump),
+  navigation (`Alt+Left`/`Alt+Right` or `Cmd+[`/`Cmd+]`, `Ctrl+R`/`F5`,
+  `Ctrl+.` stops, `Alt+Home` or `Cmd+Shift+H` goes home), `Ctrl+L`/`Alt+D`
+  for the address bar, `Ctrl+N` and `Ctrl+Shift+W` for windows, `F11` or
+  `Ctrl+Cmd+F` for full screen (the page alone), `Ctrl+,` for settings,
+  `Ctrl+Q` to quit. Chords use physical keys, so they are the same on every
+  layout.
+- **Remappable shortcuts.** The settings window lists every action with a
+  primary and a secondary slot, like a game's controls screen: click a
+  slot, press the new chord (Esc keeps the old one, Backspace clears it,
+  right-click clears it); a chord in use moves to the action it is given
+  to, and a note says what lost it. "Reset to defaults" restores the
+  platform's bindings. The result is `keymap.toml` in the profile:
+
+  ```toml
+  [bindings]
+  new-tab = ["Ctrl+KeyT"]
+  reload = ["Ctrl+KeyR", "F5"]
+  stop = []            # unbound
+  ```
+
+  Chords are modifiers (`Ctrl`, `Alt`, `Shift`, `Meta`; `Cmd`, `Win`,
+  `Option` are accepted) and a W3C key code joined with `+`. An action left
+  out keeps its default; a chord that does not parse is a startup error,
+  like a malformed `settings.toml`.
+- **Settings** (`settings.toml`): homepage, new-tab URL, a chrome colour
+  per profile, the title bar switch, and the restore flag.
+
 ## Depending on osmena
 
 Browsers pin a revision, never a branch, so any checkout builds the same:

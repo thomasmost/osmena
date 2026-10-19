@@ -22,7 +22,7 @@ pub use brand::{Brand, EngineInfo};
 pub use command::{Command, EngineAction, dispatch};
 pub use event::{Cursor, EngineEvent, PendingTab, apply};
 pub use input::{ButtonAction, EngineInput, KeyInput, MouseButton};
-pub use keymap::{CommandKind, KeyChord, Keymap, Platform};
+pub use keymap::{ChordParseError, CommandKind, KeyChord, Keymap, KeymapError, Platform};
 pub use model::{Browser, Favicon, LoadState, Tab, TabId, Window, WindowId};
 pub use profile::{Profile, ProfileError};
 pub use settings::{ChromeColor, Settings, SettingsError};

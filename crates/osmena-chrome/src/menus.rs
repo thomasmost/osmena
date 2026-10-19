@@ -48,20 +48,25 @@ impl MenuEntry {
     }
 }
 
-/// The window menu behind the "☰" button.
-pub fn window_menu(window: &Window, keymap: &Keymap) -> Vec<MenuEntry> {
+/// The window menu behind the "☰" button. `can_reopen` says whether a
+/// closed tab is there to reopen.
+pub fn window_menu(window: &Window, keymap: &Keymap, can_reopen: bool) -> Vec<MenuEntry> {
     let tab = window.active;
+    let bound = |kind: CommandKind| MenuEntry::bound(keymap, kind, &kind.label(), window.id, tab);
+    let mut reopen = bound(CommandKind::ReopenClosedTab);
+    if let MenuEntry::Item { enabled, .. } = &mut reopen {
+        *enabled = can_reopen;
+    }
     vec![
-        MenuEntry::bound(keymap, CommandKind::NewWindow, "New window", window.id, tab),
-        MenuEntry::bound(
-            keymap,
-            CommandKind::OpenSettings,
-            "Settings",
-            window.id,
-            tab,
-        ),
+        bound(CommandKind::NewTab),
+        bound(CommandKind::NewWindow),
+        reopen,
         MenuEntry::Separator,
-        MenuEntry::bound(keymap, CommandKind::Quit, "Quit", window.id, tab),
+        bound(CommandKind::Home),
+        bound(CommandKind::ToggleFullscreen),
+        bound(CommandKind::OpenSettings),
+        MenuEntry::Separator,
+        bound(CommandKind::Quit),
     ]
 }
 
@@ -186,23 +191,55 @@ mod tests {
     fn window_menu_carries_the_keymap_chords_and_commands() {
         let w = window_with(1);
         let keymap = Keymap::defaults(Platform::Windows);
-        let entries = window_menu(&w, &keymap);
+        let entries = window_menu(&w, &keymap, true);
         assert_eq!(
             labels(&entries),
-            vec!["New window", "Settings", "-", "Quit"]
+            vec![
+                "New tab",
+                "New window",
+                "Reopen closed tab",
+                "-",
+                "Open homepage",
+                "Full screen",
+                "Settings",
+                "-",
+                "Quit"
+            ]
         );
-        let MenuEntry::Item { chord, command, .. } = &entries[0] else {
-            panic!("first entry is an item");
+        assert_eq!(enabled(&entries), vec![true; 9]);
+        let MenuEntry::Item { chord, command, .. } = &entries[1] else {
+            panic!("second entry is an item");
         };
         assert_eq!(*chord, keymap.chord_for(CommandKind::NewWindow));
         assert_eq!(*command, Command::NewWindow);
         assert!(matches!(
-            &entries[3],
+            &entries[2],
+            MenuEntry::Item {
+                command: Command::ReopenClosedTab(WindowId(1)),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &entries[5],
+            MenuEntry::Item {
+                command: Command::ToggleFullscreen(WindowId(1)),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &entries[8],
             MenuEntry::Item {
                 command: Command::Quit,
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn reopen_is_disabled_with_nothing_to_reopen() {
+        let w = window_with(1);
+        let entries = window_menu(&w, &Keymap::defaults(Platform::Windows), false);
+        assert!(!enabled(&entries)[2]);
     }
 
     #[test]
