@@ -3,6 +3,7 @@
 use url::Url;
 
 use crate::event::PendingTab;
+use crate::extension::ExtensionSource;
 use crate::model::{Browser, LoadState, Tab, TabId, Window, WindowId};
 
 /// Every user action in the browser is one of these. The chrome, the keymap,
@@ -73,6 +74,25 @@ pub enum Command {
     OpenSettings,
     /// Clear the engine error shown in the status area.
     DismissEngineError,
+    /// Open the popup of `extension`'s toolbar action over `window`
+    /// (the toolbar button or the menu entry was clicked). Nothing if
+    /// the extension is unknown, disabled, or has no popup.
+    OpenExtensionAction {
+        window: WindowId,
+        extension: String,
+    },
+    /// Put `extension`'s action in the toolbar, or take it out.
+    PinExtension {
+        extension: String,
+        pinned: bool,
+    },
+    SetExtensionEnabled {
+        extension: String,
+        enabled: bool,
+    },
+    /// Remove `extension` for good; it is unpinned too.
+    UninstallExtension(String),
+    InstallExtension(ExtensionSource),
     Quit,
 }
 
@@ -128,6 +148,20 @@ pub enum EngineAction {
         profile: String,
         urls: Vec<Url>,
     },
+    /// The settings changed (pinned extensions): persist them and redraw.
+    SaveSettings,
+    /// Open the popup of `extension`'s toolbar action for `window`'s
+    /// active tab; the window knows where its button is.
+    OpenExtensionAction {
+        window: WindowId,
+        extension: String,
+    },
+    SetExtensionEnabled {
+        extension: String,
+        enabled: bool,
+    },
+    UninstallExtension(String),
+    InstallExtension(ExtensionSource),
     Quit,
 }
 
@@ -241,7 +275,63 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             browser.engine_error = None;
             Vec::new()
         }
+        Command::OpenExtensionAction { window, extension } => {
+            let usable = browser.window(*window).is_some()
+                && browser.extension(extension).is_some_and(|e| e.has_action());
+            if usable {
+                vec![EngineAction::OpenExtensionAction {
+                    window: *window,
+                    extension: extension.clone(),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+        Command::PinExtension { extension, pinned } => {
+            if set_pinned(browser, extension, *pinned) {
+                vec![EngineAction::SaveSettings]
+            } else {
+                Vec::new()
+            }
+        }
+        Command::SetExtensionEnabled { extension, enabled } => {
+            if browser.extension(extension).is_some() {
+                vec![EngineAction::SetExtensionEnabled {
+                    extension: extension.clone(),
+                    enabled: *enabled,
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+        Command::UninstallExtension(extension) => {
+            if browser.extension(extension).is_none() {
+                return Vec::new();
+            }
+            let mut actions = vec![EngineAction::UninstallExtension(extension.clone())];
+            if set_pinned(browser, extension, false) {
+                actions.push(EngineAction::SaveSettings);
+            }
+            actions
+        }
+        Command::InstallExtension(source) => vec![EngineAction::InstallExtension(source.clone())],
         Command::Quit => vec![EngineAction::Quit],
+    }
+}
+
+/// Pin or unpin `extension` in the settings. Returns true if the settings
+/// changed.
+fn set_pinned(browser: &mut Browser, extension: &str, pinned: bool) -> bool {
+    let list = &mut browser.settings.pinned_extensions;
+    let was = list.iter().any(|p| p == extension);
+    if pinned && !was {
+        list.push(extension.to_string());
+        true
+    } else if !pinned && was {
+        list.retain(|p| p != extension);
+        true
+    } else {
+        false
     }
 }
 
@@ -1221,5 +1311,123 @@ mod tests {
         );
         assert!(!b.window(window).unwrap().fullscreen);
         assert!(dispatch(&mut b, &Command::ToggleFullscreen(WindowId(99))).is_empty());
+    }
+
+    fn installed(b: &mut Browser, id: &str, enabled: bool, popup: bool) {
+        b.extensions.push(crate::extension::Extension {
+            id: id.to_string(),
+            name: id.to_uppercase(),
+            version: "1".to_string(),
+            description: String::new(),
+            enabled,
+            icon: None,
+            action_title: popup.then(|| "Act".to_string()),
+        });
+    }
+
+    #[test]
+    fn open_extension_action_needs_a_window_and_an_enabled_extension_with_a_popup() {
+        let (mut b, window, _) = one_window();
+        installed(&mut b, "a", true, true);
+        installed(&mut b, "off", false, true);
+        installed(&mut b, "nopopup", true, false);
+        let open = |b: &mut Browser, w, id: &str| {
+            dispatch(
+                b,
+                &Command::OpenExtensionAction {
+                    window: w,
+                    extension: id.to_string(),
+                },
+            )
+        };
+        assert_eq!(
+            open(&mut b, window, "a"),
+            vec![EngineAction::OpenExtensionAction {
+                window,
+                extension: "a".to_string()
+            }]
+        );
+        assert!(open(&mut b, window, "off").is_empty());
+        assert!(open(&mut b, window, "nopopup").is_empty());
+        assert!(open(&mut b, window, "missing").is_empty());
+        assert!(open(&mut b, WindowId(99), "a").is_empty());
+    }
+
+    #[test]
+    fn pinning_edits_the_settings_in_order_and_reports_only_real_changes() {
+        let (mut b, _, _) = one_window();
+        let pin = |b: &mut Browser, id: &str, pinned: bool| {
+            dispatch(
+                b,
+                &Command::PinExtension {
+                    extension: id.to_string(),
+                    pinned,
+                },
+            )
+        };
+        assert_eq!(pin(&mut b, "a", true), vec![EngineAction::SaveSettings]);
+        assert_eq!(pin(&mut b, "b", true), vec![EngineAction::SaveSettings]);
+        assert!(pin(&mut b, "a", true).is_empty(), "already pinned");
+        assert_eq!(b.settings.pinned_extensions, vec!["a", "b"]);
+        assert_eq!(pin(&mut b, "a", false), vec![EngineAction::SaveSettings]);
+        assert!(pin(&mut b, "a", false).is_empty(), "already unpinned");
+        assert_eq!(b.settings.pinned_extensions, vec!["b"]);
+    }
+
+    #[test]
+    fn enabling_and_installing_go_to_the_engine() {
+        let (mut b, _, _) = one_window();
+        installed(&mut b, "a", true, true);
+        assert_eq!(
+            dispatch(
+                &mut b,
+                &Command::SetExtensionEnabled {
+                    extension: "a".to_string(),
+                    enabled: false
+                }
+            ),
+            vec![EngineAction::SetExtensionEnabled {
+                extension: "a".to_string(),
+                enabled: false
+            }]
+        );
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::SetExtensionEnabled {
+                    extension: "zz".to_string(),
+                    enabled: false
+                }
+            )
+            .is_empty()
+        );
+        let source = ExtensionSource::Store {
+            id: "abc".to_string(),
+        };
+        assert_eq!(
+            dispatch(&mut b, &Command::InstallExtension(source.clone())),
+            vec![EngineAction::InstallExtension(source)]
+        );
+    }
+
+    #[test]
+    fn uninstalling_unpins_too() {
+        let (mut b, _, _) = one_window();
+        installed(&mut b, "a", true, true);
+        installed(&mut b, "b", true, true);
+        b.settings.pinned_extensions = vec!["a".to_string()];
+        assert_eq!(
+            dispatch(&mut b, &Command::UninstallExtension("a".to_string())),
+            vec![
+                EngineAction::UninstallExtension("a".to_string()),
+                EngineAction::SaveSettings
+            ]
+        );
+        assert!(b.settings.pinned_extensions.is_empty());
+        assert_eq!(
+            dispatch(&mut b, &Command::UninstallExtension("b".to_string())),
+            vec![EngineAction::UninstallExtension("b".to_string())]
+        );
+        assert!(dispatch(&mut b, &Command::UninstallExtension("zz".to_string())).is_empty());
     }
 }

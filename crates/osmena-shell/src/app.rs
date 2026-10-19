@@ -291,6 +291,21 @@ impl<E: Engine> App<E> {
                     w.set_fullscreen(fullscreen);
                 }
             }
+            EngineAction::SaveSettings => {
+                self.save_settings();
+                self.redraw_all();
+            }
+            EngineAction::OpenExtensionAction { window, extension } => {
+                let tab = self.browser.window(window).map(|w| w.active);
+                if let (Some(tab), Some(w)) = (tab, self.window_for_core_id(window)) {
+                    w.open_extension_action(tab, &extension);
+                }
+            }
+            EngineAction::SetExtensionEnabled { extension, enabled } => {
+                engine.set_extension_enabled(&extension, enabled);
+            }
+            EngineAction::UninstallExtension(extension) => engine.uninstall_extension(&extension),
+            EngineAction::InstallExtension(source) => engine.install_extension(source),
             EngineAction::OpenSettings => match &self.settings_window {
                 Some(sw) => sw.focus(),
                 None => match SettingsWindow::open(event_loop, engine, self.brand) {
@@ -334,10 +349,9 @@ impl<E: Engine> App<E> {
             match &event {
                 EngineEvent::EngineError(message) => {
                     log::error!("engine error: {message}");
-                    for w in self.windows.values() {
-                        w.request_redraw();
-                    }
+                    self.redraw_all();
                 }
+                EngineEvent::ExtensionsChanged(_) => self.redraw_all(),
                 EngineEvent::CursorChanged { tab, cursor } => {
                     let browser = &self.browser;
                     if let Some(w) = self.windows.values_mut().find(|w| w.hosts_tab(*tab)) {
@@ -359,6 +373,16 @@ impl<E: Engine> App<E> {
             if self.exiting {
                 return;
             }
+        }
+    }
+
+    /// Every window shows something that changed outside it.
+    fn redraw_all(&self) {
+        for w in self.windows.values() {
+            w.request_redraw();
+        }
+        if let Some(sw) = &self.settings_window {
+            sw.request_redraw();
         }
     }
 
@@ -429,7 +453,9 @@ fn tab_of(event: &EngineEvent) -> Option<TabId> {
         | EngineEvent::TabClosed(tab) => Some(*tab),
         EngineEvent::NewTabRequested { opener, .. } => Some(*opener),
         // The cursor is applied directly; no redraw needed.
-        EngineEvent::CursorChanged { .. } | EngineEvent::EngineError(_) => None,
+        EngineEvent::CursorChanged { .. }
+        | EngineEvent::EngineError(_)
+        | EngineEvent::ExtensionsChanged(_) => None,
     }
 }
 
@@ -486,7 +512,15 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
             .is_some_and(|sw| sw.winit_id() == window_id)
         {
             let sw = self.settings_window.as_mut().expect("checked above");
-            match sw.handle_event(&event, &mut self.browser.settings, &mut self.keymap) {
+            let outcome = sw.handle_event(
+                &event,
+                &mut self.browser.settings,
+                &mut self.keymap,
+                &self.browser.extensions,
+                self.engine_info.extensions.as_ref(),
+            );
+            let commands = sw.take_commands();
+            match outcome {
                 SettingsOutcome::Nothing => {}
                 SettingsOutcome::Changed { settings, keymap } => {
                     if settings {
@@ -507,6 +541,7 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
                 }
                 SettingsOutcome::Shortcut(kind) => self.settings_shortcut(kind, event_loop),
             }
+            self.run_commands(commands, event_loop);
         } else if let Some(window) = self.windows.get_mut(&window_id) {
             let commands = window.handle_event(&self.browser, &self.keymap, &event);
             let drop = window.take_tab_drop();

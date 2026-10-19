@@ -1,14 +1,16 @@
 //! Native popup menus (`muda`) built from a [`MenuEntry`] list. The menu is
 //! shown synchronously for a winit window; the clicked entry comes back as
-//! its `Command`. Only the browser's two menus (the "☰" window menu and the
-//! tab context menu) go through here; the rest of the chrome is egui.
+//! its `Command`. Only the browser's menus (the "☰" window menu, the tab
+//! context menu, and the extensions menu) go through here; the rest of the
+//! chrome is egui.
 
 use std::collections::HashMap;
 
 use muda::accelerator::Accelerator;
 use muda::dpi::{LogicalPosition, Position};
 use muda::{
-    ContextMenu, IsMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
+    CheckMenuItem, ContextMenu, IsMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem,
+    Submenu,
 };
 use osmena_core::Command;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -103,6 +105,17 @@ fn items(
                         let _ = submenu.append(item.as_ref());
                     }
                     Box::new(submenu)
+                }
+                MenuEntry::Check {
+                    label,
+                    enabled,
+                    checked,
+                    command,
+                } => {
+                    let id = MenuId::new(format!("osmena-menu-{}", *next_id));
+                    *next_id += 1;
+                    commands.insert(id.clone(), command.clone());
+                    Box::new(CheckMenuItem::with_id(id, label, *enabled, *checked, None))
                 }
                 MenuEntry::Separator => Box::new(PredefinedMenuItem::separator()),
             }

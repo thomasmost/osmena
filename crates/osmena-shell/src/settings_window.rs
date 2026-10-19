@@ -9,7 +9,10 @@ use osmena_chrome::chrome::{self, describe_chord, location_input_to_url};
 use osmena_chrome::input::{self, KeyRoute};
 use osmena_chrome::keyboard_types::{Code, Modifiers};
 use osmena_chrome::{icon, keyutils};
-use osmena_core::{Brand, ChromeColor, CommandKind, KeyChord, Keymap, Platform, Settings};
+use osmena_core::{
+    Brand, ChromeColor, Command, CommandKind, Extension, ExtensionSource, ExtensionSupport,
+    KeyChord, Keymap, Platform, Settings,
+};
 use osmena_engine::{Engine, EngineError, PhysicalSize, Surface};
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, WindowEvent};
@@ -50,6 +53,13 @@ pub struct SettingsWindow<S: Surface> {
     /// What the last rebinding did besides binding, shown under the table
     /// until the next one.
     notice: Option<String>,
+    /// The extensions section's "install from the store" field.
+    store_input: String,
+    /// What the store field's last attempt said, if it failed.
+    store_notice: Option<String>,
+    /// Commands the extensions section issued, taken by the app after
+    /// each event.
+    commands: Vec<Command>,
     egui: EguiGlow,
     surface: S,
     // Dropped last, after the GL state that depends on it.
@@ -109,10 +119,22 @@ impl<S: Surface> SettingsWindow<S> {
             modifiers: ModifiersState::default(),
             capture: None,
             notice: None,
+            store_input: String::new(),
+            store_notice: None,
+            commands: Vec::new(),
             egui,
             surface,
             window,
         })
+    }
+
+    pub fn request_redraw(&self) {
+        self.window.request_redraw();
+    }
+
+    /// The commands the extensions section issued since the last call.
+    pub fn take_commands(&mut self) -> Vec<Command> {
+        std::mem::take(&mut self.commands)
     }
 
     pub fn winit_id(&self) -> winit::window::WindowId {
@@ -128,11 +150,15 @@ impl<S: Surface> SettingsWindow<S> {
         self.dirty
     }
 
+    /// Handle one winit event. `extensions` and `support` feed the
+    /// extensions section, shown only when the engine has extensions.
     pub fn handle_event(
         &mut self,
         event: &WindowEvent,
         settings: &mut Settings,
         keymap: &mut Keymap,
+        extensions: &[Extension],
+        support: Option<&ExtensionSupport>,
     ) -> SettingsOutcome {
         match event {
             WindowEvent::CloseRequested => {
@@ -150,7 +176,7 @@ impl<S: Surface> SettingsWindow<S> {
                 self.window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
-                let activity = self.frame(settings, keymap);
+                let activity = self.frame(settings, keymap, extensions, support);
                 let (dirty, outcome) = after_frame(self.dirty, activity);
                 self.dirty = dirty;
                 return outcome;
@@ -237,17 +263,40 @@ impl<S: Surface> SettingsWindow<S> {
         }
     }
 
-    fn frame(&mut self, settings: &mut Settings, keymap: &mut Keymap) -> FormActivity {
+    fn frame(
+        &mut self,
+        settings: &mut Settings,
+        keymap: &mut Keymap,
+        extensions: &[Extension],
+        support: Option<&ExtensionSupport>,
+    ) -> FormActivity {
         let mut activity = FormActivity::default();
         let Self {
             egui,
             window,
             capture,
             notice,
+            store_input,
+            store_notice,
+            commands,
             ..
         } = self;
+        let mut extensions_section = support.map(|support| ExtensionsSection {
+            extensions,
+            support,
+            store_input,
+            store_notice,
+            commands,
+        });
         egui.run(window, |ui| {
-            activity = draw_settings(ui, settings, keymap, capture, notice);
+            activity = draw_settings(
+                ui,
+                settings,
+                keymap,
+                capture,
+                notice,
+                extensions_section.as_mut(),
+            );
         });
         self.surface.begin_frame();
         // egui_glow paints over whatever the framebuffer holds, so clear it
@@ -383,6 +432,15 @@ fn url_hint(ui: &mut egui::Ui, text: &str, focused: bool) {
     }
 }
 
+/// What the extensions section draws from and writes to.
+struct ExtensionsSection<'a> {
+    extensions: &'a [Extension],
+    support: &'a ExtensionSupport,
+    store_input: &'a mut String,
+    store_notice: &'a mut Option<String>,
+    commands: &'a mut Vec<Command>,
+}
+
 /// The settings form, on the panel fill so the window background is never
 /// left to the framebuffer.
 fn draw_settings(
@@ -391,6 +449,7 @@ fn draw_settings(
     keymap: &mut Keymap,
     capture: &mut Option<(CommandKind, usize)>,
     notice: &mut Option<String>,
+    extensions: Option<&mut ExtensionsSection<'_>>,
 ) -> FormActivity {
     let mut activity = FormActivity::default();
     egui::CentralPanel::default().show_inside(ui, |ui| {
@@ -400,6 +459,12 @@ fn draw_settings(
                 ui.heading("General");
                 ui.add_space(8.0);
                 draw_general(ui, settings, &mut activity);
+                if let Some(section) = extensions {
+                    ui.add_space(20.0);
+                    ui.heading("Extensions");
+                    ui.add_space(8.0);
+                    draw_extensions(ui, settings, section, &mut activity);
+                }
                 ui.add_space(20.0);
                 ui.heading("Keyboard shortcuts");
                 ui.label(
@@ -508,6 +573,133 @@ fn draw_general(ui: &mut egui::Ui, settings: &mut Settings, activity: &mut FormA
             }
             ui.end_row();
         });
+}
+
+/// The installed extensions, each with its switches, and the ways to add
+/// one. Enabling, removing, and installing go to the engine as commands;
+/// pinning is a setting.
+fn draw_extensions(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    section: &mut ExtensionsSection<'_>,
+    activity: &mut FormActivity,
+) {
+    let extensions = section.extensions;
+    let support = section.support;
+    let store_input: &mut String = section.store_input;
+    let store_notice = &mut *section.store_notice;
+    let commands = &mut *section.commands;
+    if extensions.is_empty() {
+        ui.label(egui::RichText::new("No extensions installed.").weak());
+    }
+    egui::Grid::new("extensions-grid")
+        .num_columns(4)
+        .striped(true)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            for extension in extensions {
+                ui.vertical(|ui| {
+                    // A fixed column, or a long description squeezes the
+                    // name into a sliver while the switches take the rest.
+                    ui.set_min_width(240.0);
+                    ui.set_max_width(240.0);
+                    ui.label(egui::RichText::new(&extension.name).strong());
+                    let detail = if extension.description.is_empty() {
+                        format!("Version {}", extension.version)
+                    } else {
+                        format!("Version {} · {}", extension.version, extension.description)
+                    };
+                    ui.add(egui::Label::new(egui::RichText::new(detail).small().weak()).truncate())
+                        .on_hover_text(&extension.description);
+                });
+                let mut enabled = extension.enabled;
+                if ui.checkbox(&mut enabled, "Enabled").changed() {
+                    commands.push(Command::SetExtensionEnabled {
+                        extension: extension.id.clone(),
+                        enabled,
+                    });
+                }
+                let mut pinned = settings.pinned_extensions.contains(&extension.id);
+                let pin = ui
+                    .add_enabled(
+                        extension.enabled,
+                        egui::Checkbox::new(&mut pinned, "In toolbar"),
+                    )
+                    .on_disabled_hover_text("Enable the extension to pin it");
+                if pin.changed() {
+                    set_pinned(settings, &extension.id, pinned);
+                    activity.edited = true;
+                    activity.committed = true;
+                }
+                if ui.button("Remove").clicked() {
+                    commands.push(Command::UninstallExtension(extension.id.clone()));
+                }
+                ui.end_row();
+            }
+        });
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        if ui.button("Load unpacked…").clicked() {
+            commands.push(Command::InstallExtension(ExtensionSource::AskForDirectory));
+        }
+        ui.label(
+            egui::RichText::new("A directory holding an extension's manifest.")
+                .small()
+                .weak(),
+        );
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        let field = ui.add(
+            egui::TextEdit::singleline(store_input)
+                .desired_width(300.0)
+                .hint_text(format!("{} page URL or extension id", support.store_name)),
+        );
+        let submitted = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if (ui.button("Install").clicked() || submitted) && !store_input.trim().is_empty() {
+            match store_item_from_input(store_input, support) {
+                Some(id) => {
+                    commands.push(Command::InstallExtension(ExtensionSource::Store { id }));
+                    store_input.clear();
+                    *store_notice = None;
+                }
+                None => {
+                    *store_notice = Some(format!(
+                        "Not a {} page or extension id.",
+                        support.store_name
+                    ));
+                }
+            }
+        }
+    });
+    if let Some(text) = store_notice.as_deref() {
+        let color = ui.visuals().error_fg_color;
+        ui.label(egui::RichText::new(text).small().color(color));
+    }
+}
+
+/// Pin or unpin `extension` in the settings, keeping the order of the rest.
+fn set_pinned(settings: &mut Settings, extension: &str, pinned: bool) {
+    let list = &mut settings.pinned_extensions;
+    let was = list.iter().any(|p| p == extension);
+    if pinned && !was {
+        list.push(extension.to_string());
+    } else if !pinned && was {
+        list.retain(|p| p != extension);
+    }
+}
+
+/// The store item the "install" field names: the id on a store page URL,
+/// or a bare id (32 letters, as the engine's store uses).
+fn store_item_from_input(input: &str, support: &ExtensionSupport) -> Option<String> {
+    let text = input.trim();
+    if let Some(url) = location_input_to_url(text)
+        && let Some(id) = (support.store_item_id)(&url)
+    {
+        return Some(id);
+    }
+    let is_id = text.len() == 32 && text.chars().all(|c| c.is_ascii_lowercase());
+    is_id.then(|| text.to_string())
 }
 
 /// The controls table: one row per action, a primary and a secondary
@@ -788,6 +980,45 @@ mod tests {
             capture_action(Code::Backspace, Modifiers::ALT),
             CaptureAction::Bind(KeyChord::new(Modifiers::ALT, Code::Backspace))
         );
+    }
+
+    fn store_id(url: &url::Url) -> Option<String> {
+        (url.host_str() == Some("store.example"))
+            .then(|| url.path().trim_start_matches('/').to_string())
+    }
+
+    const SUPPORT: ExtensionSupport = ExtensionSupport {
+        store_name: "Test Store",
+        store_url: "https://store.example/",
+        store_item_id: store_id,
+    };
+
+    #[test]
+    fn the_store_field_takes_a_store_page_url_or_a_bare_id() {
+        assert_eq!(
+            store_item_from_input(" https://store.example/abc ", &SUPPORT).as_deref(),
+            Some("abc")
+        );
+        let id = "kgbhhnicmcdeehinjjcncccelhaomnae";
+        assert_eq!(store_item_from_input(id, &SUPPORT).as_deref(), Some(id));
+        assert_eq!(
+            store_item_from_input("https://other.example/x", &SUPPORT),
+            None
+        );
+        assert_eq!(store_item_from_input("not an id", &SUPPORT), None);
+        assert_eq!(store_item_from_input("", &SUPPORT), None);
+    }
+
+    #[test]
+    fn pinning_in_settings_keeps_order_and_is_idempotent() {
+        let mut settings = Settings::default();
+        set_pinned(&mut settings, "a", true);
+        set_pinned(&mut settings, "b", true);
+        set_pinned(&mut settings, "a", true);
+        assert_eq!(settings.pinned_extensions, vec!["a", "b"]);
+        set_pinned(&mut settings, "a", false);
+        set_pinned(&mut settings, "a", false);
+        assert_eq!(settings.pinned_extensions, vec!["b"]);
     }
 
     #[test]

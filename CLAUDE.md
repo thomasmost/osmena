@@ -5,8 +5,8 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-10-19 (frameless windows, Chromium shortcuts, the
-shortcut editor)._
+_Last updated: 2026-10-19 (extensions: the puzzle menu, pinned actions,
+the engine contract for them)._
 
 ## Architecture
 
@@ -55,6 +55,16 @@ No engine is needed; the workspace builds in under a minute.
   over the platform defaults: an action named in the file gets exactly
   the chords listed, an action left out keeps its default. The editor
   always writes every action, so a saved file is complete.
+- **Extensions are the engine's; the model only lists them.** An engine
+  that runs extensions sets `EngineInfo::extensions` (the store's name,
+  URL, and how to read an item id off a store page) and implements
+  `Engine::{install_extension, set_extension_enabled,
+  uninstall_extension}` and `TabHost::{open_extension_action,
+  close_extension_popups}`; it reports the list, after every change,
+  with `EngineEvent::ExtensionsChanged`. The chrome draws the puzzle menu
+  and the pinned actions only when `extensions` is `Some`; pinned ids
+  live in `Settings::pinned_extensions`, kept even for an extension that
+  is gone. An engine without extensions (`None`) needs none of this.
 - **The native window is asked, never driven, by the chrome.** The strip
   records a `WindowRequest` (drag, minimize, maximize, system menu) the
   way it records a `MenuRequest`; `BrowserWindow` acts on it after the
@@ -109,17 +119,23 @@ macOS and Windows runners, no engine needed) was green on every push.
 Added the same day: frameless browser windows (the tab strip as title bar,
 window controls, resize borders, a setting to restore the system frame),
 Chromium-style default shortcuts with the new commands behind them (reopen
-closed tab, tab 1–8 and last, home, full screen), and the shortcut editor
-in the settings window with `keymap.toml` persistence.
+closed tab, tab 1–8 and last, home, full screen), the shortcut editor
+in the settings window with `keymap.toml` persistence, and the extension
+UI (puzzle menu, pinned actions beside the address bar, the Extensions
+section of the settings window) over an engine contract Nautilus
+implements and Paladin leaves at its defaults.
 
-Verified: `cargo test` (165 tests), clippy with `-D warnings`, formatting;
+Verified: `cargo test` (178 tests), clippy with `-D warnings`, formatting;
 both browsers build against this revision; Nautilus on Windows launches
 frameless with the controls at the strip's right end, opens the settings
 window on `Ctrl+,`, captures a chord in the editor (New tab rebound to
-`Ctrl+Y`), writes it to `keymap.toml`, and the new chord opens a tab.
-Not verified: dragging and resizing a frameless window by hand, Aero snap,
-full screen, the macOS title bar style (nothing has run on macOS since the
-extraction), and the browsers' manual checklists beyond launch.
+`Ctrl+Y`), writes it to `keymap.toml`, and the new chord opens a tab;
+with an extension installed and pinned, its icon and the puzzle button
+appear in the toolbar and clicking the icon opens the popup under it.
+Not verified: the puzzle menu and the settings window's Extensions
+section by hand, dragging and resizing a frameless window by hand, Aero
+snap, full screen, the macOS title bar style (nothing has run on macOS
+since the extraction), and the browsers' manual checklists beyond launch.
 
 Decisions, with reasons:
 - Separate repositories, not a monorepo: Paladin's Servo build (60 git crates,
@@ -138,7 +154,8 @@ Decisions, with reasons:
 Open items, most useful first:
 1. Run both browsers' manual checklists against the current revision, with
    the frameless window first: move, resize from every edge, maximize by
-   double-click and by the control, snap, full screen and back.
+   double-click and by the control, snap, full screen and back; then
+   Nautilus's extensions checklist item.
 2. An integration test of `osmena-shell` with a fake `Engine` (no window
    system is needed for the model and routing, but the window code itself has
    no test).

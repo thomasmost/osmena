@@ -4,6 +4,7 @@
 use url::Url;
 
 use crate::command::{EngineAction, close_tab};
+use crate::extension::Extension;
 use crate::model::{Browser, Favicon, LoadState, Tab, TabId};
 
 /// Handle to an engine tab that page content created (`window.open`) and
@@ -93,6 +94,9 @@ pub enum EngineEvent {
     /// An engine-level error not tied to a tab (for example, losing the
     /// connection to the engine backend).
     EngineError(String),
+    /// The installed extensions, or something about one of them, changed:
+    /// this is the whole list as it now stands.
+    ExtensionsChanged(Vec<Extension>),
 }
 
 /// Fold an engine event into the model. Returns follow-up actions; only
@@ -165,6 +169,10 @@ pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
         EngineEvent::CursorChanged { .. } => Vec::new(),
         EngineEvent::EngineError(message) => {
             browser.engine_error = Some(message.clone());
+            Vec::new()
+        }
+        EngineEvent::ExtensionsChanged(extensions) => {
+            browser.extensions = extensions.clone();
             Vec::new()
         }
     }
@@ -373,6 +381,24 @@ mod tests {
             &EngineEvent::EngineError("lost backend".to_string()),
         );
         assert_eq!(b.engine_error.as_deref(), Some("lost backend"));
+    }
+
+    #[test]
+    fn extensions_changed_replaces_the_list() {
+        let (mut b, _, _) = one_window();
+        let ext = Extension {
+            id: "abc".to_string(),
+            name: "Abc".to_string(),
+            version: "1.0".to_string(),
+            description: String::new(),
+            enabled: true,
+            icon: None,
+            action_title: None,
+        };
+        assert!(apply(&mut b, &EngineEvent::ExtensionsChanged(vec![ext.clone()])).is_empty());
+        assert_eq!(b.extensions, vec![ext]);
+        apply(&mut b, &EngineEvent::ExtensionsChanged(Vec::new()));
+        assert!(b.extensions.is_empty());
     }
 
     #[test]

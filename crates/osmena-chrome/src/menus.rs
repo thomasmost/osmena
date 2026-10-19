@@ -2,7 +2,11 @@
 //! and the `Command` each one issues. Pure and unit-tested; `native_menu`
 //! turns an entry list into a native menu and maps the click back.
 
-use osmena_core::{Command, CommandKind, KeyChord, Keymap, TabId, Window, WindowId};
+use osmena_core::{
+    Command, CommandKind, Extension, ExtensionSource, ExtensionSupport, KeyChord, Keymap, TabId,
+    Window, WindowId,
+};
+use url::Url;
 
 /// One entry of a menu.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,6 +22,14 @@ pub enum MenuEntry {
         label: String,
         enabled: bool,
         entries: Vec<MenuEntry>,
+    },
+    /// An item with a check mark; the command is what clicking it does
+    /// (it carries the new state).
+    Check {
+        label: String,
+        enabled: bool,
+        checked: bool,
+        command: Command,
     },
     Separator,
 }
@@ -68,6 +80,88 @@ pub fn window_menu(window: &Window, keymap: &Keymap, can_reopen: bool) -> Vec<Me
         MenuEntry::Separator,
         bound(CommandKind::Quit),
     ]
+}
+
+/// The menu behind the toolbar's puzzle-piece button. Every installed
+/// extension is listed: clicking one opens its action's popup (disabled
+/// when it has none, or the extension is off). "Pin to toolbar" holds a
+/// check item per extension. Then the ways to add one: load an unpacked
+/// directory, install the extension the active tab's store page shows
+/// (`store_url` is the page the user is on), visit the store, and manage
+/// them in the settings window.
+pub fn extensions_menu(
+    window: &Window,
+    extensions: &[Extension],
+    pinned: &[String],
+    support: &ExtensionSupport,
+    active_url: &Url,
+) -> Vec<MenuEntry> {
+    let mut entries = Vec::new();
+    if extensions.is_empty() {
+        entries.push(MenuEntry::item(
+            "No extensions installed",
+            false,
+            Command::OpenSettings,
+        ));
+    }
+    for extension in extensions {
+        entries.push(MenuEntry::item(
+            extension.name.clone(),
+            extension.has_action(),
+            Command::OpenExtensionAction {
+                window: window.id,
+                extension: extension.id.clone(),
+            },
+        ));
+    }
+    entries.push(MenuEntry::Submenu {
+        label: "Pin to toolbar".to_string(),
+        enabled: !extensions.is_empty(),
+        entries: extensions
+            .iter()
+            .map(|extension| {
+                let checked = pinned.contains(&extension.id);
+                MenuEntry::Check {
+                    label: extension.name.clone(),
+                    enabled: extension.enabled,
+                    checked,
+                    command: Command::PinExtension {
+                        extension: extension.id.clone(),
+                        pinned: !checked,
+                    },
+                }
+            })
+            .collect(),
+    });
+    entries.push(MenuEntry::Separator);
+    let store_item = (support.store_item_id)(active_url);
+    entries.push(MenuEntry::item(
+        "Install the extension on this page",
+        store_item.is_some(),
+        Command::InstallExtension(ExtensionSource::Store {
+            id: store_item.unwrap_or_default(),
+        }),
+    ));
+    entries.push(MenuEntry::item(
+        format!("Visit the {}", support.store_name),
+        true,
+        Command::NewTab {
+            window: window.id,
+            url: Url::parse(support.store_url).ok(),
+        },
+    ));
+    entries.push(MenuEntry::item(
+        "Load unpacked extension…",
+        true,
+        Command::InstallExtension(ExtensionSource::AskForDirectory),
+    ));
+    entries.push(MenuEntry::Separator);
+    entries.push(MenuEntry::item(
+        "Manage extensions…",
+        true,
+        Command::OpenSettings,
+    ));
+    entries
 }
 
 /// The context menu of a tab, acting on `targets` (the selection, or the
@@ -171,7 +265,9 @@ mod tests {
         entries
             .iter()
             .map(|e| match e {
-                MenuEntry::Item { label, .. } | MenuEntry::Submenu { label, .. } => label.clone(),
+                MenuEntry::Item { label, .. }
+                | MenuEntry::Submenu { label, .. }
+                | MenuEntry::Check { label, .. } => label.clone(),
                 MenuEntry::Separator => "-".to_string(),
             })
             .collect()
@@ -181,10 +277,125 @@ mod tests {
         entries
             .iter()
             .map(|e| match e {
-                MenuEntry::Item { enabled, .. } | MenuEntry::Submenu { enabled, .. } => *enabled,
+                MenuEntry::Item { enabled, .. }
+                | MenuEntry::Submenu { enabled, .. }
+                | MenuEntry::Check { enabled, .. } => *enabled,
                 MenuEntry::Separator => true,
             })
             .collect()
+    }
+
+    fn store_id(url: &Url) -> Option<String> {
+        (url.host_str() == Some("store.example"))
+            .then(|| url.path().trim_start_matches('/').to_string())
+    }
+
+    const SUPPORT: ExtensionSupport = ExtensionSupport {
+        store_name: "Test Store",
+        store_url: "https://store.example/",
+        store_item_id: store_id,
+    };
+
+    fn extension(id: &str, name: &str, enabled: bool, popup: bool) -> Extension {
+        Extension {
+            id: id.to_string(),
+            name: name.to_string(),
+            version: "1".to_string(),
+            description: String::new(),
+            enabled,
+            icon: None,
+            action_title: popup.then(|| "Act".to_string()),
+        }
+    }
+
+    #[test]
+    fn extensions_menu_lists_actions_pins_and_the_ways_to_install() {
+        let w = window_with(1);
+        let installed = [
+            extension("a", "Alpha", true, true),
+            extension("b", "Beta", true, false),
+            extension("c", "Gamma", false, true),
+        ];
+        let pinned = vec!["b".to_string()];
+        let url = Url::parse("https://store.example/detail-id").unwrap();
+        let entries = extensions_menu(&w, &installed, &pinned, &SUPPORT, &url);
+        assert_eq!(
+            labels(&entries),
+            vec![
+                "Alpha",
+                "Beta",
+                "Gamma",
+                "Pin to toolbar",
+                "-",
+                "Install the extension on this page",
+                "Visit the Test Store",
+                "Load unpacked extension…",
+                "-",
+                "Manage extensions…",
+            ]
+        );
+        // Only an enabled extension with a popup opens; the store page
+        // on the active tab makes the install entry live.
+        assert_eq!(
+            enabled(&entries),
+            vec![true, false, false, true, true, true, true, true, true, true]
+        );
+        assert!(matches!(
+            &entries[0],
+            MenuEntry::Item { command: Command::OpenExtensionAction { window: WindowId(1), extension }, .. }
+                if extension == "a"
+        ));
+        let MenuEntry::Submenu { entries: pins, .. } = &entries[3] else {
+            panic!("pin is a submenu");
+        };
+        assert_eq!(labels(pins), vec!["Alpha", "Beta", "Gamma"]);
+        assert!(matches!(
+            &pins[0],
+            MenuEntry::Check { checked: false, command: Command::PinExtension { extension, pinned: true }, .. }
+                if extension == "a"
+        ));
+        assert!(matches!(
+            &pins[1],
+            MenuEntry::Check { checked: true, command: Command::PinExtension { extension, pinned: false }, .. }
+                if extension == "b"
+        ));
+        assert!(matches!(&pins[2], MenuEntry::Check { enabled: false, .. }));
+        assert!(matches!(
+            &entries[5],
+            MenuEntry::Item { command: Command::InstallExtension(ExtensionSource::Store { id }), .. }
+                if id == "detail-id"
+        ));
+        assert!(matches!(
+            &entries[6],
+            MenuEntry::Item { command: Command::NewTab { window: WindowId(1), url: Some(u) }, .. }
+                if u.as_str() == "https://store.example/"
+        ));
+        assert!(matches!(
+            &entries[7],
+            MenuEntry::Item {
+                command: Command::InstallExtension(ExtensionSource::AskForDirectory),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &entries[9],
+            MenuEntry::Item {
+                command: Command::OpenSettings,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn extensions_menu_with_nothing_installed_says_so_and_cannot_install_from_a_plain_page() {
+        let w = window_with(1);
+        let url = Url::parse("https://a.example/").unwrap();
+        let entries = extensions_menu(&w, &[], &[], &SUPPORT, &url);
+        assert_eq!(labels(&entries)[0], "No extensions installed");
+        assert_eq!(
+            enabled(&entries),
+            vec![false, false, true, false, true, true, true, true]
+        );
     }
 
     #[test]

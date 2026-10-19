@@ -24,6 +24,30 @@ pub struct Brand {
     pub icon_png: &'static [u8],
 }
 
+use url::Url;
+
+/// What an engine offers for browser extensions. `None` in
+/// [`EngineInfo::extensions`] means the engine runs none, and the chrome
+/// shows nothing about them.
+#[derive(Clone, Copy, Debug)]
+pub struct ExtensionSupport {
+    /// The store extensions come from. "Chrome Web Store".
+    pub store_name: &'static str,
+    /// The store's front page, for the "visit the store" entry.
+    pub store_url: &'static str,
+    /// The id of the extension a page of the store describes, when `url`
+    /// is such a page, so the chrome can offer to install it.
+    pub store_item_id: fn(&Url) -> Option<String>,
+}
+
+/// Two supports are the same store; the function is not compared
+/// (function pointers compare unreliably).
+impl PartialEq for ExtensionSupport {
+    fn eq(&self, other: &ExtensionSupport) -> bool {
+        self.store_name == other.store_name && self.store_url == other.store_url
+    }
+}
+
 /// The engine identity. One `static` per engine crate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EngineInfo {
@@ -40,6 +64,8 @@ pub struct EngineInfo {
     /// Pixels one wheel notch scrolls, when the platform reports the
     /// wheel in lines. Engines scroll different distances per notch.
     pub wheel_line_px: f32,
+    /// Browser extensions, if the engine runs them.
+    pub extensions: Option<ExtensionSupport>,
 }
 
 #[cfg(test)]
@@ -62,5 +88,6 @@ pub(crate) mod test_support {
         data_dir: "engine",
         supports_stop: true,
         wheel_line_px: 40.0,
+        extensions: None,
     };
 }

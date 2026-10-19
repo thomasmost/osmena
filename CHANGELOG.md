@@ -6,6 +6,39 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- Browser extensions, for engines that run them: the toolbar ends in a
+  puzzle-piece button whose menu lists the installed extensions (click
+  one to open its action's popup), a "Pin to toolbar" submenu, and the
+  ways to add one (the extension on the active tab's store page, the
+  store itself, an unpacked directory); pinned extensions sit as icons
+  beside the address bar. The settings window gains an Extensions
+  section: enabled, in toolbar, remove, load unpacked, install by store
+  URL or id. Pinned ids persist as `pinned_extensions` in
+  `settings.toml`.
+- `osmena-core`: `Extension`, `ExtensionSource`, `Browser::extensions`
+  (with `pinned_extensions`, `extension`, `is_pinned`),
+  `Settings::pinned_extensions`, `EngineInfo::extensions` with
+  `ExtensionSupport` (store name, URL, and the store page's item id),
+  `Command::{OpenExtensionAction, PinExtension, SetExtensionEnabled,
+  UninstallExtension, InstallExtension}`,
+  `EngineAction::{SaveSettings, OpenExtensionAction, SetExtensionEnabled,
+  UninstallExtension, InstallExtension}`, and
+  `EngineEvent::ExtensionsChanged`.
+- `osmena-engine`: `Engine::{install_extension, set_extension_enabled,
+  uninstall_extension}` and `TabHost::{open_extension_action,
+  close_extension_popups}`, all defaulted to nothing, and `ScreenRect`.
+- `osmena-chrome`: `ChromeContext::pinned`, `MenuRequest::Extensions`,
+  `menus::extensions_menu`, `MenuEntry::Check` (a check item, shown as a
+  native check mark), and `ChromeState::{action_anchor,
+  extensions_menu_anchor}`.
+
+### Changed
+
+- `EngineInfo` has a new field, `extensions`; an engine without them sets
+  it to `None`.
+- `SettingsWindow::handle_event` takes the extension list and support;
+  `take_commands` returns what its Extensions section asked for.
+
 - Browser windows open without the system title bar: the tab strip is
   the title bar (drag its empty space to move the window, double-click
   it to maximize, right-click it for the system menu on Windows) and,

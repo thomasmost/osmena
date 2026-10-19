@@ -38,7 +38,7 @@ engine crate.
 ## How a browser uses it
 
 ```rust
-use osmena_core::{Brand, EngineInfo};
+use osmena_core::{Brand, EngineInfo, ExtensionSupport};
 
 static BRAND: Brand = Brand {
     name: "Nautilus",
@@ -55,6 +55,12 @@ pub static INFO: EngineInfo = EngineInfo {
     data_dir: "chromium",
     supports_stop: true,
     wheel_line_px: 100.0,
+    // `None` for an engine without extensions.
+    extensions: Some(ExtensionSupport {
+        store_name: "Chrome Web Store",
+        store_url: "https://chromewebstore.google.com/",
+        store_item_id: web_store_item_id,
+    }),
 };
 
 // In main, after the engine-specific preamble (helper-process dispatch,
@@ -70,11 +76,16 @@ osmena_shell::run(osmena_shell::Launch {
 The engine contract, in `osmena-engine`:
 
 - `Engine`: `spin`, `drain_events`, `discard_pending`, `open_surface` (a GL
-  context on a native window) and `open_host` (the tabs of one window).
+  context on a native window), `open_host` (the tabs of one window), and,
+  for engines with extensions, `install_extension`,
+  `set_extension_enabled`, and `uninstall_extension` (defaulted to
+  nothing).
 - `TabHost`: create, adopt, close, navigate, history, show and hide, focus,
-  resize, input, and `paint_page`, which hands the shell either a blit
+  resize, input, `paint_page`, which hands the shell either a blit
   function (the engine painted into GL) or a frame of BGRA pixels (the
-  engine paints into memory). The shell draws either under the toolbar.
+  engine paints into memory; the shell draws either under the toolbar),
+  and `open_extension_action` and `close_extension_popups` (defaulted to
+  nothing).
 - `Surface`: make current, resize, the glow handle, begin frame, present.
 
 ## What the user gets
@@ -115,8 +126,23 @@ The engine contract, in `osmena-engine`:
   `Option` are accepted) and a W3C key code joined with `+`. An action left
   out keeps its default; a chord that does not parse is a startup error,
   like a malformed `settings.toml`.
+- **Extensions**, when the engine runs them (`EngineInfo::extensions`).
+  The toolbar ends in a puzzle-piece button: its menu lists the installed
+  extensions (click one to open its action's popup), has a "Pin to
+  toolbar" submenu with a check per extension, offers to install the
+  extension on the active tab's store page, opens the store, loads an
+  unpacked directory, and opens the settings window, whose Extensions
+  section switches each extension on or off, pins it, removes it, and
+  installs by store URL or id. Pinned extensions sit as icons beside the
+  address bar; clicking one opens the popup under it. The model only
+  holds the list (`Browser::extensions`) and the pinned ids
+  (`pinned_extensions` in `settings.toml`); installing, enabling, and
+  running them is the engine's, through `Engine::install_extension`
+  and its siblings, and the engine reports every change with
+  `EngineEvent::ExtensionsChanged`.
 - **Settings** (`settings.toml`): homepage, new-tab URL, a chrome colour
-  per profile, the title bar switch, and the restore flag.
+  per profile, the title bar switch, the pinned extensions, and the
+  restore flag.
 
 ## Depending on osmena
 

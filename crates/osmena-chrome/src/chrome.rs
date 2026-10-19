@@ -11,8 +11,8 @@ use egui::{
 };
 use keyboard_types::Code;
 use osmena_core::{
-    ChromeColor, Command, CommandKind, EngineInfo, Favicon, KeyChord, Keymap, LoadState, TabId,
-    Window,
+    ChromeColor, Command, CommandKind, EngineInfo, Extension, Favicon, KeyChord, Keymap, LoadState,
+    TabId, Window,
 };
 use url::{ParseError, Url};
 
@@ -29,6 +29,9 @@ const MENU_WIDTH: f32 = 28.0;
 const CONTROL_WIDTH: f32 = 40.0;
 /// Room for macOS's traffic lights at the left of a frameless strip.
 const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
+/// A toolbar button for an extension's action, and the icon inside it.
+const ACTION_SIZE: f32 = 26.0;
+const ACTION_ICON: f32 = 16.0;
 
 /// The shades the chrome paints with, all derived from the profile's
 /// [`ChromeColor`]: the tab strip is the swatch itself, tabs are veils of
@@ -103,6 +106,14 @@ pub struct ChromeState {
     shown_tab: Option<TabId>,
     shown_url: Option<Url>,
     favicons: HashMap<TabId, CachedFavicon>,
+    /// The uploaded icons of the pinned extensions, by extension id.
+    extension_icons: HashMap<String, CachedFavicon>,
+    /// Where each pinned extension's toolbar button was in the last
+    /// frame, so the window can anchor the action's popup to it.
+    action_anchors: HashMap<String, Rect>,
+    /// Where the extensions menu button was in the last frame: the anchor
+    /// for the popup of an action opened from the menu.
+    menu_anchor: Option<Rect>,
     /// Set when a drag of tabs ends; the window takes it and works out
     /// where the tabs were dropped.
     tab_drop: Option<TabDrop>,
@@ -129,6 +140,18 @@ impl ChromeState {
     pub fn take_window_request(&mut self) -> Option<WindowRequest> {
         self.window_request.take()
     }
+
+    /// The toolbar button of `extension`'s action, as last drawn (egui
+    /// points of this window), if it is pinned.
+    pub fn action_anchor(&self, extension: &str) -> Option<Rect> {
+        self.action_anchors.get(extension).copied()
+    }
+
+    /// The extensions menu button, as last drawn, if the engine has
+    /// extensions.
+    pub fn extensions_menu_anchor(&self) -> Option<Rect> {
+        self.menu_anchor
+    }
 }
 
 /// A menu the chrome wants shown, with where to put it (egui points of
@@ -137,6 +160,8 @@ impl ChromeState {
 pub enum MenuRequest {
     /// The "☰" window menu, below its button.
     Window { position: Pos2 },
+    /// The extensions menu, below the puzzle-piece button.
+    Extensions { position: Pos2 },
     /// A tab's context menu, acting on `targets`, at the pointer.
     Tab { targets: Vec<TabId>, position: Pos2 },
 }
@@ -175,6 +200,10 @@ pub struct ChromeContext<'a> {
     pub frameless: bool,
     /// The window is maximized (the maximize control shows "restore").
     pub maximized: bool,
+    /// The extensions whose actions sit in the toolbar, in order
+    /// (`Browser::pinned_extensions`). Only drawn when the engine runs
+    /// extensions (`EngineInfo::extensions`).
+    pub pinned: &'a [&'a Extension],
 }
 
 /// Something the chrome asks of the native window, recorded while drawing
@@ -207,6 +236,7 @@ pub fn draw(
         engine_error,
         frameless,
         maximized,
+        pinned,
     } = *context;
     let mut commands = Vec::new();
     let active = window.active_tab();
@@ -214,6 +244,10 @@ pub fn draw(
     state
         .favicons
         .retain(|tab, _| window.index_of(*tab).is_some());
+    state
+        .extension_icons
+        .retain(|id, _| pinned.iter().any(|e| e.id == *id));
+    state.action_anchors.clear();
     let palette = Palette::new(color, ui.visuals().dark_mode);
 
     // Full screen shows the page alone; every shortcut still works.
@@ -462,36 +496,59 @@ pub fn draw(
                     }
                 }
 
-                let address_id = Id::new(("address", window.id));
-                let field = ui.add_sized(
-                    ui.available_size(),
-                    egui::TextEdit::singleline(&mut state.address_text)
-                        .id(address_id)
-                        .hint_text("Enter address"),
-                );
-                if field.changed() {
-                    state.address_dirty = true;
-                }
-                // Select the text on focus, and again on Cmd+L while already
-                // focused, so the shortcut always means "replace the address".
-                let focus_requested = state.focus_address;
-                if state.focus_address {
-                    state.focus_address = false;
-                    field.request_focus();
-                }
-                if field.gained_focus() || focus_requested {
-                    select_all(ui, address_id, state.address_text.chars().count());
-                }
-                if field.lost_focus()
-                    && ui.input(|i| i.key_pressed(Key::Enter))
-                    && let Some(url) = location_input_to_url(&state.address_text)
-                {
-                    state.address_dirty = false;
-                    commands.push(Command::Navigate {
-                        tab: active.id,
-                        url,
-                    });
-                }
+                // From the right: the extensions menu, the pinned actions
+                // (in their order), then the address bar takes the rest.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if engine.extensions.is_some() {
+                        let puzzle =
+                            puzzle_button(ui, &palette, window).on_hover_text("Extensions");
+                        state.menu_anchor = Some(puzzle.rect);
+                        if puzzle.clicked() {
+                            state.menu_request = Some(MenuRequest::Extensions {
+                                position: puzzle.rect.left_bottom(),
+                            });
+                        }
+                        for extension in pinned.iter().rev() {
+                            if action_button(ui, state, &palette, window, extension).clicked() {
+                                commands.push(Command::OpenExtensionAction {
+                                    window: window.id,
+                                    extension: extension.id.clone(),
+                                });
+                            }
+                        }
+                    }
+                    let address_id = Id::new(("address", window.id));
+                    let field = ui.add_sized(
+                        ui.available_size(),
+                        egui::TextEdit::singleline(&mut state.address_text)
+                            .id(address_id)
+                            .hint_text("Enter address"),
+                    );
+                    if field.changed() {
+                        state.address_dirty = true;
+                    }
+                    // Select the text on focus, and again on Cmd+L while
+                    // already focused, so the shortcut always means
+                    // "replace the address".
+                    let focus_requested = state.focus_address;
+                    if state.focus_address {
+                        state.focus_address = false;
+                        field.request_focus();
+                    }
+                    if field.gained_focus() || focus_requested {
+                        select_all(ui, address_id, state.address_text.chars().count());
+                    }
+                    if field.lost_focus()
+                        && ui.input(|i| i.key_pressed(Key::Enter))
+                        && let Some(url) = location_input_to_url(&state.address_text)
+                    {
+                        state.address_dirty = false;
+                        commands.push(Command::Navigate {
+                            tab: active.id,
+                            url,
+                        });
+                    }
+                });
             });
         });
 
@@ -736,6 +793,91 @@ fn control_button(ui: &mut Ui, palette: &Palette, glyph: ControlGlyph) -> egui::
     response
 }
 
+/// The flat square behind a toolbar icon button, filled on hover. The
+/// id is explicit: the toolbar's widget count changes with the Stop
+/// button, which would otherwise move the auto ids between frames.
+fn icon_button_rect(ui: &mut Ui, palette: &Palette, id: Id) -> (Rect, egui::Response, Color32) {
+    let (_, rect) = ui.allocate_space(Vec2::splat(ACTION_SIZE));
+    let response = ui.interact(rect, id, Sense::click());
+    let fill = if response.hovered() || response.is_pointer_button_down_on() {
+        blend(palette.toolbar, ui.visuals().text_color(), 0.12)
+    } else {
+        palette.toolbar
+    };
+    if ui.is_rect_visible(rect) {
+        ui.painter().rect_filled(rect, 4.0, fill);
+    }
+    (rect, response, fill)
+}
+
+/// The extensions menu button: a puzzle piece drawn with the painter, so
+/// it never depends on a font having the glyph.
+fn puzzle_button(ui: &mut Ui, palette: &Palette, window: &Window) -> egui::Response {
+    let id = Id::new(("extensions-menu", window.id));
+    let (rect, response, fill) = icon_button_rect(ui, palette, id);
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let ink = ui.visuals().text_color();
+        let c = rect.center();
+        // The body sits a little low and left so the knobs on top and on
+        // the right keep the whole glyph centred.
+        let body = Rect::from_center_size(Pos2::new(c.x - 1.5, c.y + 1.5), Vec2::splat(11.0));
+        painter.rect_filled(body, 2.0, ink);
+        let knob = 2.6;
+        painter.circle_filled(Pos2::new(body.center().x, body.min.y - 0.5), knob, ink);
+        painter.circle_filled(Pos2::new(body.max.x + 0.5, body.center().y), knob, ink);
+        // The socket on the left is a bite of the background.
+        painter.circle_filled(Pos2::new(body.min.x - 0.5, body.center().y), knob, fill);
+    }
+    response
+}
+
+/// One pinned extension's action button: its icon, or its initial when it
+/// has none, with the action's title as the tooltip. The button's rect is
+/// recorded so the window can anchor the popup to it.
+fn action_button(
+    ui: &mut Ui,
+    state: &mut ChromeState,
+    palette: &Palette,
+    window: &Window,
+    extension: &Extension,
+) -> egui::Response {
+    let id = Id::new(("extension-action", window.id, &extension.id));
+    let (rect, response, _) = icon_button_rect(ui, palette, id);
+    state.action_anchors.insert(extension.id.clone(), rect);
+    if ui.is_rect_visible(rect) {
+        let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(ACTION_ICON));
+        match extension_icon_texture(ui, state, extension) {
+            Some(texture) => {
+                let id = texture.id();
+                ui.painter().image(
+                    id,
+                    icon_rect,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+            None => {
+                let initial: String = extension.name.chars().take(1).collect();
+                let painter = ui.painter();
+                painter.circle_filled(icon_rect.center(), ACTION_ICON / 2.0, palette.strip);
+                painter.text(
+                    icon_rect.center(),
+                    Align2::CENTER_CENTER,
+                    initial.to_uppercase(),
+                    TextStyle::Small.resolve(ui.style()),
+                    palette.text_on_strip,
+                );
+            }
+        }
+    }
+    let title = extension
+        .action_title
+        .clone()
+        .unwrap_or_else(|| extension.name.clone());
+    response.on_hover_text(title)
+}
+
 /// Replace the page area with an error panel. Returns true if the user
 /// asked to reload.
 pub fn draw_crash_panel(ui: &mut Ui, rect: Rect, reason: &str) -> bool {
@@ -873,6 +1015,44 @@ fn favicon_texture<'a>(
         );
     }
     state.favicons.get(&tab).map(|cached| &cached.texture)
+}
+
+/// The texture of a pinned extension's icon, uploaded on first use and
+/// again when the engine reports a different icon.
+fn extension_icon_texture<'a>(
+    ui: &Ui,
+    state: &'a mut ChromeState,
+    extension: &Extension,
+) -> Option<&'a TextureHandle> {
+    let icon = extension.icon.as_ref()?;
+    let fresh = state
+        .extension_icons
+        .get(&extension.id)
+        .is_some_and(|cached| cached.is_for(icon));
+    if !fresh {
+        let image = ColorImage::from_rgba_unmultiplied(
+            [icon.width as usize, icon.height as usize],
+            &icon.rgba,
+        );
+        let texture = ui.ctx().load_texture(
+            format!("extension-{}", extension.id),
+            image,
+            TextureOptions::LINEAR,
+        );
+        state.extension_icons.insert(
+            extension.id.clone(),
+            CachedFavicon {
+                width: icon.width,
+                height: icon.height,
+                rgba: icon.rgba.clone(),
+                texture,
+            },
+        );
+    }
+    state
+        .extension_icons
+        .get(&extension.id)
+        .map(|cached| &cached.texture)
 }
 
 impl CachedFavicon {

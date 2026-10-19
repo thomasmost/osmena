@@ -17,7 +17,9 @@ use osmena_chrome::{icon, input, keyutils, menus, native_menu};
 use osmena_core::{
     Brand, Browser, Command, Cursor, EngineInfo, EngineInput, Keymap, TabId, WindowId,
 };
-use osmena_engine::{BlitRect, Engine, EngineError, PagePaint, PhysicalSize, Surface, TabHost};
+use osmena_engine::{
+    BlitRect, Engine, EngineError, PagePaint, PhysicalSize, ScreenRect, Surface, TabHost,
+};
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
@@ -178,6 +180,34 @@ impl<E: Engine> BrowserWindow<E> {
     }
 
     /// Fill the screen (borderless) or go back to a normal window.
+    /// Open the popup of `extension`'s action for `tab`, below its
+    /// toolbar button (or below the extensions menu button when it is
+    /// not pinned).
+    pub fn open_extension_action(&self, tab: TabId, extension: &str) {
+        let anchor = self
+            .chrome
+            .action_anchor(extension)
+            .or_else(|| self.chrome.extensions_menu_anchor());
+        let Some(anchor) = anchor else {
+            return;
+        };
+        let Ok(origin) = self.window.inner_position() else {
+            return;
+        };
+        let scale = self.window.scale_factor() as f32;
+        let px = |v: f32| (v * scale).round() as i32;
+        self.host.open_extension_action(
+            tab,
+            extension,
+            ScreenRect {
+                x: origin.x + px(anchor.min.x),
+                y: origin.y + px(anchor.min.y),
+                width: px(anchor.width()),
+                height: px(anchor.height()),
+            },
+        );
+    }
+
     pub fn set_fullscreen(&self, fullscreen: bool) {
         self.window
             .set_fullscreen(fullscreen.then_some(Fullscreen::Borderless(None)));
@@ -316,6 +346,7 @@ impl<E: Engine> BrowserWindow<E> {
         match event {
             WindowEvent::Resized(size) => {
                 self.surface.resize(non_zero(*size));
+                self.host.close_extension_popups();
                 self.window.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -323,6 +354,7 @@ impl<E: Engine> BrowserWindow<E> {
                 self.window.request_redraw();
             }
             WindowEvent::Moved(_) => {
+                self.host.close_extension_popups();
                 self.update_content_origin();
             }
             WindowEvent::RedrawRequested => {
@@ -332,7 +364,11 @@ impl<E: Engine> BrowserWindow<E> {
                 return vec![Command::CloseWindow(self.id)];
             }
             WindowEvent::Focused(focused) => {
-                if !focused {
+                if *focused {
+                    // An extension popup is dismissed by clicking back
+                    // into the window, like any popup.
+                    self.host.close_extension_popups();
+                } else {
                     // Releases of keys and buttons held while focus moved
                     // away arrive elsewhere; do not wait for them here.
                     self.keys.clear();
@@ -526,6 +562,7 @@ impl<E: Engine> BrowserWindow<E> {
         let engine_info = self.engine_info;
         let frameless = self.frameless;
         let maximized = self.window.is_maximized();
+        let pinned = browser.pinned_extensions();
         let mut commands = Vec::new();
         let mut content_top_px = 0.0;
 
@@ -550,6 +587,7 @@ impl<E: Engine> BrowserWindow<E> {
                 engine_error,
                 frameless,
                 maximized,
+                pinned: &pinned,
             };
             commands = chrome::draw(ui, model, &context, chrome_state, keymap);
             let rect = ui.available_rect_before_wrap();
@@ -695,6 +733,19 @@ impl<E: Engine> BrowserWindow<E> {
                 menus::window_menu(model, keymap, !browser.closed_tabs.is_empty()),
                 position,
             ),
+            chrome::MenuRequest::Extensions { position } => {
+                let support = self.engine_info.extensions.as_ref()?;
+                (
+                    menus::extensions_menu(
+                        model,
+                        &browser.extensions,
+                        &browser.settings.pinned_extensions,
+                        support,
+                        &model.active_tab().url,
+                    ),
+                    position,
+                )
+            }
             chrome::MenuRequest::Tab { targets, position } => {
                 let others: Vec<(WindowId, String)> = browser
                     .windows

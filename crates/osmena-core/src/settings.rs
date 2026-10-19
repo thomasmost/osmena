@@ -27,6 +27,10 @@ pub struct Settings {
     /// Off by default: the tab strip is then the title bar, as in Chromium,
     /// with the window controls at its right end.
     pub system_title_bar: bool,
+    /// The ids of the extensions whose toolbar actions sit in the
+    /// toolbar, in order. An id of an extension no longer installed is
+    /// kept, so it comes back pinned if the extension does.
+    pub pinned_extensions: Vec<String>,
 }
 
 impl Default for Settings {
@@ -37,6 +41,7 @@ impl Default for Settings {
             restore_windows_on_launch: false,
             chrome_color: ChromeColor::default(),
             system_title_bar: false,
+            pinned_extensions: Vec::new(),
         }
     }
 }
@@ -209,10 +214,12 @@ mod tests {
             restore_windows_on_launch: true,
             chrome_color: ChromeColor::Plum,
             system_title_bar: true,
+            pinned_extensions: vec!["abc".to_string(), "def".to_string()],
         };
         let text = s.to_toml().unwrap();
         assert!(text.contains("chrome_color = \"plum\""), "{text}");
         assert!(text.contains("system_title_bar = true"), "{text}");
+        assert!(text.contains("pinned_extensions = ["), "{text}");
         assert_eq!(Settings::parse(&text).unwrap(), s);
     }
 

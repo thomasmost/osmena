@@ -5,6 +5,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::extension::Extension;
 use crate::profile::Profile;
 use crate::settings::Settings;
 
@@ -160,6 +161,9 @@ pub struct Browser {
     /// The URLs of tabs the user closed, oldest first, at most
     /// [`Browser::MAX_CLOSED_TABS`]; "Reopen closed tab" pops the last.
     pub closed_tabs: Vec<Url>,
+    /// The installed extensions, as the engine last reported them. Empty
+    /// for an engine without extensions.
+    pub extensions: Vec<Extension>,
     next_window_id: u64,
     next_tab_id: u64,
 }
@@ -175,6 +179,7 @@ impl Browser {
             windows: Vec::new(),
             engine_error: None,
             closed_tabs: Vec::new(),
+            extensions: Vec::new(),
             next_window_id: 1,
             next_tab_id: 1,
         }
@@ -190,6 +195,25 @@ impl Browser {
 
     pub fn window(&self, id: WindowId) -> Option<&Window> {
         self.windows.iter().find(|w| w.id == id)
+    }
+
+    pub fn extension(&self, id: &str) -> Option<&Extension> {
+        self.extensions.iter().find(|e| e.id == id)
+    }
+
+    /// The extensions shown in the toolbar: those pinned in the settings,
+    /// in that order, that are installed and enabled.
+    pub fn pinned_extensions(&self) -> Vec<&Extension> {
+        self.settings
+            .pinned_extensions
+            .iter()
+            .filter_map(|id| self.extension(id))
+            .filter(|e| e.enabled)
+            .collect()
+    }
+
+    pub fn is_pinned(&self, id: &str) -> bool {
+        self.settings.pinned_extensions.iter().any(|p| p == id)
     }
 
     pub fn window_mut(&mut self, id: WindowId) -> Option<&mut Window> {
@@ -305,6 +329,32 @@ mod tests {
             b.closed_tabs.last().unwrap().as_str(),
             format!("https://{}.example/", Browser::MAX_CLOSED_TABS)
         );
+    }
+
+    #[test]
+    fn pinned_extensions_follow_the_settings_order_and_skip_disabled_and_missing() {
+        let mut b = browser();
+        let ext = |id: &str, enabled: bool| Extension {
+            id: id.to_string(),
+            name: id.to_uppercase(),
+            version: "1".to_string(),
+            description: String::new(),
+            enabled,
+            icon: None,
+            action_title: Some("Act".to_string()),
+        };
+        b.extensions = vec![ext("a", true), ext("b", false), ext("c", true)];
+        b.settings.pinned_extensions = vec!["c".into(), "zz".into(), "b".into(), "a".into()];
+        let pinned: Vec<&str> = b
+            .pinned_extensions()
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect();
+        assert_eq!(pinned, vec!["c", "a"]);
+        assert!(b.is_pinned("zz"));
+        assert!(!b.is_pinned("d"));
+        assert!(b.extension("a").unwrap().has_action());
+        assert!(!b.extension("b").unwrap().has_action());
     }
 
     #[test]

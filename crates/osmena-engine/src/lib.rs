@@ -15,7 +15,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use osmena_core::{EngineEvent, EngineInput, PendingTab, TabId};
+use osmena_core::{EngineEvent, EngineInput, ExtensionSource, PendingTab, TabId};
 use raw_window_handle::{DisplayHandle, WindowHandle};
 use url::Url;
 
@@ -76,6 +76,17 @@ pub struct BlitRect {
 /// Copies a tab's offscreen framebuffer into the window.
 pub type BlitFn = Box<dyn Fn(&glow::Context, BlitRect) + Send + Sync>;
 
+/// A rectangle on the screen, in physical pixels from the primary
+/// monitor's top-left: where a toolbar button is, for the popup an engine
+/// opens below it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScreenRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
 /// A tab's latest pixels, BGRA8 with straight alpha, row-major from the
 /// top left, tightly packed.
 #[derive(Clone, Copy, Debug)]
@@ -134,6 +145,14 @@ pub trait TabHost {
     /// yet. Called with the window's GL context current, from inside the
     /// shell's UI pass, after [`TabHost::resize_content`].
     fn paint_page(&self, tab: TabId, sink: &mut dyn FnMut(PagePaint<'_>));
+    /// Open the popup of `extension`'s toolbar action, for `tab`, below
+    /// `anchor` (the button, in physical screen pixels). An engine without
+    /// extensions ignores it. Default: nothing.
+    fn open_extension_action(&self, _tab: TabId, _extension: &str, _anchor: ScreenRect) {}
+    /// Close the extension popup open over this window, if any: the user
+    /// clicked back into the window, or moved or resized it. Default:
+    /// nothing.
+    fn close_extension_popups(&self) {}
 }
 
 /// One engine instance, one per process. The shell builds it through a
@@ -166,4 +185,14 @@ pub trait Engine: 'static {
         window: WindowHandle<'_>,
         scale: f32,
     ) -> Result<Self::Host, EngineError>;
+    /// Install an extension. The engine reports the outcome itself: an
+    /// `EngineEvent::ExtensionsChanged` with the new list, or an
+    /// `EngineEvent::EngineError` saying why not. An engine whose
+    /// `EngineInfo::extensions` is `None` never receives it. Default:
+    /// nothing.
+    fn install_extension(&self, _source: ExtensionSource) {}
+    /// Enable or disable an installed extension. Default: nothing.
+    fn set_extension_enabled(&self, _extension: &str, _enabled: bool) {}
+    /// Remove an installed extension. Default: nothing.
+    fn uninstall_extension(&self, _extension: &str) {}
 }
