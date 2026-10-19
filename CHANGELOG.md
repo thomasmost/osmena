@@ -6,6 +6,33 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- Tab folders and bookmark groups, from the tab context menu, which
+  gains "Close all selected", "Move tab(s) to folder…", and "Bookmark
+  all selected…". Moving to a folder asks for a name (prefilled "Folder
+  A", "Folder B", … or an existing folder of the window); the folder's
+  tabs sit together in the strip behind one chip that, collapsed, shows
+  the name and count and lists its tabs on a click, and, expanded, is
+  followed by its tabs. The chip's menu expands or collapses, renames,
+  ungroups, or closes the folder. Bookmarking asks for a group name or
+  an existing group; groups persist in `bookmarks.toml` in the profile
+  and appear under "Bookmarks" in the window menu, each with "Open all"
+  and its pages.
+- `osmena-core`: `Folder`, `FolderId`, `StripItem`, `Tab::folder`,
+  `Window::{folders, folder, folder_tabs, strip_items,
+  suggested_folder_name}`, `Browser::{bookmarks, window_of_folder}`,
+  `Bookmarks` (`bookmarks.rs`), `FolderTarget`, `Prompt`,
+  `Command::{MoveTabsToFolder, SetFolderExpanded, RenameFolder, Ungroup,
+  CloseFolder, BookmarkTabs, OpenBookmarkGroup, PromptMoveToFolder,
+  PromptBookmarkTabs, PromptRenameFolder}`, `EngineAction::{SaveBookmarks,
+  ShowPrompt}`, `Profile::bookmarks_path`.
+- `osmena-chrome`: `MenuRequest::Folder`, `menus::folder_menu`,
+  `ChromeState::{open_prompt, has_prompt}`; the chrome draws prompts as a
+  small window over the page.
+
+### Changed
+
+- `menus::window_menu` takes the bookmarks; `tab_menu` has three more
+  entries.
 - Browser extensions, for engines that run them: the toolbar ends in a
   puzzle-piece button whose menu lists the installed extensions (click
   one to open its action's popup), a "Pin to toolbar" submenu, and the

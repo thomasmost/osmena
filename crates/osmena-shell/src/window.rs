@@ -15,7 +15,7 @@ use osmena_chrome::routing::{
 };
 use osmena_chrome::{icon, input, keyutils, menus, native_menu};
 use osmena_core::{
-    Brand, Browser, Command, Cursor, EngineInfo, EngineInput, Keymap, TabId, WindowId,
+    Brand, Browser, Command, Cursor, EngineInfo, EngineInput, Keymap, Prompt, TabId, WindowId,
 };
 use osmena_engine::{
     BlitRect, Engine, EngineError, PagePaint, PhysicalSize, ScreenRect, Surface, TabHost,
@@ -206,6 +206,12 @@ impl<E: Engine> BrowserWindow<E> {
                 height: px(anchor.height()),
             },
         );
+    }
+
+    /// Ask the user something over this window's page.
+    pub fn open_prompt(&mut self, prompt: Prompt) {
+        self.chrome.open_prompt(prompt);
+        self.window.request_redraw();
     }
 
     pub fn set_fullscreen(&self, fullscreen: bool) {
@@ -730,9 +736,17 @@ impl<E: Engine> BrowserWindow<E> {
         let model = browser.window(self.id)?;
         let (entries, position) = match request {
             chrome::MenuRequest::Window { position } => (
-                menus::window_menu(model, keymap, !browser.closed_tabs.is_empty()),
+                menus::window_menu(
+                    model,
+                    keymap,
+                    !browser.closed_tabs.is_empty(),
+                    &browser.bookmarks,
+                ),
                 position,
             ),
+            chrome::MenuRequest::Folder { folder, position } => {
+                (menus::folder_menu(model, folder), position)
+            }
             chrome::MenuRequest::Extensions { position } => {
                 let support = self.engine_info.extensions.as_ref()?;
                 (

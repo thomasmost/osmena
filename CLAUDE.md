@@ -5,8 +5,7 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-10-19 (extensions: the puzzle menu, pinned actions,
-the engine contract for them)._
+_Last updated: 2026-10-19 (tab folders, bookmark groups, prompts)._
 
 ## Architecture
 
@@ -65,6 +64,18 @@ No engine is needed; the workspace builds in under a minute.
   and the pinned actions only when `extensions` is `Some`; pinned ids
   live in `Settings::pinned_extensions`, kept even for an extension that
   is gone. An engine without extensions (`None`) needs none of this.
+- **A question to the user is a `Prompt`.** A menu entry that needs
+  input (a folder or group name) issues a `Command::Prompt…`, `dispatch`
+  answers with `EngineAction::ShowPrompt` carrying what the question
+  needs (the suggested name, the existing choices), the window hands it
+  to `ChromeState::open_prompt`, and the chrome draws it over the page;
+  the answer is an ordinary `Command`. Nothing in the chrome decides what
+  to ask.
+- **Folders are contiguous runs of tabs.** `Tab::folder` names the
+  folder; `Window::gather_folder` keeps a folder's tabs together where
+  its first tab is, `prune_folders` drops a folder whose last tab went
+  (every tab removal calls it), and `strip_items` is the strip as drawn.
+  New tabs go to the end, outside any folder.
 - **The native window is asked, never driven, by the chrome.** The strip
   records a `WindowRequest` (drag, minimize, maximize, system menu) the
   way it records a `MenuRequest`; `BrowserWindow` acts on it after the
@@ -125,17 +136,28 @@ UI (puzzle menu, pinned actions beside the address bar, the Extensions
 section of the settings window) over an engine contract Nautilus
 implements and Paladin leaves at its defaults.
 
-Verified: `cargo test` (178 tests), clippy with `-D warnings`, formatting;
+Added later the same day: tab folders (chip in the strip, drop-down
+list, folder menu) and bookmark groups (`bookmarks.toml`, the window
+menu's Bookmarks submenu), both reached from the tab context menu
+through prompts drawn by the chrome.
+
+Verified: `cargo test` (186 tests), clippy with `-D warnings`, formatting;
 both browsers build against this revision; Nautilus on Windows launches
 frameless with the controls at the strip's right end, opens the settings
 window on `Ctrl+,`, captures a chord in the editor (New tab rebound to
 `Ctrl+Y`), writes it to `keymap.toml`, and the new chord opens a tab;
 with an extension installed and pinned, its icon and the puzzle button
-appear in the toolbar and clicking the icon opens the popup under it.
-Not verified: the puzzle menu and the settings window's Extensions
-section by hand, dragging and resizing a frameless window by hand, Aero
-snap, full screen, the macOS title bar style (nothing has run on macOS
-since the extraction), and the browsers' manual checklists beyond launch.
+appear in the toolbar and clicking the icon opens the popup under it;
+the tab context menu shows the folder and bookmark entries, the folder
+prompt prefills "Folder A", the chip appears collapsed with its count
+and expanded with its tab after it, its drop-down lists the tab, its
+menu opens, the bookmark prompt writes `bookmarks.toml`, and the window
+menu has the Bookmarks submenu. Not verified: picking an existing folder
+or group in a prompt, Rename, Ungroup, "Open all", the puzzle menu and
+the settings window's Extensions section by hand, dragging and
+resizing a frameless window by hand, Aero snap, full screen, the macOS
+title bar style (nothing has run on macOS since the extraction), and the
+browsers' manual checklists beyond launch.
 
 Decisions, with reasons:
 - Separate repositories, not a monorepo: Paladin's Servo build (60 git crates,

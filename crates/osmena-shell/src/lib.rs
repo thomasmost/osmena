@@ -30,7 +30,7 @@ use osmena_chrome::fatal::report_fatal;
 use osmena_core::command::open_window;
 use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
-    Brand, Browser, Command, EngineInfo, Keymap, Platform, Profile, Settings, dispatch,
+    Bookmarks, Brand, Browser, Command, EngineInfo, Keymap, Platform, Profile, Settings, dispatch,
 };
 use osmena_engine::{Engine, EngineError, Waker};
 use url::Url;
@@ -126,7 +126,18 @@ pub fn run<E: Engine>(launch: Launch<E>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let bookmarks = match Bookmarks::load(&profile.bookmarks_path()) {
+        Ok(b) => b,
+        Err(e) => {
+            report_fatal(
+                brand,
+                &format!("{bin}: {e} (in {})", profile.bookmarks_path().display()),
+            );
+            return ExitCode::FAILURE;
+        }
+    };
     let mut browser = Browser::new(profile, settings);
+    browser.bookmarks = bookmarks;
     let first: Url = urls.first().cloned().unwrap_or_else(|| browser.homepage());
     let mut actions = open_window(&mut browser, first);
     let window = browser.windows[0].id;

@@ -11,8 +11,8 @@ use egui::{
 };
 use keyboard_types::Code;
 use osmena_core::{
-    ChromeColor, Command, CommandKind, EngineInfo, Extension, Favicon, KeyChord, Keymap, LoadState,
-    TabId, Window,
+    ChromeColor, Command, CommandKind, EngineInfo, Extension, Favicon, FolderId, FolderTarget,
+    KeyChord, Keymap, LoadState, Prompt, StripItem, Tab, TabId, Window,
 };
 use url::{ParseError, Url};
 
@@ -32,6 +32,8 @@ const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
 /// A toolbar button for an extension's action, and the icon inside it.
 const ACTION_SIZE: f32 = 26.0;
 const ACTION_ICON: f32 = 16.0;
+/// The widest a folder's name is drawn in the strip.
+const FOLDER_NAME_MAX_CHARS: usize = 18;
 
 /// The shades the chrome paints with, all derived from the profile's
 /// [`ChromeColor`]: the tab strip is the swatch itself, tabs are veils of
@@ -123,6 +125,20 @@ pub struct ChromeState {
     /// Set when the user used the strip as a title bar; the window acts
     /// on it once the frame is painted.
     window_request: Option<WindowRequest>,
+    /// The folder whose tab list is dropped down under its chip, if any.
+    open_folder: Option<FolderId>,
+    /// The question being asked over the page, if any.
+    prompt: Option<PromptState>,
+}
+
+/// A [`Prompt`] being answered: the typed text, and which existing
+/// folder or group was picked instead (`None` for a new one).
+struct PromptState {
+    prompt: Prompt,
+    text: String,
+    existing: Option<usize>,
+    /// The text field takes focus on the first frame.
+    focus: bool,
 }
 
 impl ChromeState {
@@ -152,6 +168,27 @@ impl ChromeState {
     pub fn extensions_menu_anchor(&self) -> Option<Rect> {
         self.menu_anchor
     }
+
+    /// Ask the user `prompt`; the answer comes back as a command from
+    /// [`draw`]. A prompt already open is replaced.
+    pub fn open_prompt(&mut self, prompt: Prompt) {
+        let text = match &prompt {
+            Prompt::MoveToFolder { suggested, .. } => suggested.clone(),
+            Prompt::BookmarkTabs { .. } => String::new(),
+            Prompt::RenameFolder { name, .. } => name.clone(),
+        };
+        self.prompt = Some(PromptState {
+            prompt,
+            text,
+            existing: None,
+            focus: true,
+        });
+        self.open_folder = None;
+    }
+
+    pub fn has_prompt(&self) -> bool {
+        self.prompt.is_some()
+    }
 }
 
 /// A menu the chrome wants shown, with where to put it (egui points of
@@ -164,6 +201,8 @@ pub enum MenuRequest {
     Extensions { position: Pos2 },
     /// A tab's context menu, acting on `targets`, at the pointer.
     Tab { targets: Vec<TabId>, position: Pos2 },
+    /// A folder's context menu, at the pointer.
+    Folder { folder: FolderId, position: Pos2 },
 }
 
 /// A drag of tabs that ended: the tabs to move and where the pointer was
@@ -291,64 +330,47 @@ pub fn draw(
                         ui.spacing_mut().item_spacing.x = 2.0;
                         // How many tabs a drag in progress carries, for the overlay.
                         let mut dragging: Option<usize> = None;
-                        for tab in &window.tabs {
-                            let is_active = tab.id == window.active;
-                            let is_selected = window.is_selected(tab.id);
-                            let favicon = favicon_texture(ui, state, tab.id, tab.favicon.as_ref())
-                                .map(|t| t.id());
-                            let title = truncate(tab.display_title(), TAB_TITLE_MAX_CHARS);
-                            let (response, close_clicked) =
-                                tab_widget(ui, &palette, is_active, is_selected, favicon, &title);
-                            if close_clicked {
-                                commands.push(Command::CloseTab(tab.id));
-                            }
-                            // A plain click activates; Ctrl (Cmd on macOS) adds
-                            // or removes; Shift extends from the active tab.
-                            let modifiers = ui.input(|i| i.modifiers);
-                            if response.clicked() {
-                                if modifiers.shift {
-                                    commands.push(Command::SelectTabRange(tab.id));
-                                } else if modifiers.command {
-                                    commands.push(Command::ToggleTabSelection(tab.id));
-                                } else if !is_active || window.selected.len() > 1 {
-                                    commands.push(Command::ActivateTab(tab.id));
+                        for item in window.strip_items() {
+                            match item {
+                                StripItem::Tab(id) => {
+                                    if let Some(tab) = window.tab(id) {
+                                        strip_tab(
+                                            ui,
+                                            window,
+                                            tab,
+                                            &palette,
+                                            state,
+                                            &mut commands,
+                                            &mut dragging,
+                                        );
+                                    }
                                 }
-                            }
-                            if response.middle_clicked() {
-                                commands.push(Command::CloseTab(tab.id));
-                            }
-                            // The context menu and a drag act on the whole
-                            // selection when this tab is part of it; otherwise
-                            // on this tab alone, which becomes the active one.
-                            let targets = if is_selected {
-                                window.selection()
-                            } else {
-                                vec![tab.id]
-                            };
-                            if response.secondary_clicked() {
-                                if !is_selected {
-                                    commands.push(Command::ActivateTab(tab.id));
+                                StripItem::Folder { folder, tabs } => {
+                                    strip_folder(
+                                        ui,
+                                        window,
+                                        folder,
+                                        &tabs,
+                                        &palette,
+                                        state,
+                                        &mut commands,
+                                    );
+                                    if window.folder(folder).is_some_and(|f| f.expanded) {
+                                        for id in tabs {
+                                            if let Some(tab) = window.tab(id) {
+                                                strip_tab(
+                                                    ui,
+                                                    window,
+                                                    tab,
+                                                    &palette,
+                                                    state,
+                                                    &mut commands,
+                                                    &mut dragging,
+                                                );
+                                            }
+                                        }
+                                    }
                                 }
-                                state.menu_request = Some(MenuRequest::Tab {
-                                    targets: targets.clone(),
-                                    position: response
-                                        .interact_pointer_pos()
-                                        .unwrap_or_else(|| response.rect.left_bottom()),
-                                });
-                            }
-                            if response.drag_started() && !is_selected {
-                                commands.push(Command::ActivateTab(tab.id));
-                            }
-                            if response.dragged() {
-                                dragging = Some(targets.len());
-                            }
-                            if response.drag_stopped()
-                                && let Some(pointer) = response.interact_pointer_pos()
-                            {
-                                state.tab_drop = Some(TabDrop {
-                                    tabs: targets,
-                                    pointer,
-                                });
                             }
                         }
                         if let (Some(count), Some(pointer)) =
@@ -552,6 +574,8 @@ pub fn draw(
             });
         });
 
+    commands.extend(draw_prompt(ui, state));
+
     // The status text floats over the bottom-left corner of the page as an
     // overlay, so showing or hiding it never resizes the page.
     let status = match engine_error {
@@ -589,6 +613,367 @@ pub fn background(ctx: &egui::Context, color: ChromeColor) -> [f32; 4] {
     Palette::new(color, ctx.global_style().visuals.dark_mode)
         .toolbar
         .to_normalized_gamma_f32()
+}
+
+/// One tab of the strip, with everything a tab answers to: click,
+/// Ctrl/Shift click, middle click, the close control, the context menu,
+/// and dragging.
+fn strip_tab(
+    ui: &mut Ui,
+    window: &Window,
+    tab: &Tab,
+    palette: &Palette,
+    state: &mut ChromeState,
+    commands: &mut Vec<Command>,
+    dragging: &mut Option<usize>,
+) {
+    let is_active = tab.id == window.active;
+    let is_selected = window.is_selected(tab.id);
+    let favicon = favicon_texture(ui, state, tab.id, tab.favicon.as_ref()).map(|t| t.id());
+    let title = truncate(tab.display_title(), TAB_TITLE_MAX_CHARS);
+    let (response, close_clicked) =
+        tab_widget(ui, palette, is_active, is_selected, favicon, &title);
+    if close_clicked {
+        commands.push(Command::CloseTab(tab.id));
+    }
+    // A plain click activates; Ctrl (Cmd on macOS) adds or removes; Shift
+    // extends from the active tab.
+    let modifiers = ui.input(|i| i.modifiers);
+    if response.clicked() {
+        if modifiers.shift {
+            commands.push(Command::SelectTabRange(tab.id));
+        } else if modifiers.command {
+            commands.push(Command::ToggleTabSelection(tab.id));
+        } else if !is_active || window.selected.len() > 1 {
+            commands.push(Command::ActivateTab(tab.id));
+        }
+    }
+    if response.middle_clicked() {
+        commands.push(Command::CloseTab(tab.id));
+    }
+    // The context menu and a drag act on the whole selection when this
+    // tab is part of it; otherwise on this tab alone, which becomes the
+    // active one.
+    let targets = if is_selected {
+        window.selection()
+    } else {
+        vec![tab.id]
+    };
+    if response.secondary_clicked() {
+        if !is_selected {
+            commands.push(Command::ActivateTab(tab.id));
+        }
+        state.menu_request = Some(MenuRequest::Tab {
+            targets: targets.clone(),
+            position: response
+                .interact_pointer_pos()
+                .unwrap_or_else(|| response.rect.left_bottom()),
+        });
+    }
+    if response.drag_started() && !is_selected {
+        commands.push(Command::ActivateTab(tab.id));
+    }
+    if response.dragged() {
+        *dragging = Some(targets.len());
+    }
+    if response.drag_stopped()
+        && let Some(pointer) = response.interact_pointer_pos()
+    {
+        state.tab_drop = Some(TabDrop {
+            tabs: targets,
+            pointer,
+        });
+    }
+}
+
+/// A folder's chip in the strip: its name with a disclosure glyph and,
+/// collapsed, its tab count. A click drops the list of its tabs down
+/// under it (another click, a click elsewhere, or Escape takes it away);
+/// a right click opens the folder's menu. Expanded, its tabs follow it in
+/// the strip, drawn by the caller.
+fn strip_folder(
+    ui: &mut Ui,
+    window: &Window,
+    folder: FolderId,
+    tabs: &[TabId],
+    palette: &Palette,
+    state: &mut ChromeState,
+    commands: &mut Vec<Command>,
+) {
+    let Some(f) = window.folder(folder) else {
+        return;
+    };
+    let holds_active = tabs.contains(&window.active);
+    // The active tab's page shows through a collapsed chip: it takes the
+    // active tab's look.
+    let as_active = holds_active && !f.expanded;
+    let label = if f.expanded {
+        truncate(&f.name, FOLDER_NAME_MAX_CHARS)
+    } else {
+        format!(
+            "{} ({})",
+            truncate(&f.name, FOLDER_NAME_MAX_CHARS),
+            tabs.len()
+        )
+    };
+    let font = TextStyle::Body.resolve(ui.style());
+    let text_color = if as_active {
+        ui.visuals().text_color()
+    } else {
+        palette.text_on_strip
+    };
+    let galley = ui.painter().layout_no_wrap(label, font, text_color);
+    // Room for the disclosure triangle before the name.
+    let glyph_width = 12.0;
+    let width = TAB_PADDING_X + glyph_width + galley.size().x + TAB_PADDING_X;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, TAB_HEIGHT), Sense::click());
+    let response = response.on_hover_text(if f.expanded {
+        format!("{}: {} tabs", f.name, tabs.len())
+    } else {
+        format!("{}: click to list its tabs", f.name)
+    });
+    if ui.is_rect_visible(rect) {
+        let fill = if as_active {
+            palette.toolbar
+        } else if response.hovered() || state.open_folder == Some(folder) {
+            palette.tab_hover
+        } else {
+            palette.tab_selected
+        };
+        let corners = CornerRadius {
+            nw: TAB_CORNER,
+            ne: TAB_CORNER,
+            sw: 0,
+            se: 0,
+        };
+        let painter = ui.painter();
+        painter.rect(
+            rect,
+            corners,
+            fill,
+            Stroke::new(1.0_f32, palette.tab_outline),
+            StrokeKind::Inside,
+        );
+        // The disclosure triangle, drawn (the fonts lack the glyphs):
+        // pointing right when collapsed, down when expanded.
+        let c = Pos2::new(rect.left() + TAB_PADDING_X + 4.0, rect.center().y);
+        let h = 4.0;
+        let points = if f.expanded {
+            vec![
+                Pos2::new(c.x - h, c.y - h / 2.0),
+                Pos2::new(c.x + h, c.y - h / 2.0),
+                Pos2::new(c.x, c.y + h / 2.0 + 1.0),
+            ]
+        } else {
+            vec![
+                Pos2::new(c.x - h / 2.0, c.y - h),
+                Pos2::new(c.x - h / 2.0, c.y + h),
+                Pos2::new(c.x + h / 2.0 + 1.0, c.y),
+            ]
+        };
+        painter.add(egui::Shape::convex_polygon(
+            points,
+            text_color,
+            Stroke::NONE,
+        ));
+        painter.galley(
+            Pos2::new(
+                rect.left() + TAB_PADDING_X + glyph_width,
+                rect.center().y - galley.size().y / 2.0,
+            ),
+            galley,
+            text_color,
+        );
+    }
+    if response.clicked() {
+        state.open_folder = if state.open_folder == Some(folder) {
+            None
+        } else {
+            Some(folder)
+        };
+    }
+    if response.secondary_clicked() {
+        state.open_folder = None;
+        state.menu_request = Some(MenuRequest::Folder {
+            folder,
+            position: response
+                .interact_pointer_pos()
+                .unwrap_or_else(|| rect.left_bottom()),
+        });
+    }
+    if state.open_folder != Some(folder) {
+        return;
+    }
+    // The list of the folder's tabs, under the chip.
+    let area = egui::Area::new(Id::new(("folder-list", folder)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.left_bottom())
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(180.0);
+                for id in tabs {
+                    let Some(tab) = window.tab(*id) else {
+                        continue;
+                    };
+                    let favicon =
+                        favicon_texture(ui, state, tab.id, tab.favicon.as_ref()).map(|t| t.id());
+                    let title = truncate(tab.display_title(), TAB_TITLE_MAX_CHARS + 12);
+                    let row = ui.horizontal(|ui| {
+                        if let Some(texture) = favicon {
+                            ui.add(
+                                egui::Image::new((texture, Vec2::splat(FAVICON_SIZE)))
+                                    .fit_to_exact_size(Vec2::splat(FAVICON_SIZE)),
+                            );
+                        }
+                        ui.selectable_label(tab.id == window.active, title)
+                    });
+                    if row.inner.clicked() {
+                        commands.push(Command::ActivateTab(tab.id));
+                        state.open_folder = None;
+                    }
+                }
+            });
+        });
+    let clicked_elsewhere = ui.input(|i| {
+        i.pointer.any_pressed()
+            && i.pointer
+                .interact_pos()
+                .is_some_and(|pos| !area.response.rect.contains(pos) && !rect.contains(pos))
+    });
+    if clicked_elsewhere || ui.input(|i| i.key_pressed(Key::Escape)) {
+        state.open_folder = None;
+    }
+}
+
+/// The question the chrome is asking, as a small window over the page:
+/// a text field (and, when there is something to choose from, a choice
+/// of the existing folders or groups), OK and Cancel. Enter answers,
+/// Escape cancels. Returns the command the answer is.
+fn draw_prompt(ui: &mut Ui, state: &mut ChromeState) -> Vec<Command> {
+    let Some(prompt) = state.prompt.as_mut() else {
+        return Vec::new();
+    };
+    let (title, field_label, existing_label, existing): (&str, &str, &str, Vec<String>) =
+        match &prompt.prompt {
+            Prompt::MoveToFolder { folders, .. } => (
+                "Move to folder",
+                "New folder",
+                "Or an existing folder",
+                folders.iter().map(|(_, name)| name.clone()).collect(),
+            ),
+            Prompt::BookmarkTabs { groups, .. } => (
+                "Bookmark all selected",
+                "New bookmark group",
+                "Or an existing group",
+                groups.clone(),
+            ),
+            Prompt::RenameFolder { .. } => ("Rename folder", "Name", "", Vec::new()),
+        };
+    let mut answered = false;
+    let mut cancelled = false;
+    egui::Window::new(title)
+        .id(Id::new("chrome-prompt"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_TOP, Vec2::new(0.0, 80.0))
+        .show(ui.ctx(), |ui| {
+            ui.set_min_width(320.0);
+            ui.label(field_label);
+            let field =
+                ui.add(egui::TextEdit::singleline(&mut prompt.text).desired_width(f32::INFINITY));
+            if prompt.focus {
+                prompt.focus = false;
+                field.request_focus();
+                select_all(ui, field.id, prompt.text.chars().count());
+            }
+            if field.changed() {
+                prompt.existing = None;
+            }
+            if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                answered = true;
+            }
+            if !existing.is_empty() {
+                ui.add_space(6.0);
+                ui.label(existing_label);
+                let current = prompt
+                    .existing
+                    .and_then(|i| existing.get(i))
+                    .cloned()
+                    .unwrap_or_else(|| "(new)".to_string());
+                egui::ComboBox::from_id_salt("prompt-existing")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(prompt.existing.is_none(), "(new)")
+                            .clicked()
+                        {
+                            prompt.existing = None;
+                        }
+                        for (i, name) in existing.iter().enumerate() {
+                            if ui
+                                .selectable_label(prompt.existing == Some(i), name)
+                                .clicked()
+                            {
+                                prompt.existing = Some(i);
+                            }
+                        }
+                    });
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let can_answer = prompt.existing.is_some() || !prompt.text.trim().is_empty();
+                if ui.add_enabled(can_answer, Button::new("OK")).clicked() {
+                    answered = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancelled = true;
+                }
+            });
+            if ui.input(|i| i.key_pressed(Key::Escape)) {
+                cancelled = true;
+            }
+        });
+    if cancelled {
+        state.prompt = None;
+        return Vec::new();
+    }
+    if !answered {
+        return Vec::new();
+    }
+    let Some(PromptState {
+        prompt,
+        text,
+        existing: chosen,
+        ..
+    }) = state.prompt.take()
+    else {
+        return Vec::new();
+    };
+    let name = text.trim().to_string();
+    match prompt {
+        Prompt::MoveToFolder { tabs, folders, .. } => {
+            let folder = match chosen.and_then(|i| folders.get(i)) {
+                Some((id, _)) => FolderTarget::Existing(*id),
+                None if name.is_empty() => return Vec::new(),
+                None => FolderTarget::New { name },
+            };
+            vec![Command::MoveTabsToFolder { tabs, folder }]
+        }
+        Prompt::BookmarkTabs { tabs, groups } => {
+            let group = match chosen.and_then(|i| groups.get(i)) {
+                Some(group) => group.clone(),
+                None if name.is_empty() => return Vec::new(),
+                None => name,
+            };
+            vec![Command::BookmarkTabs { tabs, group }]
+        }
+        Prompt::RenameFolder { folder, .. } => {
+            if name.is_empty() {
+                return Vec::new();
+            }
+            vec![Command::RenameFolder { folder, name }]
+        }
+    }
 }
 
 /// One tab: a rounded-top block with the favicon, the title, and a close

@@ -295,6 +295,17 @@ impl<E: Engine> App<E> {
                 self.save_settings();
                 self.redraw_all();
             }
+            EngineAction::SaveBookmarks => {
+                let path = self.browser.profile.bookmarks_path();
+                if let Err(e) = self.browser.bookmarks.save(&path) {
+                    log::error!("cannot save bookmarks to {}: {e}", path.display());
+                }
+            }
+            EngineAction::ShowPrompt { window, prompt } => {
+                if let Some(w) = self.window_for_core_id(window) {
+                    w.open_prompt(prompt);
+                }
+            }
             EngineAction::OpenExtensionAction { window, extension } => {
                 let tab = self.browser.window(window).map(|w| w.active);
                 if let (Some(tab), Some(w)) = (tab, self.window_for_core_id(window)) {

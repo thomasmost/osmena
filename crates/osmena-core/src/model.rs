@@ -5,6 +5,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::bookmarks::Bookmarks;
 use crate::extension::Extension;
 use crate::profile::Profile;
 use crate::settings::Settings;
@@ -18,6 +19,29 @@ pub struct WindowId(pub u64);
 /// engine crate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TabId(pub u64);
+
+/// Identifies a folder of tabs in a window's strip. Allocated by
+/// [`Browser`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct FolderId(pub u64);
+
+/// A named folder of tabs in the strip. Its tabs sit together in the
+/// window's tab order; collapsed, the strip shows the folder alone and a
+/// click lists its tabs; expanded, its tabs follow it in the strip.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Folder {
+    pub id: FolderId,
+    pub name: String,
+    pub expanded: bool,
+}
+
+/// One thing in the strip, in order: a tab outside any folder, or a
+/// folder with the tabs in it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StripItem {
+    Tab(TabId),
+    Folder { folder: FolderId, tabs: Vec<TabId> },
+}
 
 /// Where a tab is in its page load.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -53,6 +77,8 @@ pub struct Tab {
     /// The tab stays in the model so its URL is not lost; the UI shows an
     /// error panel with a reload button instead of page content.
     pub crashed: Option<String>,
+    /// The folder this tab is in, if any.
+    pub folder: Option<FolderId>,
 }
 
 impl Tab {
@@ -67,6 +93,7 @@ impl Tab {
             can_go_forward: false,
             status: String::new(),
             crashed: None,
+            folder: None,
         }
     }
 
@@ -93,6 +120,10 @@ pub struct Window {
     pub selected: Vec<TabId>,
     /// The window fills the screen and shows no chrome, only the page.
     pub fullscreen: bool,
+    /// The folders of this window's strip, in the order they were made.
+    /// Every folder has at least one tab; a folder whose last tab goes
+    /// goes with it.
+    pub folders: Vec<Folder>,
 }
 
 impl Window {
@@ -105,6 +136,91 @@ impl Window {
             active,
             selected: vec![active],
             fullscreen: false,
+            folders: Vec::new(),
+        }
+    }
+
+    pub fn folder(&self, id: FolderId) -> Option<&Folder> {
+        self.folders.iter().find(|f| f.id == id)
+    }
+
+    pub fn folder_mut(&mut self, id: FolderId) -> Option<&mut Folder> {
+        self.folders.iter_mut().find(|f| f.id == id)
+    }
+
+    /// The tabs in folder `id`, in strip order.
+    pub fn folder_tabs(&self, id: FolderId) -> Vec<TabId> {
+        self.tabs
+            .iter()
+            .filter(|t| t.folder == Some(id))
+            .map(|t| t.id)
+            .collect()
+    }
+
+    /// The strip as drawn: tabs outside folders on their own, and each
+    /// folder, where its first tab is, with all its tabs.
+    pub fn strip_items(&self) -> Vec<StripItem> {
+        let mut items = Vec::new();
+        let mut seen: Vec<FolderId> = Vec::new();
+        for tab in &self.tabs {
+            match tab.folder {
+                Some(folder) if self.folder(folder).is_some() => {
+                    if !seen.contains(&folder) {
+                        seen.push(folder);
+                        items.push(StripItem::Folder {
+                            folder,
+                            tabs: self.folder_tabs(folder),
+                        });
+                    }
+                }
+                _ => items.push(StripItem::Tab(tab.id)),
+            }
+        }
+        items
+    }
+
+    /// The next free name in the sequence "Folder A", "Folder B", ...,
+    /// "Folder Z", "Folder AA", ...
+    pub fn suggested_folder_name(&self) -> String {
+        (1u32..)
+            .map(|n| format!("Folder {}", letters(n)))
+            .find(|name| !self.folders.iter().any(|f| f.name == *name))
+            .expect("the sequence is unbounded")
+    }
+
+    /// Put the tabs of folder `id` together, where the first of them is.
+    pub(crate) fn gather_folder(&mut self, id: FolderId) {
+        let Some(first) = self.tabs.iter().position(|t| t.folder == Some(id)) else {
+            return;
+        };
+        let mut members = Vec::new();
+        let mut rest = Vec::new();
+        for tab in self.tabs.drain(..) {
+            if tab.folder == Some(id) {
+                members.push(tab);
+            } else {
+                rest.push(tab);
+            }
+        }
+        let at = first.min(rest.len());
+        rest.splice(at..at, members);
+        self.tabs = rest;
+    }
+
+    /// Drop folders with no tabs left, and the folder of a tab whose
+    /// folder is gone.
+    pub(crate) fn prune_folders(&mut self) {
+        let tabs = &self.tabs;
+        self.folders
+            .retain(|f| tabs.iter().any(|t| t.folder == Some(f.id)));
+        let folders = &self.folders;
+        for tab in &mut self.tabs {
+            if tab
+                .folder
+                .is_some_and(|id| !folders.iter().any(|f| f.id == id))
+            {
+                tab.folder = None;
+            }
         }
     }
 
@@ -150,6 +266,18 @@ impl Window {
     }
 }
 
+/// `1` → "A", `26` → "Z", `27` → "AA", like spreadsheet columns.
+fn letters(mut n: u32) -> String {
+    let mut out = Vec::new();
+    while n > 0 {
+        n -= 1;
+        out.push(b'A' + (n % 26) as u8);
+        n /= 26;
+    }
+    out.reverse();
+    String::from_utf8(out).expect("ASCII letters")
+}
+
 /// The whole browser state for one process (one profile).
 #[derive(Debug)]
 pub struct Browser {
@@ -164,8 +292,10 @@ pub struct Browser {
     /// The installed extensions, as the engine last reported them. Empty
     /// for an engine without extensions.
     pub extensions: Vec<Extension>,
+    pub bookmarks: Bookmarks,
     next_window_id: u64,
     next_tab_id: u64,
+    next_folder_id: u64,
 }
 
 impl Browser {
@@ -180,9 +310,18 @@ impl Browser {
             engine_error: None,
             closed_tabs: Vec::new(),
             extensions: Vec::new(),
+            bookmarks: Bookmarks::default(),
             next_window_id: 1,
             next_tab_id: 1,
+            next_folder_id: 1,
         }
+    }
+
+    pub fn window_of_folder(&self, folder: FolderId) -> Option<WindowId> {
+        self.windows
+            .iter()
+            .find(|w| w.folder(folder).is_some())
+            .map(|w| w.id)
     }
 
     /// Remember `url` as the most recently closed tab.
@@ -256,6 +395,12 @@ impl Browser {
     pub(crate) fn allocate_tab_id(&mut self) -> TabId {
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
+        id
+    }
+
+    pub(crate) fn allocate_folder_id(&mut self) -> FolderId {
+        let id = FolderId(self.next_folder_id);
+        self.next_folder_id += 1;
         id
     }
 }
@@ -355,6 +500,77 @@ mod tests {
         assert!(!b.is_pinned("d"));
         assert!(b.extension("a").unwrap().has_action());
         assert!(!b.extension("b").unwrap().has_action());
+    }
+
+    fn window_with_tabs(n: u64) -> Window {
+        let mut w = Window::with_tab(WindowId(1), Tab::new(TabId(1), url("https://1.example/")));
+        for i in 2..=n {
+            w.tabs
+                .push(Tab::new(TabId(i), url(&format!("https://{i}.example/"))));
+        }
+        w
+    }
+
+    #[test]
+    fn folder_names_run_through_the_alphabet_and_skip_names_in_use() {
+        assert_eq!(letters(1), "A");
+        assert_eq!(letters(26), "Z");
+        assert_eq!(letters(27), "AA");
+        assert_eq!(letters(52), "AZ");
+        assert_eq!(letters(53), "BA");
+        let mut w = window_with_tabs(1);
+        assert_eq!(w.suggested_folder_name(), "Folder A");
+        w.folders.push(Folder {
+            id: FolderId(1),
+            name: "Folder A".to_string(),
+            expanded: false,
+        });
+        w.folders.push(Folder {
+            id: FolderId(2),
+            name: "Folder C".to_string(),
+            expanded: false,
+        });
+        assert_eq!(w.suggested_folder_name(), "Folder B");
+    }
+
+    #[test]
+    fn strip_items_put_a_folder_where_its_first_tab_is_with_all_its_tabs() {
+        let mut w = window_with_tabs(5);
+        w.folders.push(Folder {
+            id: FolderId(7),
+            name: "F".to_string(),
+            expanded: false,
+        });
+        w.tabs[1].folder = Some(FolderId(7));
+        w.tabs[3].folder = Some(FolderId(7));
+        // A folder that no longer exists does not group.
+        w.tabs[4].folder = Some(FolderId(99));
+        assert_eq!(
+            w.strip_items(),
+            vec![
+                StripItem::Tab(TabId(1)),
+                StripItem::Folder {
+                    folder: FolderId(7),
+                    tabs: vec![TabId(2), TabId(4)]
+                },
+                StripItem::Tab(TabId(3)),
+                StripItem::Tab(TabId(5)),
+            ]
+        );
+        w.gather_folder(FolderId(7));
+        let order: Vec<TabId> = w.tabs.iter().map(|t| t.id).collect();
+        assert_eq!(
+            order,
+            vec![TabId(1), TabId(2), TabId(4), TabId(3), TabId(5)]
+        );
+        w.prune_folders();
+        assert_eq!(w.tabs[4].folder, None, "the stale folder id is cleared");
+        assert_eq!(w.folders.len(), 1);
+        for tab in &mut w.tabs {
+            tab.folder = None;
+        }
+        w.prune_folders();
+        assert!(w.folders.is_empty(), "an empty folder goes");
     }
 
     #[test]

@@ -3,8 +3,8 @@
 //! turns an entry list into a native menu and maps the click back.
 
 use osmena_core::{
-    Command, CommandKind, Extension, ExtensionSource, ExtensionSupport, KeyChord, Keymap, TabId,
-    Window, WindowId,
+    Bookmarks, Command, CommandKind, Extension, ExtensionSource, ExtensionSupport, FolderId,
+    KeyChord, Keymap, TabId, Window, WindowId,
 };
 use url::Url;
 
@@ -61,8 +61,14 @@ impl MenuEntry {
 }
 
 /// The window menu behind the "☰" button. `can_reopen` says whether a
-/// closed tab is there to reopen.
-pub fn window_menu(window: &Window, keymap: &Keymap, can_reopen: bool) -> Vec<MenuEntry> {
+/// closed tab is there to reopen; the bookmark groups become a submenu
+/// each, with "Open all" and the pages.
+pub fn window_menu(
+    window: &Window,
+    keymap: &Keymap,
+    can_reopen: bool,
+    bookmarks: &Bookmarks,
+) -> Vec<MenuEntry> {
     let tab = window.active;
     let bound = |kind: CommandKind| MenuEntry::bound(keymap, kind, &kind.label(), window.id, tab);
     let mut reopen = bound(CommandKind::ReopenClosedTab);
@@ -75,10 +81,98 @@ pub fn window_menu(window: &Window, keymap: &Keymap, can_reopen: bool) -> Vec<Me
         reopen,
         MenuEntry::Separator,
         bound(CommandKind::Home),
+        bookmarks_menu(window.id, bookmarks),
         bound(CommandKind::ToggleFullscreen),
         bound(CommandKind::OpenSettings),
         MenuEntry::Separator,
         bound(CommandKind::Quit),
+    ]
+}
+
+/// The "Bookmarks" submenu: a submenu per group, holding "Open all" and
+/// one entry per page (a new tab). Disabled with no groups.
+fn bookmarks_menu(window: WindowId, bookmarks: &Bookmarks) -> MenuEntry {
+    MenuEntry::Submenu {
+        label: "Bookmarks".to_string(),
+        enabled: !bookmarks.groups.is_empty(),
+        entries: bookmarks
+            .groups
+            .iter()
+            .map(|group| {
+                let mut entries = vec![
+                    MenuEntry::item(
+                        format!("Open all ({})", group.bookmarks.len()),
+                        !group.bookmarks.is_empty(),
+                        Command::OpenBookmarkGroup {
+                            window,
+                            group: group.name.clone(),
+                        },
+                    ),
+                    MenuEntry::Separator,
+                ];
+                entries.extend(group.bookmarks.iter().map(|b| {
+                    let label = if b.title.is_empty() {
+                        b.url.to_string()
+                    } else {
+                        b.title.clone()
+                    };
+                    MenuEntry::item(
+                        label,
+                        true,
+                        Command::NewTab {
+                            window,
+                            url: Some(b.url.clone()),
+                        },
+                    )
+                }));
+                MenuEntry::Submenu {
+                    label: group.name.clone(),
+                    enabled: true,
+                    entries,
+                }
+            })
+            .collect(),
+    }
+}
+
+/// The context menu of a folder in the strip.
+pub fn folder_menu(window: &Window, folder: FolderId) -> Vec<MenuEntry> {
+    let Some(f) = window.folder(folder) else {
+        return Vec::new();
+    };
+    let count = window.folder_tabs(folder).len();
+    vec![
+        if f.expanded {
+            MenuEntry::item(
+                "Collapse",
+                true,
+                Command::SetFolderExpanded {
+                    folder,
+                    expanded: false,
+                },
+            )
+        } else {
+            MenuEntry::item(
+                "Expand",
+                true,
+                Command::SetFolderExpanded {
+                    folder,
+                    expanded: true,
+                },
+            )
+        },
+        MenuEntry::item("Rename…", true, Command::PromptRenameFolder(folder)),
+        MenuEntry::Separator,
+        MenuEntry::item("Ungroup", true, Command::Ungroup(folder)),
+        MenuEntry::item(
+            if count == 1 {
+                "Close folder (1 tab)".to_string()
+            } else {
+                format!("Close folder ({count} tabs)")
+            },
+            true,
+            Command::CloseFolder(folder),
+        ),
     ]
 }
 
@@ -190,6 +284,8 @@ pub fn tab_menu(
         .filter(|t| !targets.contains(t))
         .collect();
     let has_rest = !rest.is_empty();
+    let selection = window.selection();
+    let selected = selection.len();
 
     vec![
         MenuEntry::item(
@@ -198,6 +294,22 @@ pub fn tab_menu(
             Command::CloseTabs(targets.to_vec()),
         ),
         MenuEntry::item("Close other tabs", has_rest, Command::CloseTabs(rest)),
+        MenuEntry::item(
+            format!("Close all selected ({selected})"),
+            selected > 1,
+            Command::CloseTabs(selection.clone()),
+        ),
+        MenuEntry::Separator,
+        MenuEntry::item(
+            plural("Move tab to folder…", "Move {n} tabs to folder…"),
+            true,
+            Command::PromptMoveToFolder(targets.to_vec()),
+        ),
+        MenuEntry::item(
+            format!("Bookmark all selected ({selected})…"),
+            true,
+            Command::PromptBookmarkTabs(selection),
+        ),
         MenuEntry::Separator,
         MenuEntry::item(
             plural("Move tab to new window", "Move {n} tabs to new window"),
@@ -402,7 +514,7 @@ mod tests {
     fn window_menu_carries_the_keymap_chords_and_commands() {
         let w = window_with(1);
         let keymap = Keymap::defaults(Platform::Windows);
-        let entries = window_menu(&w, &keymap, true);
+        let entries = window_menu(&w, &keymap, true, &Bookmarks::default());
         assert_eq!(
             labels(&entries),
             vec![
@@ -411,13 +523,18 @@ mod tests {
                 "Reopen closed tab",
                 "-",
                 "Open homepage",
+                "Bookmarks",
                 "Full screen",
                 "Settings",
                 "-",
                 "Quit"
             ]
         );
-        assert_eq!(enabled(&entries), vec![true; 9]);
+        // No bookmarks: the submenu is there, disabled.
+        assert_eq!(
+            enabled(&entries),
+            vec![true, true, true, true, true, false, true, true, true, true]
+        );
         let MenuEntry::Item { chord, command, .. } = &entries[1] else {
             panic!("second entry is an item");
         };
@@ -431,14 +548,14 @@ mod tests {
             }
         ));
         assert!(matches!(
-            &entries[5],
+            &entries[6],
             MenuEntry::Item {
                 command: Command::ToggleFullscreen(WindowId(1)),
                 ..
             }
         ));
         assert!(matches!(
-            &entries[8],
+            &entries[9],
             MenuEntry::Item {
                 command: Command::Quit,
                 ..
@@ -449,8 +566,96 @@ mod tests {
     #[test]
     fn reopen_is_disabled_with_nothing_to_reopen() {
         let w = window_with(1);
-        let entries = window_menu(&w, &Keymap::defaults(Platform::Windows), false);
+        let entries = window_menu(
+            &w,
+            &Keymap::defaults(Platform::Windows),
+            false,
+            &Bookmarks::default(),
+        );
         assert!(!enabled(&entries)[2]);
+    }
+
+    #[test]
+    fn bookmark_groups_become_submenus_with_open_all_and_a_tab_per_page() {
+        let w = window_with(1);
+        let mut bookmarks = Bookmarks::default();
+        bookmarks.add(
+            "Work",
+            vec![
+                osmena_core::Bookmark {
+                    title: "A".to_string(),
+                    url: Url::parse("https://a.example/").unwrap(),
+                },
+                osmena_core::Bookmark {
+                    title: String::new(),
+                    url: Url::parse("https://b.example/").unwrap(),
+                },
+            ],
+        );
+        let entries = window_menu(&w, &Keymap::defaults(Platform::Windows), true, &bookmarks);
+        let MenuEntry::Submenu {
+            entries: groups,
+            enabled: true,
+            ..
+        } = &entries[5]
+        else {
+            panic!("bookmarks is an enabled submenu");
+        };
+        assert_eq!(labels(groups), vec!["Work"]);
+        let MenuEntry::Submenu { entries: pages, .. } = &groups[0] else {
+            panic!("a group is a submenu");
+        };
+        assert_eq!(
+            labels(pages),
+            vec!["Open all (2)", "-", "A", "https://b.example/"]
+        );
+        assert!(matches!(
+            &pages[0],
+            MenuEntry::Item { command: Command::OpenBookmarkGroup { window: WindowId(1), group }, .. }
+                if group == "Work"
+        ));
+        assert!(matches!(
+            &pages[3],
+            MenuEntry::Item { command: Command::NewTab { window: WindowId(1), url: Some(u) }, .. }
+                if u.as_str() == "https://b.example/"
+        ));
+    }
+
+    #[test]
+    fn folder_menu_toggles_expansion_and_closes_the_folder() {
+        let mut w = window_with(3);
+        w.folders.push(osmena_core::Folder {
+            id: FolderId(4),
+            name: "F".to_string(),
+            expanded: false,
+        });
+        w.tabs[0].folder = Some(FolderId(4));
+        w.tabs[1].folder = Some(FolderId(4));
+        let entries = folder_menu(&w, FolderId(4));
+        assert_eq!(
+            labels(&entries),
+            vec!["Expand", "Rename…", "-", "Ungroup", "Close folder (2 tabs)"]
+        );
+        assert!(matches!(
+            &entries[0],
+            MenuEntry::Item {
+                command: Command::SetFolderExpanded {
+                    folder: FolderId(4),
+                    expanded: true
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            &entries[4],
+            MenuEntry::Item {
+                command: Command::CloseFolder(FolderId(4)),
+                ..
+            }
+        ));
+        w.folders[0].expanded = true;
+        assert_eq!(labels(&folder_menu(&w, FolderId(4)))[0], "Collapse");
+        assert!(folder_menu(&w, FolderId(9)).is_empty());
     }
 
     #[test]
@@ -467,20 +672,36 @@ mod tests {
             vec![
                 "Close tab",
                 "Close other tabs",
+                "Close all selected (1)",
+                "-",
+                "Move tab to folder…",
+                "Bookmark all selected (1)…",
                 "-",
                 "Move tab to new window",
                 "Move tab to window",
                 "Open tab in profile",
             ]
         );
-        assert_eq!(enabled(&entries), vec![true; 6]);
+        // One tab selected: "close all selected" has nothing more to do.
+        assert_eq!(
+            enabled(&entries),
+            vec![true, true, false, true, true, true, true, true, true, true]
+        );
         assert!(matches!(
             &entries[1],
             MenuEntry::Item { command: Command::CloseTabs(rest), .. } if *rest == vec![TabId(1), TabId(3)]
         ));
+        assert!(matches!(
+            &entries[4],
+            MenuEntry::Item { command: Command::PromptMoveToFolder(tabs), .. } if *tabs == vec![TabId(2)]
+        ));
+        assert!(matches!(
+            &entries[5],
+            MenuEntry::Item { command: Command::PromptBookmarkTabs(tabs), .. } if *tabs == vec![TabId(1)]
+        ));
         let MenuEntry::Submenu {
             entries: windows, ..
-        } = &entries[4]
+        } = &entries[8]
         else {
             panic!("move to window is a submenu");
         };
@@ -492,7 +713,7 @@ mod tests {
         ));
         let MenuEntry::Submenu {
             entries: profiles, ..
-        } = &entries[5]
+        } = &entries[9]
         else {
             panic!("open in profile is a submenu");
         };
@@ -504,16 +725,26 @@ mod tests {
 
     #[test]
     fn tab_menu_counts_the_selection_and_disables_what_cannot_apply() {
-        let w = window_with(3);
+        let mut w = window_with(3);
+        w.selected = vec![TabId(1), TabId(2), TabId(3)];
         let all = [TabId(1), TabId(2), TabId(3)];
         let entries = tab_menu(&w, &all, &[], &[]);
         assert_eq!(labels(&entries)[0], "Close 3 tabs");
-        assert_eq!(labels(&entries)[3], "Move 3 tabs to new window");
+        assert_eq!(labels(&entries)[2], "Close all selected (3)");
+        assert_eq!(labels(&entries)[4], "Move 3 tabs to folder…");
+        assert_eq!(labels(&entries)[5], "Bookmark all selected (3)…");
+        assert_eq!(labels(&entries)[7], "Move 3 tabs to new window");
         // Close others, move to new window: nothing left; no other windows
         // or profiles: the submenus are disabled.
         assert_eq!(
             enabled(&entries),
-            vec![true, false, true, false, false, false]
+            vec![
+                true, false, true, true, true, true, true, false, false, false
+            ]
         );
+        assert!(matches!(
+            &entries[2],
+            MenuEntry::Item { command: Command::CloseTabs(tabs), .. } if *tabs == all.to_vec()
+        ));
     }
 }

@@ -126,6 +126,19 @@ The engine contract, in `osmena-engine`:
   `Option` are accepted) and a W3C key code joined with `+`. An action left
   out keeps its default; a chord that does not parse is a startup error,
   like a malformed `settings.toml`.
+- **Tab folders.** A tab's context menu (which acts on the selection
+  when the tab is part of it: Ctrl-click adds, Shift-click extends)
+  offers "Close all selected", "Move to folder…", and "Bookmark all
+  selected…". A folder is named in a prompt ("Folder A", "Folder B", …
+  by default, or an existing folder) and its tabs sit together in the
+  strip behind one chip: collapsed, the chip shows the name and count
+  and a click lists the tabs; expanded (from its menu), its tabs follow
+  it. The chip's menu also renames, ungroups, or closes the folder.
+  Folders are not kept across launches.
+- **Bookmark groups.** "Bookmark all selected…" asks for a group name
+  (or an existing group) and saves the pages to `bookmarks.toml` in the
+  profile; the window menu's "Bookmarks" submenu opens a group's pages
+  one at a time or all at once.
 - **Extensions**, when the engine runs them (`EngineInfo::extensions`).
   The toolbar ends in a puzzle-piece button: its menu lists the installed
   extensions (click one to open its action's popup), has a "Pin to

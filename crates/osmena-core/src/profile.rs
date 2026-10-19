@@ -95,9 +95,12 @@ impl Profile {
         self.dir.join("settings.toml")
     }
 
-    /// Reserved for a later phase.
     pub fn keymap_path(&self) -> PathBuf {
         self.dir.join("keymap.toml")
+    }
+
+    pub fn bookmarks_path(&self) -> PathBuf {
+        self.dir.join("bookmarks.toml")
     }
 
     /// Create the profile directory and the engine's subdirectory.

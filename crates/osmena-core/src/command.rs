@@ -2,9 +2,10 @@
 
 use url::Url;
 
+use crate::bookmarks::Bookmark;
 use crate::event::PendingTab;
 use crate::extension::ExtensionSource;
-use crate::model::{Browser, LoadState, Tab, TabId, Window, WindowId};
+use crate::model::{Browser, Folder, FolderId, LoadState, Tab, TabId, Window, WindowId};
 
 /// Every user action in the browser is one of these. The chrome, the keymap,
 /// and (in Phase 2) remappable hotkeys all produce `Command`s; nothing else
@@ -44,6 +45,40 @@ pub enum Command {
         tabs: Vec<TabId>,
         profile: String,
     },
+    /// Put these tabs in a folder of their window (a new one, or one
+    /// of its existing ones), together where the first of them is.
+    MoveTabsToFolder {
+        tabs: Vec<TabId>,
+        folder: FolderTarget,
+    },
+    SetFolderExpanded {
+        folder: FolderId,
+        expanded: bool,
+    },
+    RenameFolder {
+        folder: FolderId,
+        name: String,
+    },
+    /// Dissolve the folder; its tabs stay where they are.
+    Ungroup(FolderId),
+    /// Close every tab of the folder.
+    CloseFolder(FolderId),
+    /// Add these tabs' pages to the bookmark group called `group`
+    /// (made if new).
+    BookmarkTabs {
+        tabs: Vec<TabId>,
+        group: String,
+    },
+    /// Open every page of the bookmark group in new tabs of `window`.
+    OpenBookmarkGroup {
+        window: WindowId,
+        group: String,
+    },
+    /// Ask the user for the folder to move these tabs to.
+    PromptMoveToFolder(Vec<TabId>),
+    /// Ask the user for the group to bookmark these tabs in.
+    PromptBookmarkTabs(Vec<TabId>),
+    PromptRenameFolder(FolderId),
     NextTab(WindowId),
     PreviousTab(WindowId),
     /// Activate the tab at `index` in `window`'s strip; nothing if there
@@ -94,6 +129,39 @@ pub enum Command {
     UninstallExtension(String),
     InstallExtension(ExtensionSource),
     Quit,
+}
+
+/// The folder `Command::MoveTabsToFolder` puts tabs in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FolderTarget {
+    /// A new folder called `name`; empty, the window's next suggested
+    /// name ("Folder A", ...).
+    New {
+        name: String,
+    },
+    Existing(FolderId),
+}
+
+/// A question the chrome asks the user, with what it needs to ask it.
+/// The answer comes back as a `Command`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Prompt {
+    /// A name for a new folder (prefilled with `suggested`), or one of
+    /// the window's `folders` to use instead.
+    MoveToFolder {
+        tabs: Vec<TabId>,
+        suggested: String,
+        folders: Vec<(FolderId, String)>,
+    },
+    /// A name for a new bookmark group, or one of the existing `groups`.
+    BookmarkTabs {
+        tabs: Vec<TabId>,
+        groups: Vec<String>,
+    },
+    RenameFolder {
+        folder: FolderId,
+        name: String,
+    },
 }
 
 /// What the application must do after [`dispatch`] (or [`crate::apply`])
@@ -150,6 +218,13 @@ pub enum EngineAction {
     },
     /// The settings changed (pinned extensions): persist them and redraw.
     SaveSettings,
+    /// The bookmarks changed: persist them.
+    SaveBookmarks,
+    /// Show `prompt` in `window`'s chrome.
+    ShowPrompt {
+        window: WindowId,
+        prompt: Prompt,
+    },
     /// Open the popup of `extension`'s toolbar action for `window`'s
     /// active tab; the window knows where its button is.
     OpenExtensionAction {
@@ -190,6 +265,113 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
         Command::MoveTabsToWindow { tabs, window } => move_tabs_to_window(browser, tabs, *window),
         Command::OpenTabsInProfile { tabs, profile } => {
             open_tabs_in_profile(browser, tabs, profile)
+        }
+        Command::MoveTabsToFolder { tabs, folder } => {
+            move_tabs_to_folder(browser, tabs, folder);
+            Vec::new()
+        }
+        Command::SetFolderExpanded { folder, expanded } => {
+            if let Some(f) = folder_mut(browser, *folder) {
+                f.expanded = *expanded;
+            }
+            Vec::new()
+        }
+        Command::RenameFolder { folder, name } => {
+            let name = name.trim();
+            if !name.is_empty()
+                && let Some(f) = folder_mut(browser, *folder)
+            {
+                f.name = name.to_string();
+            }
+            Vec::new()
+        }
+        Command::Ungroup(folder) => {
+            if let Some(window) = browser.window_of_folder(*folder)
+                && let Some(w) = browser.window_mut(window)
+            {
+                for tab in &mut w.tabs {
+                    if tab.folder == Some(*folder) {
+                        tab.folder = None;
+                    }
+                }
+                w.prune_folders();
+            }
+            Vec::new()
+        }
+        Command::CloseFolder(folder) => {
+            let tabs = browser
+                .window_of_folder(*folder)
+                .and_then(|window| browser.window(window))
+                .map(|w| w.folder_tabs(*folder))
+                .unwrap_or_default();
+            remember_closed(browser, &tabs);
+            close_tabs(browser, &tabs)
+        }
+        Command::BookmarkTabs { tabs, group } => bookmark_tabs(browser, tabs, group),
+        Command::OpenBookmarkGroup { window, group } => {
+            let urls: Vec<Url> = browser
+                .bookmarks
+                .group(group)
+                .map(|g| g.bookmarks.iter().map(|b| b.url.clone()).collect())
+                .unwrap_or_default();
+            let mut actions = Vec::new();
+            for url in urls {
+                actions.extend(new_tab(browser, *window, Some(url)));
+            }
+            actions
+        }
+        Command::PromptMoveToFolder(tabs) => {
+            let Some(window) = tabs.iter().find_map(|t| browser.window_of_tab(*t)) else {
+                return Vec::new();
+            };
+            let w = browser.window(window).expect("window_of_tab");
+            let tabs: Vec<TabId> = tabs
+                .iter()
+                .copied()
+                .filter(|t| w.tab(*t).is_some())
+                .collect();
+            vec![EngineAction::ShowPrompt {
+                window,
+                prompt: Prompt::MoveToFolder {
+                    tabs,
+                    suggested: w.suggested_folder_name(),
+                    folders: w.folders.iter().map(|f| (f.id, f.name.clone())).collect(),
+                },
+            }]
+        }
+        Command::PromptBookmarkTabs(tabs) => {
+            let Some(window) = tabs.iter().find_map(|t| browser.window_of_tab(*t)) else {
+                return Vec::new();
+            };
+            let tabs: Vec<TabId> = tabs
+                .iter()
+                .copied()
+                .filter(|t| browser.tab(*t).is_some())
+                .collect();
+            vec![EngineAction::ShowPrompt {
+                window,
+                prompt: Prompt::BookmarkTabs {
+                    tabs,
+                    groups: browser.bookmarks.group_names(),
+                },
+            }]
+        }
+        Command::PromptRenameFolder(folder) => {
+            let Some(window) = browser.window_of_folder(*folder) else {
+                return Vec::new();
+            };
+            let name = browser
+                .window(window)
+                .and_then(|w| w.folder(*folder))
+                .map(|f| f.name.clone())
+                .unwrap_or_default();
+            vec![EngineAction::ShowPrompt {
+                window,
+                prompt: Prompt::RenameFolder {
+                    folder: *folder,
+                    name,
+                },
+            }]
         }
         Command::NextTab(window) => step_tab(browser, *window, 1),
         Command::PreviousTab(window) => step_tab(browser, *window, -1),
@@ -335,6 +517,73 @@ fn set_pinned(browser: &mut Browser, extension: &str, pinned: bool) -> bool {
     }
 }
 
+fn folder_mut(browser: &mut Browser, folder: FolderId) -> Option<&mut Folder> {
+    let window = browser.window_of_folder(folder)?;
+    browser.window_mut(window)?.folder_mut(folder)
+}
+
+/// Put the tabs (those in the window of the first) in the folder, which
+/// is made if `target` names a new one, and gather the folder's tabs
+/// where its first tab is. A tab leaves the folder it was in; a folder
+/// left empty goes.
+fn move_tabs_to_folder(browser: &mut Browser, tabs: &[TabId], target: &FolderTarget) {
+    let Some(window) = tabs.iter().find_map(|t| browser.window_of_tab(*t)) else {
+        return;
+    };
+    let folder = match target {
+        FolderTarget::Existing(id) => {
+            if browser.window_of_folder(*id) != Some(window) {
+                return;
+            }
+            *id
+        }
+        FolderTarget::New { name } => {
+            let id = browser.allocate_folder_id();
+            let w = browser.window_mut(window).expect("window_of_tab");
+            let name = match name.trim() {
+                "" => w.suggested_folder_name(),
+                name => name.to_string(),
+            };
+            w.folders.push(Folder {
+                id,
+                name,
+                expanded: false,
+            });
+            id
+        }
+    };
+    let w = browser.window_mut(window).expect("window_of_tab");
+    for tab in &mut w.tabs {
+        if tabs.contains(&tab.id) {
+            tab.folder = Some(folder);
+        }
+    }
+    w.gather_folder(folder);
+    w.prune_folders();
+}
+
+/// Bookmark the pages of `tabs` (those that exist) in `group`, which is
+/// made if new; an empty name means "Bookmarks".
+fn bookmark_tabs(browser: &mut Browser, tabs: &[TabId], group: &str) -> Vec<EngineAction> {
+    let bookmarks: Vec<Bookmark> = tabs
+        .iter()
+        .filter_map(|tab| browser.tab(*tab))
+        .map(|t| Bookmark {
+            title: t.display_title().to_string(),
+            url: t.url.clone(),
+        })
+        .collect();
+    if bookmarks.is_empty() {
+        return Vec::new();
+    }
+    let group = match group.trim() {
+        "" => "Bookmarks",
+        name => name,
+    };
+    browser.bookmarks.add(group, bookmarks);
+    vec![EngineAction::SaveBookmarks]
+}
+
 /// Add a window to the model whose first tab shows `url`. Used by
 /// `Command::NewWindow` and by `main` for the initial window, which opens
 /// the homepage or a URL given on the command line.
@@ -421,6 +670,7 @@ pub(crate) fn close_tab(browser: &mut Browser, tab: TabId) -> Vec<EngineAction> 
             .expect("window_of_tab returned an existing window");
         let index = w.index_of(tab).expect("tab is in this window");
         w.tabs.remove(index);
+        w.prune_folders();
         w.selected.retain(|t| *t != tab);
         if w.tabs.is_empty() {
             None
@@ -1429,5 +1679,294 @@ mod tests {
             vec![EngineAction::UninstallExtension("b".to_string())]
         );
         assert!(dispatch(&mut b, &Command::UninstallExtension("zz".to_string())).is_empty());
+    }
+
+    /// A window with `n` tabs; returns the browser, the window, and the tab ids.
+    fn window_with_tabs(n: usize) -> (Browser, WindowId, Vec<TabId>) {
+        let (mut b, window, first) = one_window();
+        let mut tabs = vec![first];
+        for _ in 1..n {
+            dispatch(&mut b, &Command::NewTab { window, url: None });
+            tabs.push(b.window(window).unwrap().active);
+        }
+        (b, window, tabs)
+    }
+
+    fn order(b: &Browser, window: WindowId) -> Vec<TabId> {
+        b.window(window)
+            .unwrap()
+            .tabs
+            .iter()
+            .map(|t| t.id)
+            .collect()
+    }
+
+    #[test]
+    fn moving_tabs_to_a_new_folder_names_it_gathers_them_and_keeps_them_in_order() {
+        let (mut b, window, t) = window_with_tabs(5);
+        let actions = dispatch(
+            &mut b,
+            &Command::MoveTabsToFolder {
+                tabs: vec![t[3], t[1]],
+                folder: FolderTarget::New {
+                    name: "  ".to_string(),
+                },
+            },
+        );
+        assert!(actions.is_empty());
+        let w = b.window(window).unwrap();
+        assert_eq!(w.folders.len(), 1);
+        let folder = w.folders[0].id;
+        assert_eq!(w.folders[0].name, "Folder A");
+        assert!(!w.folders[0].expanded);
+        assert_eq!(w.folder_tabs(folder), vec![t[1], t[3]]);
+        assert_eq!(order(&b, window), vec![t[0], t[1], t[3], t[2], t[4]]);
+        assert_eq!(b.window_of_folder(folder), Some(window));
+
+        // Another tab joins the existing folder and is gathered too.
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToFolder {
+                tabs: vec![t[4]],
+                folder: FolderTarget::Existing(folder),
+            },
+        );
+        assert_eq!(order(&b, window), vec![t[0], t[1], t[3], t[4], t[2]]);
+        // A second new folder gets the next name and takes a tab from the first.
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToFolder {
+                tabs: vec![t[4], t[2]],
+                folder: FolderTarget::New {
+                    name: String::new(),
+                },
+            },
+        );
+        let w = b.window(window).unwrap();
+        assert_eq!(w.folders[1].name, "Folder B");
+        assert_eq!(w.folder_tabs(folder), vec![t[1], t[3]]);
+        assert_eq!(w.folder_tabs(w.folders[1].id), vec![t[4], t[2]]);
+        assert_eq!(order(&b, window), vec![t[0], t[1], t[3], t[4], t[2]]);
+        // An unknown folder or unknown tabs change nothing.
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToFolder {
+                tabs: vec![t[0]],
+                folder: FolderTarget::Existing(FolderId(99)),
+            },
+        );
+        assert_eq!(b.window(window).unwrap().tab(t[0]).unwrap().folder, None);
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::MoveTabsToFolder {
+                    tabs: vec![TabId(99)],
+                    folder: FolderTarget::New {
+                        name: "x".to_string()
+                    },
+                }
+            )
+            .is_empty()
+        );
+        assert_eq!(b.window(window).unwrap().folders.len(), 2);
+    }
+
+    #[test]
+    fn folders_expand_rename_ungroup_and_close() {
+        let (mut b, window, t) = window_with_tabs(4);
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToFolder {
+                tabs: vec![t[1], t[2]],
+                folder: FolderTarget::New {
+                    name: "Work".to_string(),
+                },
+            },
+        );
+        let folder = b.window(window).unwrap().folders[0].id;
+        dispatch(
+            &mut b,
+            &Command::SetFolderExpanded {
+                folder,
+                expanded: true,
+            },
+        );
+        assert!(b.window(window).unwrap().folder(folder).unwrap().expanded);
+        dispatch(
+            &mut b,
+            &Command::RenameFolder {
+                folder,
+                name: " Play ".to_string(),
+            },
+        );
+        assert_eq!(
+            b.window(window).unwrap().folder(folder).unwrap().name,
+            "Play"
+        );
+        dispatch(
+            &mut b,
+            &Command::RenameFolder {
+                folder,
+                name: "  ".to_string(),
+            },
+        );
+        assert_eq!(
+            b.window(window).unwrap().folder(folder).unwrap().name,
+            "Play"
+        );
+
+        // Closing one tab keeps the folder; closing the last removes it.
+        dispatch(&mut b, &Command::CloseTab(t[1]));
+        assert_eq!(b.window(window).unwrap().folder_tabs(folder), vec![t[2]]);
+        dispatch(&mut b, &Command::CloseTab(t[2]));
+        assert!(b.window(window).unwrap().folders.is_empty());
+
+        // Ungroup leaves the tabs where they are.
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToFolder {
+                tabs: vec![t[0], t[3]],
+                folder: FolderTarget::New {
+                    name: "Again".to_string(),
+                },
+            },
+        );
+        let folder = b.window(window).unwrap().folders[0].id;
+        dispatch(&mut b, &Command::Ungroup(folder));
+        let w = b.window(window).unwrap();
+        assert!(w.folders.is_empty());
+        assert!(w.tabs.iter().all(|t| t.folder.is_none()));
+        assert_eq!(order(&b, window), vec![t[0], t[3]]);
+
+        // Close folder closes its tabs and remembers them.
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToFolder {
+                tabs: vec![t[3]],
+                folder: FolderTarget::New {
+                    name: "Gone".to_string(),
+                },
+            },
+        );
+        let folder = b.window(window).unwrap().folders[0].id;
+        let closed = b.closed_tabs.len();
+        let actions = dispatch(&mut b, &Command::CloseFolder(folder));
+        assert_eq!(actions[0], EngineAction::CloseTab(t[3]));
+        assert_eq!(b.closed_tabs.len(), closed + 1);
+        assert_eq!(order(&b, window), vec![t[0]]);
+        assert!(dispatch(&mut b, &Command::CloseFolder(FolderId(99))).is_empty());
+    }
+
+    #[test]
+    fn bookmarking_tabs_fills_a_group_and_saves() {
+        let (mut b, window, t) = window_with_tabs(2);
+        b.tab_mut(t[0]).unwrap().title = "First".to_string();
+        let actions = dispatch(
+            &mut b,
+            &Command::BookmarkTabs {
+                tabs: vec![t[0], t[1], TabId(99)],
+                group: " Work ".to_string(),
+            },
+        );
+        assert_eq!(actions, vec![EngineAction::SaveBookmarks]);
+        let group = b.bookmarks.group("Work").unwrap();
+        assert_eq!(group.bookmarks.len(), 2);
+        assert_eq!(group.bookmarks[0].title, "First");
+        assert_eq!(group.bookmarks[0].url.as_str(), "https://a.example/");
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::BookmarkTabs {
+                    tabs: vec![TabId(99)],
+                    group: "Work".to_string()
+                }
+            )
+            .is_empty()
+        );
+        dispatch(
+            &mut b,
+            &Command::BookmarkTabs {
+                tabs: vec![t[0]],
+                group: String::new(),
+            },
+        );
+        assert!(b.bookmarks.group("Bookmarks").is_some());
+
+        // Opening the group makes a tab per page, the last one active.
+        let before = order(&b, window).len();
+        let actions = dispatch(
+            &mut b,
+            &Command::OpenBookmarkGroup {
+                window,
+                group: "Work".to_string(),
+            },
+        );
+        assert_eq!(order(&b, window).len(), before + 2);
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|a| matches!(a, EngineAction::CreateTab { .. }))
+                .count(),
+            2
+        );
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::OpenBookmarkGroup {
+                    window,
+                    group: "None".to_string()
+                }
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn prompts_carry_what_the_chrome_needs_to_ask() {
+        let (mut b, window, t) = window_with_tabs(3);
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToFolder {
+                tabs: vec![t[0]],
+                folder: FolderTarget::New {
+                    name: "Folder A".to_string(),
+                },
+            },
+        );
+        let folder = b.window(window).unwrap().folders[0].id;
+        assert_eq!(
+            dispatch(&mut b, &Command::PromptMoveToFolder(vec![t[1], TabId(99)])),
+            vec![EngineAction::ShowPrompt {
+                window,
+                prompt: Prompt::MoveToFolder {
+                    tabs: vec![t[1]],
+                    suggested: "Folder B".to_string(),
+                    folders: vec![(folder, "Folder A".to_string())],
+                },
+            }]
+        );
+        b.bookmarks.add("Work", Vec::new());
+        assert_eq!(
+            dispatch(&mut b, &Command::PromptBookmarkTabs(vec![t[1], t[2]])),
+            vec![EngineAction::ShowPrompt {
+                window,
+                prompt: Prompt::BookmarkTabs {
+                    tabs: vec![t[1], t[2]],
+                    groups: vec!["Work".to_string()],
+                },
+            }]
+        );
+        assert_eq!(
+            dispatch(&mut b, &Command::PromptRenameFolder(folder)),
+            vec![EngineAction::ShowPrompt {
+                window,
+                prompt: Prompt::RenameFolder {
+                    folder,
+                    name: "Folder A".to_string(),
+                },
+            }]
+        );
+        assert!(dispatch(&mut b, &Command::PromptMoveToFolder(vec![TabId(99)])).is_empty());
+        assert!(dispatch(&mut b, &Command::PromptRenameFolder(FolderId(99))).is_empty());
     }
 }
