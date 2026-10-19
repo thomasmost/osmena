@@ -42,8 +42,13 @@ pub fn icons(root: &Path, name: &str) -> Result<()> {
     let svg_path = assets.join("logo.svg");
     let svg_data =
         std::fs::read(&svg_path).map_err(|e| format!("reading {}: {e}", svg_path.display()))?;
-    // The logo is pure vector: no fonts, no raster artwork.
-    let tree = usvg::Tree::from_data(&svg_data, &usvg::Options::default())?;
+    // No fonts (the build drops text support); raster artwork the SVG
+    // references is resolved against the assets directory.
+    let options = usvg::Options {
+        resources_dir: Some(assets.clone()),
+        ..usvg::Options::default()
+    };
+    let tree = usvg::Tree::from_data(&svg_data, &options)?;
 
     let out = root.join("assets").join("icons");
     std::fs::create_dir_all(&out)?;
@@ -52,8 +57,16 @@ pub fn icons(root: &Path, name: &str) -> Result<()> {
     // it, so every size comes from the same pixels. Sizes that do not divide
     // 1024 (24, 48) weight the partly covered source pixels.
     let largest = render(&tree, LARGEST_SIZE)?;
+    // usvg drops an <image> whose file is missing or not a recognised
+    // format with only a log warning, and resvg draws nothing for one it
+    // cannot decode; either leaves an empty tile. The logos are dark ink,
+    // so an all-light interior means the logo did not render.
     if !has_dark_interior(&largest) {
-        return Err("the logo did not render: assets/logo.svg draws nothing dark".into());
+        return Err(
+            "the logo did not render: assets/logo.svg draws nothing dark \
+                    (a referenced image may be missing or corrupt)"
+                .into(),
+        );
     }
     let mut pngs: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
     for size in PNG_SIZES.iter().chain(ICO_SIZES.iter()).copied() {
@@ -156,8 +169,8 @@ fn downsample(source: &tiny_skia::Pixmap, size: u32) -> Result<tiny_skia::Pixmap
 
 /// Whether any pixel in the middle half of the pixmap (well inside the
 /// tile's border) is dark: red below 128 at full alpha, in premultiplied
-/// terms. The shell is drawn in dark ink, so this is what "rendered" looks
-/// like.
+/// terms. The logos are drawn in dark ink, so this is what "rendered"
+/// looks like.
 fn has_dark_interior(pixmap: &tiny_skia::Pixmap) -> bool {
     let (w, h) = (pixmap.width() as usize, pixmap.height() as usize);
     let data = pixmap.data();

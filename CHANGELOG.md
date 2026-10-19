@@ -16,4 +16,5 @@ All notable changes to the osmena crates. The crates version together.
   icon, and fatal dialog, parameterised by brand and engine.
 - `osmena-shell`: the winit application, browser window, settings window,
   process glue, and `run`, generic over `Engine`.
-- `osmena-xtask`: icon generation as a library.
+- `osmena-xtask`: icon generation as a library, for vector logos and for
+  SVGs that frame raster artwork.
