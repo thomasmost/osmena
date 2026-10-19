@@ -1717,9 +1717,15 @@ mod tests {
             describe_chord(KeyChord::new(Modifiers::CONTROL, Code::PageDown)),
             "Ctrl+PgDn"
         );
+        // Alt reads as Option on macOS.
+        let alt = if cfg!(target_os = "macos") {
+            "Option"
+        } else {
+            "Alt"
+        };
         assert_eq!(
             describe_chord(KeyChord::new(Modifiers::ALT, Code::Home)),
-            "Alt+Home"
+            format!("{alt}+Home")
         );
         assert_eq!(
             describe_chord(KeyChord::new(Modifiers::empty(), Code::Numpad5)),
