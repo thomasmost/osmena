@@ -1,0 +1,33 @@
+[package]
+name = "osmena-shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The osmena browser shell: the winit application, browser windows and settings window over any Engine"
+
+[dependencies]
+osmena-core = { workspace = true }
+osmena-engine = { workspace = true }
+osmena-chrome = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+dpi = { workspace = true }
+egui = { workspace = true }
+egui-winit = { workspace = true }
+egui_glow = { workspace = true }
+glow = { workspace = true }
+log = { workspace = true }
+url = { workspace = true }
+winit = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# The job object that ties an engine's child processes to the browser
+# (process.rs).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    # CreateJobObjectW takes a SECURITY_ATTRIBUTES, gated behind this feature.
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

@@ -1,0 +1,120 @@
+# osmena
+
+The shared shell of [Paladin](https://github.com/thomasmost/paladin) (Servo)
+and [Nautilus](https://github.com/thomasmost/nautilus) (Chromium): the
+browser model, the egui chrome, and the winit application, written once and
+built on top of any engine that implements a small trait. Named after the
+nautilus shell's iridescent inner layer, which is also the paladin's armour.
+
+A browser built on osmena is four things:
+
+1. a `Brand` constant (name, data directory, homepage, icon);
+2. an `EngineInfo` constant (engine name and version, its data directory,
+   what it can do);
+3. an engine crate that implements `Engine`, `TabHost`, and `Surface` from
+   `osmena-engine`;
+4. a `main` that parses its command line and calls `osmena_shell::run`.
+
+Everything else, including the multi-tab selection, the tab moves between
+windows and profiles, the native menus, the profile colours, the settings
+window, and the keymap, is here and shared.
+
+## Crates
+
+Dependencies point only downwards.
+
+| Crate | Tier | Holds | Depends on |
+| --- | --- | --- | --- |
+| `osmena-core` | model | `Browser`/`Window`/`Tab`, `Command` and `dispatch`, `EngineEvent` and `apply`, `EngineInput`, keymap, settings, profiles, `Brand`, `EngineInfo`. Pure and unit-tested. | serde, url, keyboard-types |
+| `osmena-engine` | engine contract | The `Engine`, `TabHost`, and `Surface` traits, `PagePaint`, `Waker`, `EngineError`; with the `glutin` feature, a `Surface` for engines that paint into memory. | osmena-core, glow, raw-window-handle |
+| `osmena-chrome` | chrome | The egui tab strip, toolbar, status overlay and crash panel; the window and tab menus as data and as native popups; pointer and key routing; the icon and the fatal-error dialog. | osmena-core, egui, winit, muda |
+| `osmena-shell` | shell | The winit `App`, `BrowserWindow`, `SettingsWindow`, the process glue, and `run`. Generic over `Engine`. | osmena-chrome, osmena-engine, egui_glow |
+| `osmena-xtask` | tool | `icons`: renders a browser's `assets/logo.svg` into its icon set. | resvg |
+
+An engine crate depends on `osmena-core` and `osmena-engine` only; it never
+sees egui or winit. A browser's binary depends on `osmena-shell` and its
+engine crate.
+
+## How a browser uses it
+
+```rust
+use osmena_core::{Brand, EngineInfo};
+
+static BRAND: Brand = Brand {
+    name: "Nautilus",
+    binary: "nautilus",
+    data_dir: "Nautilus",
+    homepage: "https://www.wikipedia.org/",
+    icon_png: include_bytes!("../../../assets/icons/nautilus-256.png"),
+};
+
+// In the engine crate:
+pub static INFO: EngineInfo = EngineInfo {
+    name: "Chromium",
+    version: "154",
+    data_dir: "chromium",
+    supports_stop: true,
+    wheel_line_px: 100.0,
+};
+
+// In main, after the engine-specific preamble (helper-process dispatch,
+// logging) and clap parsing:
+osmena_shell::run(osmena_shell::Launch {
+    brand: &BRAND,
+    engine: &nautilus_engine::INFO,
+    args: cli.base,
+    start_engine: Box::new(|dir, waker| nautilus_engine::Engine::new(dir, waker)),
+})
+```
+
+The engine contract, in `osmena-engine`:
+
+- `Engine`: `spin`, `drain_events`, `discard_pending`, `open_surface` (a GL
+  context on a native window) and `open_host` (the tabs of one window).
+- `TabHost`: create, adopt, close, navigate, history, show and hide, focus,
+  resize, input, and `paint_page`, which hands the shell either a blit
+  function (the engine painted into GL) or a frame of BGRA pixels (the
+  engine paints into memory). The shell draws either under the toolbar.
+- `Surface`: make current, resize, the glow handle, begin frame, present.
+
+## Depending on osmena
+
+Browsers pin a revision, never a branch, so any checkout builds the same:
+
+```toml
+[workspace.dependencies]
+osmena-core = { git = "https://github.com/thomasmost/osmena", rev = "<sha>" }
+osmena-engine = { git = "https://github.com/thomasmost/osmena", rev = "<sha>" }
+osmena-shell = { git = "https://github.com/thomasmost/osmena", rev = "<sha>" }
+```
+
+The four crates version together; bump all pins at once. To work on osmena
+and a browser side by side, patch the git source to a checkout in
+`~/.cargo/config.toml` (config patches override manifests):
+
+```toml
+[patch."https://github.com/thomasmost/osmena"]
+osmena-core = { path = "/Users/you/vibes/osmena/crates/osmena-core" }
+osmena-engine = { path = "/Users/you/vibes/osmena/crates/osmena-engine" }
+osmena-chrome = { path = "/Users/you/vibes/osmena/crates/osmena-chrome" }
+osmena-shell = { path = "/Users/you/vibes/osmena/crates/osmena-shell" }
+osmena-xtask = { path = "/Users/you/vibes/osmena/tools/osmena-xtask" }
+```
+
+Then commit in osmena, push, and move the browser's `rev` to the new sha.
+
+## Development
+
+- `cargo test --workspace --features osmena-engine/glutin`
+- `cargo clippy --workspace --all-targets --features osmena-engine/glutin -- -D warnings`
+- `cargo fmt --all`
+
+Nothing here needs an engine, so the whole workspace builds in under a
+minute. The pins on winit, egui, and glow are exact because the engines
+share a GL context and window handles with them; a browser resolves to the
+same versions through its dependency on these crates.
+
+## Licence
+
+MIT or Apache-2.0, at your option. `osmena-chrome/src/keyutils.rs` is
+adapted from Servo's reference shell and keeps its MPL-2.0 header.

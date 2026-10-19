@@ -1,0 +1,37 @@
+[package]
+name = "osmena-chrome"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The egui chrome of the osmena browser shell: tab strip, toolbar, menus, routing"
+
+[dependencies]
+osmena-core = { workspace = true }
+dpi = { workspace = true }
+egui = { workspace = true }
+keyboard-types = { workspace = true }
+log = { workspace = true }
+muda = { version = "0.21", default-features = false }
+png = "0.18"
+url = { workspace = true }
+winit = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSResponder",
+    "NSImage",
+    "NSRunningApplication",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+
+[target.'cfg(windows)'.dependencies]
+# Native message box for fatal startup errors in release builds (see fatal.rs).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }

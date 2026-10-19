@@ -1,0 +1,18 @@
+[package]
+name = "osmena-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Engine-free browser model: windows, tabs, commands, events, input, keymap, settings, profiles, brand"
+
+[dependencies]
+directories = "6.0.0"
+keyboard-types = { workspace = true }
+serde = { workspace = true }
+toml = "1.1"
+url = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

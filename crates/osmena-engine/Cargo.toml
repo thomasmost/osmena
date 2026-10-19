@@ -1,0 +1,22 @@
+[package]
+name = "osmena-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The engine contract of the osmena browser shell: Engine, TabHost and Surface traits"
+
+[features]
+# A `Surface` through glutin, for engines that paint into memory.
+glutin = ["dep:glutin"]
+
+[dependencies]
+osmena-core = { workspace = true }
+dpi = { workspace = true }
+glow = { workspace = true }
+glutin = { workspace = true, optional = true }
+keyboard-types = { workspace = true }
+log = { workspace = true }
+raw-window-handle = { workspace = true }
+url = { workspace = true }
