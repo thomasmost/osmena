@@ -5,7 +5,7 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-10-19 (project start)._
+_Last updated: 2026-10-19 (handoff after the extraction)._
 
 ## Architecture
 
@@ -85,3 +85,51 @@ No engine is needed; the workspace builds in under a minute.
 - Commit to `main` unless asked for a branch. Conventional Commits.
 - The browsers' own docs (`README.md`, `CLAUDE.md`) describe what each one
   adds; the shared behaviour is documented here only.
+
+## Status and handoff (2026-10-19)
+
+What exists: the five crates, extracted in one day from Paladin and Nautilus,
+both of which now build on them and pin the same revision. The repository is
+public at <https://github.com/thomasmost/osmena>; CI (fmt, clippy, tests on
+macOS and Windows runners, no engine needed) was green on every push.
+
+Verified: `cargo test` (142 tests), clippy with `-D warnings`, formatting; both
+browsers launch and render pages through this shell on Windows (screenshots
+of example.com with each brand's title and icon). Not verified since the
+extraction: the browsers' manual checklists beyond launch (tab selection,
+moves between windows, menus, settings) moved with their unit tests but were
+not exercised by hand; anything on macOS.
+
+Decisions, with reasons:
+- Separate repositories, not a monorepo: Paladin's Servo build (60 git crates,
+  a patch table, Servo's toolchain pin) must not be a cost of building Nautilus.
+- Four crates rather than three tiers: `osmena-engine` holds the traits so an
+  engine crate implements them without depending on egui or winit.
+- Branding by injection: `Brand` and `EngineInfo` statics owned by the binary
+  and the engine crate, passed by reference, no globals.
+- Two page-paint paths, `PagePaint::Blit` (Servo) and `PagePaint::Frame` (CEF),
+  both in one `BrowserWindow`; the frame path registers its texture with egui
+  after the UI pass that created it (the painter is not reachable inside it).
+- Licence MIT OR Apache-2.0 with "the osmena contributors" as the holder; the
+  owner has not chosen a name. Nothing is published to crates.io; the names
+  are free and the manifests are ready.
+
+Open items, most useful first:
+1. Run both browsers' manual checklists against the current revision.
+2. An integration test of `osmena-shell` with a fake `Engine` (no window
+   system is needed for the model and routing, but the window code itself has
+   no test).
+3. IME for page fields (E1 in the browsers' `docs/upstream-issues.md`).
+4. macOS: nothing has been built there since the extraction.
+
+All three checkouts live side by side under `vibes/browser-project/`
+(`osmena`, `paladin`, `nautilus`); Paladin's Servo and stylo fork checkouts
+stay at `~/vibes/servo` and `~/vibes/stylo`. `~/.cargo/config.toml` on the
+development Windows box carries a `[patch."https://github.com/thomasmost/osmena"]`
+table pointing at the osmena checkout, so both browsers build against
+uncommitted osmena changes; while it is active `cargo` rewrites the
+browsers' `Cargo.lock` with path sources for the osmena crates. Before
+committing a browser's lock, disable the table (rename its key), run
+`cargo metadata` to put the git sources back, commit, and re-enable it.
+Cargo fetches the pinned revision from GitHub even when the table is
+active, so GitHub must be reachable.

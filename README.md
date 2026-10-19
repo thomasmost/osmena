@@ -94,11 +94,11 @@ and a browser side by side, patch the git source to a checkout in
 
 ```toml
 [patch."https://github.com/thomasmost/osmena"]
-osmena-core = { path = "/Users/you/vibes/osmena/crates/osmena-core" }
-osmena-engine = { path = "/Users/you/vibes/osmena/crates/osmena-engine" }
-osmena-chrome = { path = "/Users/you/vibes/osmena/crates/osmena-chrome" }
-osmena-shell = { path = "/Users/you/vibes/osmena/crates/osmena-shell" }
-osmena-xtask = { path = "/Users/you/vibes/osmena/tools/osmena-xtask" }
+osmena-core = { path = "/Users/you/vibes/browser-project/osmena/crates/osmena-core" }
+osmena-engine = { path = "/Users/you/vibes/browser-project/osmena/crates/osmena-engine" }
+osmena-chrome = { path = "/Users/you/vibes/browser-project/osmena/crates/osmena-chrome" }
+osmena-shell = { path = "/Users/you/vibes/browser-project/osmena/crates/osmena-shell" }
+osmena-xtask = { path = "/Users/you/vibes/browser-project/osmena/tools/osmena-xtask" }
 ```
 
 Cargo still resolves the pinned revision from GitHub even when every crate
