@@ -14,7 +14,9 @@ crates, dependencies pointing only downwards:
 
 `osmena-core` (model, pure) ← `osmena-engine` (the `Engine`/`TabHost`/
 `Surface` traits) and `osmena-chrome` (egui chrome, menus, routing) ←
-`osmena-shell` (winit app, windows, `run`). `tools/osmena-xtask` is a
+`osmena-shell` (winit app, windows, the command line with its hidden
+`--exit-after <seconds>` that quits through the normal path after
+logging the open tabs, for smoke tests, `run`). `tools/osmena-xtask` is a
 library the browsers' `xtask` binaries call for icon generation.
 
 Data flow: the chrome and the keymap emit `Command`s; `osmena_core::dispatch`

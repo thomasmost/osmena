@@ -53,6 +53,11 @@ pub struct CliArgs {
     /// URLs to open, one tab each; text that is not a URL is searched.
     /// With none, the homepage opens.
     pub urls: Vec<String>,
+    /// Quit this many seconds after the engine started, as Quit would,
+    /// logging the open tabs first. For scripted smoke tests of a build
+    /// (does the engine start, does a page load, does shutdown finish).
+    #[arg(long, hide = true, value_name = "SECONDS")]
+    pub exit_after: Option<f64>,
 }
 
 /// Builds the engine once the event loop is running: the engine's data
@@ -179,6 +184,7 @@ pub fn run<E: Engine>(launch: Launch<E>) -> ExitCode {
         actions,
         start_engine,
         &event_loop,
+        args.exit_after.map(std::time::Duration::from_secs_f64),
     );
     match event_loop.run_app(&mut app) {
         Ok(()) if app.started_cleanly() => ExitCode::SUCCESS,

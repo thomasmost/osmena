@@ -6,6 +6,11 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- `--exit-after <seconds>` (hidden from `--help`): the browser quits
+  that long after its engine started, through the normal Quit path,
+  after logging each open tab's title and URL. For scripted smoke tests
+  of a build: a CI job can start the browser on a page, let it load,
+  and check the log and the exit code.
 - The page's context menu, shaped like Chromium's, over what the engine
   finds under the pointer: a link opens in a new tab (beside the opener,
   without taking its place) or a new window, is saved, or has its

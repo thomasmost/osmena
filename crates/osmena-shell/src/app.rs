@@ -22,10 +22,12 @@ use crate::clipboard;
 use crate::settings_window::{SettingsOutcome, SettingsWindow};
 use crate::window::BrowserWindow;
 
-/// The only user event: the engine asked us to spin its message loop.
+/// The user events: the engine asked us to spin its message loop, or
+/// the `--exit-after` timer ran out.
 #[derive(Debug)]
 pub enum AppEvent {
     Wake,
+    ExitAfter(std::time::Duration),
 }
 
 struct WinitWaker(Mutex<EventLoopProxy<AppEvent>>);
@@ -56,6 +58,9 @@ pub struct App<E: Engine> {
     /// Builds the engine on `resumed`; taken once.
     start_engine: Option<StartEngine<E>>,
     waker: Arc<WinitWaker>,
+    /// `--exit-after`: quit this long after the engine started.
+    exit_after: Option<std::time::Duration>,
+    exit_proxy: EventLoopProxy<AppEvent>,
     exiting: bool,
     engine_failed: bool,
     /// The first window could not be opened, so the app has nothing to show.
@@ -66,6 +71,7 @@ impl<E: Engine> App<E> {
     /// `initial_actions` are the actions from building the initial model
     /// (opening the first window and its tabs). They run once the event
     /// loop is active and the engine exists.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         brand: &'static Brand,
         engine_info: &'static EngineInfo,
@@ -74,6 +80,7 @@ impl<E: Engine> App<E> {
         initial_actions: Vec<EngineAction>,
         start_engine: StartEngine<E>,
         event_loop: &EventLoop<AppEvent>,
+        exit_after: Option<std::time::Duration>,
     ) -> App<E> {
         App {
             brand,
@@ -86,6 +93,8 @@ impl<E: Engine> App<E> {
             engine: None,
             start_engine: Some(start_engine),
             waker: Arc::new(WinitWaker(Mutex::new(event_loop.create_proxy()))),
+            exit_after,
+            exit_proxy: event_loop.create_proxy(),
             exiting: false,
             engine_failed: false,
             window_failed: false,
@@ -546,6 +555,17 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
             );
             crate::process::bind_children_to_this_process();
             icon::set_dock_icon(self.brand);
+            if let Some(delay) = self.exit_after {
+                let proxy = self.exit_proxy.clone();
+                let _ = std::thread::Builder::new()
+                    .name("ExitAfter".to_string())
+                    .spawn(move || {
+                        std::thread::sleep(delay);
+                        if let Err(e) = proxy.send_event(AppEvent::ExitAfter(delay)) {
+                            log::warn!("cannot ask the event loop to exit: {e}");
+                        }
+                    });
+            }
             let actions = std::mem::take(&mut self.pending_actions);
             self.perform_all(actions, event_loop);
         }
@@ -615,6 +635,23 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
             AppEvent::Wake => self.pump(event_loop),
+            AppEvent::ExitAfter(delay) => {
+                // What a smoke test reads: did the pages load.
+                let tabs: Vec<String> = self
+                    .browser
+                    .windows
+                    .iter()
+                    .flat_map(|w| w.tabs.iter())
+                    .map(|t| format!("{:?} at {}", t.title, t.url))
+                    .collect();
+                log::info!(
+                    "--exit-after {:.1}s: quitting with {} tab(s): {}",
+                    delay.as_secs_f64(),
+                    tabs.len(),
+                    tabs.join(", ")
+                );
+                self.run_commands(vec![Command::Quit], event_loop);
+            }
         }
         if !self.exiting {
             event_loop.set_control_flow(ControlFlow::Wait);
