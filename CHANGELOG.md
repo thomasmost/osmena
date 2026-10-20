@@ -4,6 +4,13 @@ All notable changes to the osmena crates. The crates version together.
 
 ## Unreleased
 
+### Fixed
+
+- macOS: the tab context menu, the page context menu, and the window
+  menu opened along the bottom edge of the window instead of at the
+  pointer. muda mirrors the y coordinate for an AppKit view with its
+  origin at the bottom; winit's view has its origin at the top.
+
 ### Added
 
 - `--exit-after <seconds>` (hidden from `--help`): the browser quits

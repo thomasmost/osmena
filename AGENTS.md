@@ -221,7 +221,9 @@ Open items, most useful first:
    system is needed for the model and routing, but the window code itself has
    no test).
 3. IME for page fields (E1 in the browsers' `docs/upstream-issues.md`).
-4. macOS: nothing has been built there since the extraction.
+4. macOS: first built and run there on 2026-10-20 (with Nautilus); the
+   native menus' position was fixed from that run but not yet re-checked
+   by hand, nor has the rest of the chrome on macOS.
 
 All three checkouts live side by side under `vibes/browser-project/`
 (`osmena`, `paladin`, `nautilus`); Paladin's Servo and stylo fork checkouts

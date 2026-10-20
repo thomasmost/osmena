@@ -42,6 +42,18 @@ impl NativeMenu {
     pub fn show(&self, window: &Window, position: Option<LogicalPosition<f64>>) -> Option<Command> {
         // Anything still queued from an earlier menu is stale.
         while MenuEvent::receiver().try_recv().is_ok() {}
+        // muda mirrors y for a view whose origin is at the bottom (AppKit's
+        // default), but winit's view is flipped, its origin at the top, so
+        // the two mirrors cancel and a menu asked for at the tab strip
+        // opened along the window's bottom edge. Mirror it here first.
+        #[cfg(target_os = "macos")]
+        let position = position.map(|p| {
+            let height = window
+                .inner_size()
+                .to_logical::<f64>(window.scale_factor())
+                .height;
+            LogicalPosition::new(p.x, height - p.y)
+        });
         let position = position.map(Position::Logical);
         let Ok(handle) = window.window_handle() else {
             return None;
