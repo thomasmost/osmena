@@ -15,6 +15,7 @@
 //!    under it, however the engine delivers it.
 
 mod app;
+mod clipboard;
 mod page;
 pub mod process;
 mod settings_window;
@@ -49,7 +50,8 @@ pub struct CliArgs {
     /// Profile name; state lives under the per-user data directory.
     #[arg(long, default_value = DEFAULT_PROFILE_NAME)]
     pub profile: String,
-    /// URLs to open, one tab each. With none, the homepage opens.
+    /// URLs to open, one tab each; text that is not a URL is searched.
+    /// With none, the homepage opens.
     pub urls: Vec<String>,
 }
 
@@ -107,7 +109,8 @@ pub fn run<E: Engine>(launch: Launch<E>) -> ExitCode {
     };
     let mut urls = Vec::new();
     for arg in &args.urls {
-        match location_input_to_url(arg) {
+        // A URL opens; other text is searched, as in the address bar.
+        match location_input_to_url(arg).or_else(|| settings.search.url_for(arg)) {
             Some(url) => urls.push(url),
             None => {
                 report_fatal(brand, &format!("{bin}: not a URL: {arg:?}"));

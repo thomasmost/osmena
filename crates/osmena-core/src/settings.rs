@@ -6,6 +6,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 use crate::brand::Brand;
 
@@ -31,6 +32,8 @@ pub struct Settings {
     /// toolbar, in order. An id of an extension no longer installed is
     /// kept, so it comes back pinned if the extension does.
     pub pinned_extensions: Vec<String>,
+    /// Where address-bar text that is not a URL goes.
+    pub search: SearchSettings,
 }
 
 impl Default for Settings {
@@ -42,7 +45,53 @@ impl Default for Settings {
             chrome_color: ChromeColor::default(),
             system_title_bar: false,
             pinned_extensions: Vec::new(),
+            search: SearchSettings::default(),
         }
+    }
+}
+
+/// The search the address bar runs on text that is not a URL, and that
+/// the page's context menu offers for selected text (`[search]` in
+/// `settings.toml`). `url` names the provider: `{query}` in it stands
+/// for the text, form-encoded, and without the placeholder the text is
+/// appended. `name` labels the menu entry ("Search Google for …"). The
+/// default is a Google search; a browser may later offer a choice of
+/// engines, or something other than a search engine, through this one
+/// setting.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearchSettings {
+    pub name: String,
+    pub url: String,
+}
+
+impl Default for SearchSettings {
+    fn default() -> SearchSettings {
+        SearchSettings {
+            name: "Google".to_string(),
+            url: "https://www.google.com/search?q={query}".to_string(),
+        }
+    }
+}
+
+impl SearchSettings {
+    /// What `url` holds where the query goes.
+    pub const PLACEHOLDER: &'static str = "{query}";
+
+    /// The URL that answers `query`, or `None` when the query is blank or
+    /// the setting does not make a URL.
+    pub fn url_for(&self, query: &str) -> Option<Url> {
+        let query = query.trim();
+        if query.is_empty() {
+            return None;
+        }
+        let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
+        let text = if self.url.contains(Self::PLACEHOLDER) {
+            self.url.replace(Self::PLACEHOLDER, &encoded)
+        } else {
+            format!("{}{encoded}", self.url.trim())
+        };
+        Url::parse(&text).ok()
     }
 }
 
@@ -215,9 +264,14 @@ mod tests {
             chrome_color: ChromeColor::Plum,
             system_title_bar: true,
             pinned_extensions: vec!["abc".to_string(), "def".to_string()],
+            search: SearchSettings {
+                name: "Duck".to_string(),
+                url: "https://d.example/?q={query}".to_string(),
+            },
         };
         let text = s.to_toml().unwrap();
         assert!(text.contains("chrome_color = \"plum\""), "{text}");
+        assert!(text.contains("[search]"), "{text}");
         assert!(text.contains("system_title_bar = true"), "{text}");
         assert!(text.contains("pinned_extensions = ["), "{text}");
         assert_eq!(Settings::parse(&text).unwrap(), s);
@@ -251,6 +305,38 @@ mod tests {
         let s = Settings::parse("").unwrap();
         assert_eq!(s, Settings::default());
         assert!(!s.system_title_bar, "windows are frameless by default");
+    }
+
+    #[test]
+    fn the_default_search_is_google_and_queries_are_form_encoded() {
+        let s = Settings::parse("").unwrap();
+        assert_eq!(s.search.name, "Google");
+        assert_eq!(
+            s.search.url_for("rust  browser & engine").unwrap().as_str(),
+            "https://www.google.com/search?q=rust++browser+%26+engine"
+        );
+        assert_eq!(s.search.url_for("  "), None);
+        // A file that names only the engine keeps the default URL.
+        let s = Settings::parse("[search]\nname = \"G\"\n").unwrap();
+        assert_eq!(s.search.name, "G");
+        assert_eq!(s.search.url, SearchSettings::default().url);
+    }
+
+    #[test]
+    fn a_search_url_without_the_placeholder_takes_the_query_at_its_end() {
+        let s = SearchSettings {
+            name: "Lex".to_string(),
+            url: "https://lex.example/find/ ".to_string(),
+        };
+        assert_eq!(
+            s.url_for("a b").unwrap().as_str(),
+            "https://lex.example/find/a+b"
+        );
+        let bad = SearchSettings {
+            name: "x".to_string(),
+            url: "not a url {query}".to_string(),
+        };
+        assert_eq!(bad.url_for("a"), None);
     }
 
     #[test]

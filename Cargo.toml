@@ -25,7 +25,9 @@ osmena-chrome = { path = "crates/osmena-chrome", version = "0.1.0" }
 # are the ones Servo 0.7.0's own shell uses (Paladin's constraint).
 winit = "=0.30.13"
 egui = "=0.34.3"
-egui-winit = { version = "=0.34.3", default-features = false }
+# `clipboard`: the address bar copies and pastes through the system
+# clipboard (without it egui-winit keeps a private one).
+egui-winit = { version = "=0.34.3", default-features = false, features = ["clipboard"] }
 egui_glow = { version = "=0.34.3", features = ["winit"] }
 glow = "=0.17.0"
 glutin = "0.32"

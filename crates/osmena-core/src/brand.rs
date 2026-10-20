@@ -48,6 +48,53 @@ impl PartialEq for ExtensionSupport {
     }
 }
 
+/// What an engine can do to a page beyond showing it, for the page's
+/// context menu: an entry whose tool the engine lacks is left out of the
+/// menu. Each maps to a `PageCommand` the engine's tab host receives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageTools {
+    /// Save a link's target, an image, a video, or the page to disk,
+    /// asking where (`PageCommand::Save`).
+    pub save: bool,
+    /// Put an image on the clipboard (`PageCommand::CopyImage`).
+    pub copy_image: bool,
+    /// Paste without formatting (`PageCommand::PasteAsPlainText`).
+    pub paste_plain: bool,
+    /// Toggle a video's or audio's looping and controls
+    /// (`PageCommand::SetMediaLoop`, `SetMediaControls`).
+    pub media_controls: bool,
+    /// Print the page (`PageCommand::Print`).
+    pub print: bool,
+    /// Show the page's source (`PageCommand::ViewSource`).
+    pub view_source: bool,
+    /// Open the developer tools on an element (`PageCommand::Inspect`).
+    pub inspect: bool,
+}
+
+impl PageTools {
+    /// An engine with none of them: the menu keeps what the model can do
+    /// alone (open links, copy addresses) and the editing basics.
+    pub const NONE: PageTools = PageTools {
+        save: false,
+        copy_image: false,
+        paste_plain: false,
+        media_controls: false,
+        print: false,
+        view_source: false,
+        inspect: false,
+    };
+
+    pub const ALL: PageTools = PageTools {
+        save: true,
+        copy_image: true,
+        paste_plain: true,
+        media_controls: true,
+        print: true,
+        view_source: true,
+        inspect: true,
+    };
+}
+
 /// The engine identity. One `static` per engine crate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EngineInfo {
@@ -66,6 +113,9 @@ pub struct EngineInfo {
     pub wheel_line_px: f32,
     /// Browser extensions, if the engine runs them.
     pub extensions: Option<ExtensionSupport>,
+    /// What the page's context menu may offer beyond the model's own
+    /// entries.
+    pub page_tools: PageTools,
 }
 
 #[cfg(test)]
@@ -89,5 +139,6 @@ pub(crate) mod test_support {
         supports_stop: true,
         wheel_line_px: 40.0,
         extensions: None,
+        page_tools: PageTools::ALL,
     };
 }

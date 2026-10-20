@@ -11,6 +11,8 @@ description = "The osmena browser shell: the winit application, browser windows 
 osmena-core = { workspace = true }
 osmena-engine = { workspace = true }
 osmena-chrome = { workspace = true }
+# "Copy link address" and "Copy image" from the page's context menu.
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 clap = { version = "4", features = ["derive"] }
 dpi = { workspace = true }
 egui = { workspace = true }

@@ -18,6 +18,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 
 use crate::StartEngine;
+use crate::clipboard;
 use crate::settings_window::{SettingsOutcome, SettingsWindow};
 use crate::window::BrowserWindow;
 
@@ -203,15 +204,25 @@ impl<E: Engine> App<E> {
                     w.request_redraw();
                 }
             }
+            EngineAction::CreateHiddenTab { window, tab, url } => {
+                if let Some(w) = self.window_for_core_id(window) {
+                    w.host_mut().create_tab(tab, url);
+                    w.host().hide(tab);
+                    w.request_redraw();
+                }
+            }
             EngineAction::AdoptTab {
                 window,
                 tab,
                 pending,
+                background,
             } => {
                 let adopted = match self.window_for_core_id(window) {
                     Some(w) => {
                         let adopted = w.host_mut().adopt_tab(pending, tab);
-                        if adopted {
+                        if adopted && background {
+                            w.host().hide(tab);
+                        } else if adopted {
                             w.host().set_focused(tab, true);
                         }
                         w.request_redraw();
@@ -317,6 +328,17 @@ impl<E: Engine> App<E> {
             }
             EngineAction::UninstallExtension(extension) => engine.uninstall_extension(&extension),
             EngineAction::InstallExtension(source) => engine.install_extension(source),
+            EngineAction::CopyText(text) => clipboard::set_text(&text),
+            EngineAction::Page { tab, command } => {
+                if let Some(w) = self.window_for_tab(tab) {
+                    w.host().page_command(tab, command);
+                }
+            }
+            EngineAction::ContextMenuClosed(tab) => {
+                if let Some(w) = self.window_for_tab(tab) {
+                    w.host().context_menu_closed(tab);
+                }
+            }
             EngineAction::OpenSettings => match &self.settings_window {
                 Some(sw) => sw.focus(),
                 None => match SettingsWindow::open(event_loop, engine, self.brand) {
@@ -357,6 +379,9 @@ impl<E: Engine> App<E> {
             {
                 w.request_redraw();
             }
+            // Commands the user picked from a page's context menu, run
+            // after the event itself is applied.
+            let mut menu_commands = Vec::new();
             match &event {
                 EngineEvent::EngineError(message) => {
                     log::error!("engine error: {message}");
@@ -369,6 +394,17 @@ impl<E: Engine> App<E> {
                         w.set_page_cursor(*tab, browser, *cursor);
                     }
                 }
+                EngineEvent::ContextMenuRequested {
+                    tab,
+                    position,
+                    context,
+                } => {
+                    let (browser, keymap) = (&self.browser, &self.keymap);
+                    if let Some(w) = self.windows.values_mut().find(|w| w.hosts_tab(*tab)) {
+                        menu_commands = w.show_page_menu(browser, keymap, *tab, *position, context);
+                    }
+                }
+                EngineEvent::ClipboardImage(image) => clipboard::set_image(image),
                 _ => {}
             }
             let actions = apply(&mut self.browser, &event);
@@ -381,6 +417,10 @@ impl<E: Engine> App<E> {
                 engine.discard_pending(*pending);
             }
             self.perform_all(actions, event_loop);
+            if self.exiting {
+                return;
+            }
+            self.run_commands(menu_commands, event_loop);
             if self.exiting {
                 return;
             }
@@ -462,9 +502,12 @@ fn tab_of(event: &EngineEvent) -> Option<TabId> {
         | EngineEvent::TabCrashed { tab, .. }
         | EngineEvent::FrameReady(tab)
         | EngineEvent::TabClosed(tab) => Some(*tab),
-        EngineEvent::NewTabRequested { opener, .. } => Some(*opener),
-        // The cursor is applied directly; no redraw needed.
+        EngineEvent::NewTabRequested { opener, .. }
+        | EngineEvent::NewWindowRequested { opener, .. } => Some(*opener),
+        EngineEvent::ContextMenuRequested { tab, .. } => Some(*tab),
+        // The cursor and the clipboard are handled directly; no redraw.
         EngineEvent::CursorChanged { .. }
+        | EngineEvent::ClipboardImage(_)
         | EngineEvent::EngineError(_)
         | EngineEvent::ExtensionsChanged(_) => None,
     }

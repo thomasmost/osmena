@@ -84,8 +84,14 @@ The engine contract, in `osmena-engine`:
   resize, input, `paint_page`, which hands the shell either a blit
   function (the engine painted into GL) or a frame of BGRA pixels (the
   engine paints into memory; the shell draws either under the toolbar),
-  and `open_extension_action` and `close_extension_popups` (defaulted to
-  nothing).
+  `open_extension_action` and `close_extension_popups` (defaulted to
+  nothing), and `page_command` and `context_menu_closed` for the page's
+  context menu: the engine reports what is under the pointer with
+  `EngineEvent::ContextMenuRequested` (a `PageContext`: link, media,
+  selection, editable state, misspelling), the chrome shows the menu,
+  and what the user picks that only the engine can do (copy, paste,
+  save, print, inspect, …) comes back as a `PageCommand`.
+  `EngineInfo::page_tools` says which of those the engine offers.
 - `Surface`: make current, resize, the glow handle, begin frame, present.
 
 ## What the user gets
@@ -153,9 +159,25 @@ The engine contract, in `osmena-engine`:
   running them is the engine's, through `Engine::install_extension`
   and its siblings, and the engine reports every change with
   `EngineEvent::ExtensionsChanged`.
-- **Settings** (`settings.toml`): homepage, new-tab URL, a chrome colour
-  per profile, the title bar switch, the pinned extensions, and the
-  restore flag.
+- **The page's context menu**, shaped like Chromium's: a link opens in
+  a new tab (behind the current one, beside it) or a new window, is
+  saved, or has its address copied; an image opens in a new tab, is
+  saved, copied, or has its address copied; a video or audio loops,
+  shows its controls, is saved, or has its address copied; selected text
+  is copied, searched, or printed; an editable field gets spelling
+  suggestions, Undo, Redo, Cut, Copy, Paste, Paste as plain text,
+  Delete, and Select all; a plain page gets Back, Forward, Reload, Save
+  as, Print, and View page source; Inspect comes last. What the engine
+  cannot do is left out. Middle-click and Ctrl-click open a link in a
+  background tab beside the current one, Shift-click in a new window.
+- **Search.** Address-bar text that is not a URL is searched, with
+  Google by default; `[search]` in `settings.toml` (and the settings
+  window) names the provider and its URL, where `{query}` stands for the
+  text, so another engine, or something other than a search engine, can
+  take its place.
+- **Settings** (`settings.toml`): homepage, new-tab URL, the search
+  provider, a chrome colour per profile, the title bar switch, the
+  pinned extensions, and the restore flag.
 
 ## Depending on osmena
 

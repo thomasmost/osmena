@@ -6,6 +6,40 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- The page's context menu, shaped like Chromium's, over what the engine
+  finds under the pointer: a link opens in a new tab (beside the opener,
+  without taking its place) or a new window, is saved, or has its
+  address copied; an image opens in a new tab, is saved, copied, or has
+  its address copied; a video or audio loops, shows its controls, is
+  saved, or has its address copied; selected text is copied, searched,
+  or printed; an editable field gets spelling suggestions, undo, redo,
+  cut, copy, paste, paste as plain text, delete, and select all, with
+  their shortcuts; a plain page gets back, forward, reload, save, print,
+  and view source; "Inspect" is last. Entries whose tool the engine
+  lacks are left out (`EngineInfo::page_tools`).
+- A search for address-bar text that is not a URL, and for selected
+  text from the page menu: `[search]` in `settings.toml` names the
+  provider and its URL (`{query}` stands for the text; a Google search
+  by default), editable in the settings window's General section. A
+  command-line argument that is not a URL is searched too.
+- A page's request for a new tab says whether it should open in the
+  background (a middle- or Ctrl-click) or in a new window (Shift-click);
+  background tabs open beside the opener, in its folder, and leave the
+  active tab alone.
+- `osmena-core`: `PageContext`, `Media`, `MediaKind`, `EditState`,
+  `Misspelling`, `PageCommand`, `PageTools` (`EngineInfo::page_tools`),
+  `SearchSettings` (`Settings::search`), `RgbaImage` (`Favicon` is now
+  an alias of it), `Command::{Search, SearchInNewTab, NewBackgroundTab,
+  OpenInNewWindow, CopyText, Page, ContextMenuClosed}`,
+  `EngineAction::{CreateHiddenTab, CopyText, Page, ContextMenuClosed}`,
+  `EngineEvent::{NewWindowRequested, ContextMenuRequested,
+  ClipboardImage}`.
+- `osmena-engine`: `TabHost::{page_command, context_menu_closed}`,
+  defaulted to nothing.
+- `osmena-chrome`: `menus::page_menu`; menu labels show a literal `&`.
+- `osmena-shell`: the clipboard (`arboard`) for "Copy link address",
+  "Copy image address", and "Copy image".
+
 - Tab folders and bookmark groups, from the tab context menu, which
   gains "Close all selected", "Move tab(s) to folder…", and "Bookmark
   all selected…". Moving to a folder asks for a name (prefilled "Folder
@@ -29,10 +63,20 @@ All notable changes to the osmena crates. The crates version together.
   `ChromeState::{open_prompt, has_prompt}`; the chrome draws prompts as a
   small window over the page.
 
+### Fixed
+
+- The address bar copies and pastes through the system clipboard
+  (egui-winit's `clipboard` feature); before, Ctrl+V in it read a
+  private clipboard of egui's own and never what another program (or
+  "Copy link address") had put there.
+
 ### Changed
 
 - `menus::window_menu` takes the bookmarks; `tab_menu` has three more
   entries.
+- `EngineEvent::NewTabRequested` carries `background`;
+  `EngineAction::AdoptTab` carries `background`. The address bar issues
+  `Command::Search` for text that is not a URL instead of ignoring it.
 - Browser extensions, for engines that run them: the toolbar ends in a
   puzzle-piece button whose menu lists the installed extensions (click
   one to open its action's popup), a "Pin to toolbar" submenu, and the

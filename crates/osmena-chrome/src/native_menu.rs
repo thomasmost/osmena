@@ -93,14 +93,14 @@ fn items(
                     *next_id += 1;
                     commands.insert(id.clone(), command.clone());
                     let accelerator = chord.map(|c| Accelerator::new(c.modifiers, c.code));
-                    Box::new(MenuItem::with_id(id, label, *enabled, accelerator))
+                    Box::new(MenuItem::with_id(id, literal(label), *enabled, accelerator))
                 }
                 MenuEntry::Submenu {
                     label,
                     enabled,
                     entries,
                 } => {
-                    let submenu = Submenu::new(label, *enabled);
+                    let submenu = Submenu::new(literal(label), *enabled);
                     for item in items(entries, commands, next_id) {
                         let _ = submenu.append(item.as_ref());
                     }
@@ -115,10 +115,34 @@ fn items(
                     let id = MenuId::new(format!("osmena-menu-{}", *next_id));
                     *next_id += 1;
                     commands.insert(id.clone(), command.clone());
-                    Box::new(CheckMenuItem::with_id(id, label, *enabled, *checked, None))
+                    Box::new(CheckMenuItem::with_id(
+                        id,
+                        literal(label),
+                        *enabled,
+                        *checked,
+                        None,
+                    ))
                 }
                 MenuEntry::Separator => Box::new(PredefinedMenuItem::separator()),
             }
         })
         .collect()
+}
+
+/// `label` as muda shows it unchanged: a lone `&` marks a mnemonic
+/// (underlined on Windows, dropped on macOS), and a page title or a
+/// search text may well hold one.
+fn literal(label: &str) -> String {
+    label.replace('&', "&&")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::literal;
+
+    #[test]
+    fn ampersands_are_doubled_so_they_show() {
+        assert_eq!(literal("Fish & Chips"), "Fish && Chips");
+        assert_eq!(literal("Plain"), "Plain");
+    }
 }

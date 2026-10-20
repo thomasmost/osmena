@@ -2,9 +2,11 @@
 //! and the `Command` each one issues. Pure and unit-tested; `native_menu`
 //! turns an entry list into a native menu and maps the click back.
 
+use keyboard_types::{Code, Modifiers};
 use osmena_core::{
     Bookmarks, Command, CommandKind, Extension, ExtensionSource, ExtensionSupport, FolderId,
-    KeyChord, Keymap, TabId, Window, WindowId,
+    KeyChord, Keymap, MediaKind, PageCommand, PageContext, PageTools, Platform, TabId, Window,
+    WindowId,
 };
 use url::Url;
 
@@ -256,6 +258,321 @@ pub fn extensions_menu(
         Command::OpenSettings,
     ));
     entries
+}
+
+/// The context menu of `tab`'s page, over what the engine found under the
+/// pointer (`context`). Shaped like Chromium's: the link's entries, then
+/// the media's, then the selection's, then the editing entries, and, when
+/// none of those apply, the page's own (back, forward, reload, save,
+/// print, view source); "Inspect" is last. `tools` leaves out what the
+/// engine cannot do; `search_name` labels the search of selected text.
+/// Empty if `tab` is not in `window`.
+pub fn page_menu(
+    window: &Window,
+    tab: TabId,
+    context: &PageContext,
+    tools: &PageTools,
+    keymap: &Keymap,
+    platform: Platform,
+    search_name: &str,
+) -> Vec<MenuEntry> {
+    let Some(page_tab) = window.tab(tab) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<MenuEntry> = Vec::new();
+    let page = |command: PageCommand| Command::Page { tab, command };
+    let primary = platform.primary();
+    let chord = |modifiers: Modifiers, code: Code| Some(KeyChord { modifiers, code });
+    let search = |text: &str| {
+        MenuEntry::item(
+            format!(
+                "Search {search_name} for \u{201c}{}\u{201d}",
+                elide(text, 32)
+            ),
+            true,
+            Command::SearchInNewTab {
+                window: window.id,
+                query: text.to_string(),
+            },
+        )
+    };
+
+    if let Some(link) = &context.link {
+        entries.push(MenuEntry::item(
+            "Open link in new tab",
+            true,
+            Command::NewBackgroundTab {
+                opener: tab,
+                url: link.clone(),
+            },
+        ));
+        entries.push(MenuEntry::item(
+            "Open link in new window",
+            true,
+            Command::OpenInNewWindow(link.clone()),
+        ));
+        entries.push(MenuEntry::Separator);
+        if tools.save {
+            entries.push(MenuEntry::item(
+                "Save link as\u{2026}",
+                true,
+                page(PageCommand::Save(link.clone())),
+            ));
+        }
+        entries.push(MenuEntry::item(
+            "Copy link address",
+            true,
+            Command::CopyText(link.to_string()),
+        ));
+    }
+
+    if let Some(media) = &context.media {
+        separate(&mut entries);
+        let noun = media.kind.noun();
+        let open = MenuEntry::item(
+            format!("Open {noun} in new tab"),
+            true,
+            Command::NewBackgroundTab {
+                opener: tab,
+                url: media.src.clone(),
+            },
+        );
+        let save = tools.save.then(|| {
+            MenuEntry::item(
+                format!("Save {noun} as\u{2026}"),
+                true,
+                page(PageCommand::Save(media.src.clone())),
+            )
+        });
+        let address = MenuEntry::item(
+            format!("Copy {noun} address"),
+            true,
+            Command::CopyText(media.src.to_string()),
+        );
+        match media.kind {
+            MediaKind::Image => {
+                entries.push(open);
+                entries.extend(save);
+                if tools.copy_image {
+                    entries.push(MenuEntry::item(
+                        "Copy image",
+                        true,
+                        page(PageCommand::CopyImage(media.src.clone())),
+                    ));
+                }
+                entries.push(address);
+            }
+            MediaKind::Video | MediaKind::Audio => {
+                if tools.media_controls {
+                    if let Some(looping) = media.looping {
+                        entries.push(MenuEntry::Check {
+                            label: "Loop".to_string(),
+                            enabled: true,
+                            checked: looping,
+                            command: page(PageCommand::SetMediaLoop(!looping)),
+                        });
+                    }
+                    if let Some(controls) = media.controls {
+                        entries.push(MenuEntry::Check {
+                            label: "Show controls".to_string(),
+                            enabled: true,
+                            checked: controls,
+                            command: page(PageCommand::SetMediaControls(!controls)),
+                        });
+                    }
+                    separate(&mut entries);
+                }
+                entries.extend(save);
+                entries.push(address);
+                entries.push(open);
+            }
+        }
+    }
+
+    let selection = context
+        .selection
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+
+    match context.editable {
+        None => {
+            if context.selection.is_some() {
+                separate(&mut entries);
+                entries.push(MenuEntry::Item {
+                    label: "Copy".to_string(),
+                    enabled: true,
+                    chord: chord(primary, Code::KeyC),
+                    command: page(PageCommand::Copy),
+                });
+                if let Some(text) = selection {
+                    entries.push(search(text));
+                }
+                if tools.print {
+                    entries.push(MenuEntry::item(
+                        "Print\u{2026}",
+                        true,
+                        page(PageCommand::Print),
+                    ));
+                }
+            }
+        }
+        Some(edit) => {
+            separate(&mut entries);
+            if let Some(misspelling) = &context.misspelling {
+                if misspelling.suggestions.is_empty() {
+                    entries.push(MenuEntry::item(
+                        "No spelling suggestions",
+                        false,
+                        page(PageCommand::AddToDictionary(misspelling.word.clone())),
+                    ));
+                }
+                for suggestion in misspelling.suggestions.iter().take(5) {
+                    entries.push(MenuEntry::item(
+                        suggestion.clone(),
+                        true,
+                        page(PageCommand::ReplaceMisspelling(suggestion.clone())),
+                    ));
+                }
+                entries.push(MenuEntry::item(
+                    "Add to dictionary",
+                    true,
+                    page(PageCommand::AddToDictionary(misspelling.word.clone())),
+                ));
+                entries.push(MenuEntry::Separator);
+            }
+            let redo = if platform == Platform::MacOs {
+                chord(primary | Modifiers::SHIFT, Code::KeyZ)
+            } else {
+                chord(primary, Code::KeyY)
+            };
+            let mut editing = vec![
+                (
+                    "Undo",
+                    edit.can_undo,
+                    chord(primary, Code::KeyZ),
+                    PageCommand::Undo,
+                ),
+                ("Redo", edit.can_redo, redo, PageCommand::Redo),
+            ];
+            let mut clipboard = vec![
+                (
+                    "Cut",
+                    edit.can_cut,
+                    chord(primary, Code::KeyX),
+                    PageCommand::Cut,
+                ),
+                (
+                    "Copy",
+                    edit.can_copy,
+                    chord(primary, Code::KeyC),
+                    PageCommand::Copy,
+                ),
+                (
+                    "Paste",
+                    edit.can_paste,
+                    chord(primary, Code::KeyV),
+                    PageCommand::Paste,
+                ),
+            ];
+            if tools.paste_plain {
+                clipboard.push((
+                    "Paste as plain text",
+                    edit.can_paste,
+                    chord(primary | Modifiers::SHIFT, Code::KeyV),
+                    PageCommand::PasteAsPlainText,
+                ));
+            }
+            clipboard.push(("Delete", edit.can_delete, None, PageCommand::Delete));
+            let select = (
+                "Select all",
+                edit.can_select_all,
+                chord(primary, Code::KeyA),
+                PageCommand::SelectAll,
+            );
+            for group in [&mut editing, &mut clipboard, &mut vec![select]] {
+                for (label, enabled, chord, command) in group.drain(..) {
+                    entries.push(MenuEntry::Item {
+                        label: label.to_string(),
+                        enabled,
+                        chord,
+                        command: page(command),
+                    });
+                }
+                entries.push(MenuEntry::Separator);
+            }
+            match selection {
+                Some(text) => entries.push(search(text)),
+                None => {
+                    entries.pop();
+                }
+            }
+        }
+    }
+
+    if entries.is_empty() {
+        let mut history = |kind: CommandKind, enabled: bool| {
+            let mut entry = MenuEntry::bound(keymap, kind, &kind.label(), window.id, tab);
+            if let MenuEntry::Item { enabled: e, .. } = &mut entry {
+                *e = enabled;
+            }
+            entries.push(entry);
+        };
+        history(CommandKind::Back, page_tab.can_go_back);
+        history(CommandKind::Forward, page_tab.can_go_forward);
+        history(CommandKind::Reload, true);
+        if tools.save || tools.print {
+            entries.push(MenuEntry::Separator);
+        }
+        if tools.save {
+            entries.push(MenuEntry::item(
+                "Save as\u{2026}",
+                true,
+                page(PageCommand::Save(page_tab.url.clone())),
+            ));
+        }
+        if tools.print {
+            entries.push(MenuEntry::item(
+                "Print\u{2026}",
+                true,
+                page(PageCommand::Print),
+            ));
+        }
+        if tools.view_source {
+            entries.push(MenuEntry::Separator);
+            entries.push(MenuEntry::item(
+                "View page source",
+                true,
+                page(PageCommand::ViewSource),
+            ));
+        }
+    }
+
+    if tools.inspect {
+        separate(&mut entries);
+        entries.push(MenuEntry::item("Inspect", true, page(PageCommand::Inspect)));
+    }
+    entries
+}
+
+/// A separator before the next group, unless the menu is empty or one is
+/// there already.
+fn separate(entries: &mut Vec<MenuEntry>) {
+    if !entries.is_empty() && !matches!(entries.last(), Some(MenuEntry::Separator)) {
+        entries.push(MenuEntry::Separator);
+    }
+}
+
+/// `text` on one line, cut to `max` characters with an ellipsis.
+fn elide(text: &str, max: usize) -> String {
+    let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= max {
+        one_line
+    } else {
+        let mut cut: String = one_line.chars().take(max).collect();
+        cut.push('\u{2026}');
+        cut
+    }
 }
 
 /// The context menu of a tab, acting on `targets` (the selection, or the
@@ -746,5 +1063,459 @@ mod tests {
             &entries[2],
             MenuEntry::Item { command: Command::CloseTabs(tabs), .. } if *tabs == all.to_vec()
         ));
+    }
+}
+
+#[cfg(test)]
+mod page_menu_tests {
+    use super::*;
+    use osmena_core::{EditState, Media, Misspelling, Tab};
+    use url::Url;
+
+    fn window() -> Window {
+        Window::with_tab(
+            WindowId(1),
+            Tab::new(TabId(1), Url::parse("https://page.example/").unwrap()),
+        )
+    }
+
+    fn labels(entries: &[MenuEntry]) -> Vec<String> {
+        entries
+            .iter()
+            .map(|e| match e {
+                MenuEntry::Item { label, .. }
+                | MenuEntry::Submenu { label, .. }
+                | MenuEntry::Check { label, .. } => label.clone(),
+                MenuEntry::Separator => "-".to_string(),
+            })
+            .collect()
+    }
+
+    fn command(entries: &[MenuEntry], label: &str) -> Command {
+        entries
+            .iter()
+            .find_map(|e| match e {
+                MenuEntry::Item {
+                    label: l, command, ..
+                }
+                | MenuEntry::Check {
+                    label: l, command, ..
+                } if l == label => Some(command.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no entry {label:?} in {:?}", labels(entries)))
+    }
+
+    fn is_enabled(entries: &[MenuEntry], label: &str) -> bool {
+        entries
+            .iter()
+            .find_map(|e| match e {
+                MenuEntry::Item {
+                    label: l, enabled, ..
+                }
+                | MenuEntry::Check {
+                    label: l, enabled, ..
+                } if l == label => Some(*enabled),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no entry {label:?}"))
+    }
+
+    fn chord_of(entries: &[MenuEntry], label: &str) -> Option<KeyChord> {
+        entries.iter().find_map(|e| match e {
+            MenuEntry::Item {
+                label: l, chord, ..
+            } if l == label => *chord,
+            _ => None,
+        })
+    }
+
+    fn menu(context: &PageContext, tools: &PageTools, platform: Platform) -> Vec<MenuEntry> {
+        page_menu(
+            &window(),
+            TabId(1),
+            context,
+            tools,
+            &Keymap::defaults(platform),
+            platform,
+            "Test",
+        )
+    }
+
+    #[test]
+    fn a_plain_page_gets_history_save_print_source_and_inspect() {
+        let entries = menu(&PageContext::default(), &PageTools::ALL, Platform::Windows);
+        assert_eq!(
+            labels(&entries),
+            [
+                "Back",
+                "Forward",
+                "Reload",
+                "-",
+                "Save as\u{2026}",
+                "Print\u{2026}",
+                "-",
+                "View page source",
+                "-",
+                "Inspect"
+            ]
+        );
+        assert!(!is_enabled(&entries, "Back"), "nothing to go back to");
+        assert_eq!(command(&entries, "Reload"), Command::Reload(TabId(1)));
+        assert_eq!(
+            chord_of(&entries, "Reload"),
+            Keymap::defaults(Platform::Windows).chord_for(CommandKind::Reload)
+        );
+        assert_eq!(
+            command(&entries, "Save as\u{2026}"),
+            Command::Page {
+                tab: TabId(1),
+                command: PageCommand::Save(Url::parse("https://page.example/").unwrap()),
+            }
+        );
+        assert_eq!(
+            command(&entries, "Inspect"),
+            Command::Page {
+                tab: TabId(1),
+                command: PageCommand::Inspect,
+            }
+        );
+    }
+
+    #[test]
+    fn an_engine_without_tools_keeps_only_history_on_a_plain_page() {
+        let entries = menu(&PageContext::default(), &PageTools::NONE, Platform::Windows);
+        assert_eq!(labels(&entries), ["Back", "Forward", "Reload"]);
+        assert!(
+            page_menu(
+                &window(),
+                TabId(9),
+                &PageContext::default(),
+                &PageTools::ALL,
+                &Keymap::defaults(Platform::Windows),
+                Platform::Windows,
+                "Test",
+            )
+            .is_empty(),
+            "a tab not in the window has no menu"
+        );
+    }
+
+    #[test]
+    fn a_link_opens_in_a_background_tab_or_a_window_and_copies_its_address() {
+        let link = Url::parse("https://link.example/a?b=c").unwrap();
+        let context = PageContext {
+            link: Some(link.clone()),
+            ..PageContext::default()
+        };
+        let entries = menu(&context, &PageTools::ALL, Platform::Windows);
+        assert_eq!(
+            labels(&entries),
+            [
+                "Open link in new tab",
+                "Open link in new window",
+                "-",
+                "Save link as\u{2026}",
+                "Copy link address",
+                "-",
+                "Inspect"
+            ]
+        );
+        assert_eq!(
+            command(&entries, "Open link in new tab"),
+            Command::NewBackgroundTab {
+                opener: TabId(1),
+                url: link.clone(),
+            }
+        );
+        assert_eq!(
+            command(&entries, "Open link in new window"),
+            Command::OpenInNewWindow(link.clone())
+        );
+        assert_eq!(
+            command(&entries, "Copy link address"),
+            Command::CopyText(link.to_string())
+        );
+        let bare = menu(&context, &PageTools::NONE, Platform::Windows);
+        assert_eq!(
+            labels(&bare),
+            [
+                "Open link in new tab",
+                "Open link in new window",
+                "-",
+                "Copy link address"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_image_in_a_link_lists_both_and_a_video_has_its_toggles() {
+        let image = Url::parse("https://img.example/p.png").unwrap();
+        let context = PageContext {
+            link: Some(Url::parse("https://link.example/").unwrap()),
+            media: Some(Media {
+                kind: MediaKind::Image,
+                src: image.clone(),
+                looping: None,
+                controls: None,
+            }),
+            ..PageContext::default()
+        };
+        let entries = menu(&context, &PageTools::ALL, Platform::Windows);
+        assert_eq!(
+            labels(&entries)[5..],
+            [
+                "-",
+                "Open image in new tab",
+                "Save image as\u{2026}",
+                "Copy image",
+                "Copy image address",
+                "-",
+                "Inspect"
+            ]
+        );
+        assert_eq!(
+            command(&entries, "Copy image"),
+            Command::Page {
+                tab: TabId(1),
+                command: PageCommand::CopyImage(image),
+            }
+        );
+
+        let video = Url::parse("https://v.example/clip.mp4").unwrap();
+        let context = PageContext {
+            media: Some(Media {
+                kind: MediaKind::Video,
+                src: video.clone(),
+                looping: Some(false),
+                controls: Some(true),
+            }),
+            ..PageContext::default()
+        };
+        let entries = menu(&context, &PageTools::ALL, Platform::Windows);
+        assert_eq!(
+            labels(&entries),
+            [
+                "Loop",
+                "Show controls",
+                "-",
+                "Save video as\u{2026}",
+                "Copy video address",
+                "Open video in new tab",
+                "-",
+                "Inspect"
+            ]
+        );
+        assert!(matches!(
+            &entries[0],
+            MenuEntry::Check {
+                checked: false,
+                command: Command::Page {
+                    command: PageCommand::SetMediaLoop(true),
+                    ..
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            &entries[1],
+            MenuEntry::Check {
+                checked: true,
+                command: Command::Page {
+                    command: PageCommand::SetMediaControls(false),
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn selected_text_can_be_copied_searched_and_printed() {
+        let context = PageContext {
+            selection: Some(
+                "  hello   there, this is a rather long piece of selected text ".to_string(),
+            ),
+            ..PageContext::default()
+        };
+        let entries = menu(&context, &PageTools::ALL, Platform::MacOs);
+        assert_eq!(
+            labels(&entries),
+            [
+                "Copy",
+                "Search Test for \u{201c}hello there, this is a rather lo\u{2026}\u{201d}",
+                "Print\u{2026}",
+                "-",
+                "Inspect"
+            ]
+        );
+        assert_eq!(
+            chord_of(&entries, "Copy"),
+            Some(KeyChord {
+                modifiers: Modifiers::META,
+                code: Code::KeyC
+            })
+        );
+        assert_eq!(
+            command(&entries, &labels(&entries)[1]),
+            Command::SearchInNewTab {
+                window: WindowId(1),
+                query: "hello   there, this is a rather long piece of selected text".to_string(),
+            }
+        );
+        // A selection the engine cannot read still copies, but is not searched.
+        let unknown = PageContext {
+            selection: Some(String::new()),
+            ..PageContext::default()
+        };
+        let entries = menu(&unknown, &PageTools::NONE, Platform::Windows);
+        assert_eq!(labels(&entries), ["Copy"]);
+    }
+
+    #[test]
+    fn an_editable_field_gets_the_editing_entries_with_their_chords() {
+        let context = PageContext {
+            editable: Some(EditState {
+                can_undo: true,
+                can_redo: false,
+                can_cut: false,
+                can_copy: false,
+                can_paste: true,
+                can_delete: false,
+                can_select_all: true,
+            }),
+            ..PageContext::default()
+        };
+        let entries = menu(&context, &PageTools::ALL, Platform::Windows);
+        assert_eq!(
+            labels(&entries),
+            [
+                "Undo",
+                "Redo",
+                "-",
+                "Cut",
+                "Copy",
+                "Paste",
+                "Paste as plain text",
+                "Delete",
+                "-",
+                "Select all",
+                "-",
+                "Inspect"
+            ]
+        );
+        assert!(is_enabled(&entries, "Undo"));
+        assert!(!is_enabled(&entries, "Redo"));
+        assert!(!is_enabled(&entries, "Cut"));
+        assert!(is_enabled(&entries, "Paste as plain text"));
+        assert_eq!(
+            chord_of(&entries, "Redo"),
+            Some(KeyChord {
+                modifiers: Modifiers::CONTROL,
+                code: Code::KeyY
+            })
+        );
+        assert_eq!(
+            chord_of(&entries, "Paste as plain text"),
+            Some(KeyChord {
+                modifiers: Modifiers::CONTROL | Modifiers::SHIFT,
+                code: Code::KeyV
+            })
+        );
+        assert_eq!(chord_of(&entries, "Delete"), None);
+        assert_eq!(
+            command(&entries, "Select all"),
+            Command::Page {
+                tab: TabId(1),
+                command: PageCommand::SelectAll,
+            }
+        );
+        let mac = menu(&context, &PageTools::NONE, Platform::MacOs);
+        assert_eq!(
+            chord_of(&mac, "Redo"),
+            Some(KeyChord {
+                modifiers: Modifiers::META | Modifiers::SHIFT,
+                code: Code::KeyZ
+            })
+        );
+        assert_eq!(
+            labels(&mac),
+            [
+                "Undo",
+                "Redo",
+                "-",
+                "Cut",
+                "Copy",
+                "Paste",
+                "Delete",
+                "-",
+                "Select all"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_misspelling_and_a_selection_in_a_field_add_their_entries() {
+        let context = PageContext {
+            editable: Some(EditState::ALL),
+            selection: Some("teh".to_string()),
+            misspelling: Some(Misspelling {
+                word: "teh".to_string(),
+                suggestions: vec!["the".to_string(), "tech".to_string()],
+            }),
+            ..PageContext::default()
+        };
+        let entries = menu(&context, &PageTools::NONE, Platform::Windows);
+        assert_eq!(
+            labels(&entries),
+            [
+                "the",
+                "tech",
+                "Add to dictionary",
+                "-",
+                "Undo",
+                "Redo",
+                "-",
+                "Cut",
+                "Copy",
+                "Paste",
+                "Delete",
+                "-",
+                "Select all",
+                "-",
+                "Search Test for \u{201c}teh\u{201d}"
+            ]
+        );
+        assert_eq!(
+            command(&entries, "the"),
+            Command::Page {
+                tab: TabId(1),
+                command: PageCommand::ReplaceMisspelling("the".to_string()),
+            }
+        );
+        assert_eq!(
+            command(&entries, "Add to dictionary"),
+            Command::Page {
+                tab: TabId(1),
+                command: PageCommand::AddToDictionary("teh".to_string()),
+            }
+        );
+        let none = PageContext {
+            misspelling: Some(Misspelling {
+                word: "zzz".to_string(),
+                suggestions: Vec::new(),
+            }),
+            ..context
+        };
+        let entries = menu(&none, &PageTools::NONE, Platform::Windows);
+        assert_eq!(labels(&entries)[0], "No spelling suggestions");
+        assert!(!is_enabled(&entries, "No spelling suggestions"));
+    }
+
+    #[test]
+    fn elide_joins_lines_and_cuts_long_text() {
+        assert_eq!(elide(" a \n b ", 10), "a b");
+        assert_eq!(elide("abcdefghij", 10), "abcdefghij");
+        assert_eq!(elide("abcdefghijk", 10), "abcdefghij\u{2026}");
     }
 }

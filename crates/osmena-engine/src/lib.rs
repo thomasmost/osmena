@@ -15,7 +15,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use osmena_core::{EngineEvent, EngineInput, ExtensionSource, PendingTab, TabId};
+use osmena_core::{EngineEvent, EngineInput, ExtensionSource, PageCommand, PendingTab, TabId};
 use raw_window_handle::{DisplayHandle, WindowHandle};
 use url::Url;
 
@@ -153,6 +153,15 @@ pub trait TabHost {
     /// clicked back into the window, or moved or resized it. Default:
     /// nothing.
     fn close_extension_popups(&self) {}
+    /// Do `command` to `tab`'s page, where the user opened its context
+    /// menu (the engine reported `EngineEvent::ContextMenuRequested` and
+    /// remembers the point). An engine advertises what it can do in
+    /// `EngineInfo::page_tools`; the editing commands are expected of
+    /// every engine. Default: nothing.
+    fn page_command(&self, _tab: TabId, _command: PageCommand) {}
+    /// The context menu of `tab`'s page closed, after any command it
+    /// produced: let go of what was held for it. Default: nothing.
+    fn context_menu_closed(&self, _tab: TabId) {}
 }
 
 /// One engine instance, one per process. The shell builds it through a

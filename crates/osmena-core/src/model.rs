@@ -52,15 +52,19 @@ pub enum LoadState {
     Complete,
 }
 
-/// A decoded favicon, straight RGBA8, row-major, top-left origin. The pixels
-/// sit behind an `Arc` so a renderer can tell a new icon from the one it
-/// already uploaded by pointer, without hashing the pixels every frame.
+/// A decoded image, straight RGBA8, row-major, top-left origin: a
+/// favicon, or an image copied to the clipboard. The pixels sit behind an
+/// `Arc` so a renderer can tell a new image from the one it already
+/// uploaded by pointer, without hashing the pixels every frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Favicon {
+pub struct RgbaImage {
     pub width: u32,
     pub height: u32,
     pub rgba: Arc<[u8]>,
 }
+
+/// A tab's icon.
+pub type Favicon = RgbaImage;
 
 /// One page shown as a tab.
 #[derive(Clone, Debug, PartialEq)]
@@ -263,6 +267,22 @@ impl Window {
 
     pub fn active_tab(&self) -> &Tab {
         &self.tabs[self.active_index()]
+    }
+
+    /// Put `tab` right after `anchor` in the strip, in `anchor`'s folder
+    /// (a page's new tab sits beside the page that opened it); at the end,
+    /// outside any folder, if `anchor` is not here.
+    pub(crate) fn insert_tab_after(&mut self, anchor: TabId, mut tab: Tab) {
+        match self.tabs.iter().position(|t| t.id == anchor) {
+            Some(index) => {
+                tab.folder = self.tabs[index].folder;
+                self.tabs.insert(index + 1, tab);
+            }
+            None => {
+                tab.folder = None;
+                self.tabs.push(tab);
+            }
+        }
     }
 }
 

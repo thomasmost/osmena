@@ -560,15 +560,22 @@ pub fn draw(
                     if field.gained_focus() || focus_requested {
                         select_all(ui, address_id, state.address_text.chars().count());
                     }
-                    if field.lost_focus()
-                        && ui.input(|i| i.key_pressed(Key::Enter))
-                        && let Some(url) = location_input_to_url(&state.address_text)
-                    {
-                        state.address_dirty = false;
-                        commands.push(Command::Navigate {
-                            tab: active.id,
-                            url,
-                        });
+                    if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        // A URL loads; anything else is a search.
+                        let text = state.address_text.trim();
+                        if let Some(url) = location_input_to_url(text) {
+                            state.address_dirty = false;
+                            commands.push(Command::Navigate {
+                                tab: active.id,
+                                url,
+                            });
+                        } else if !text.is_empty() {
+                            state.address_dirty = false;
+                            commands.push(Command::Search {
+                                tab: active.id,
+                                query: text.to_string(),
+                            });
+                        }
                     }
                 });
             });

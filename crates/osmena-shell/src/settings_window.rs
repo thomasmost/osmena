@@ -515,6 +515,44 @@ fn draw_general(ui: &mut egui::Ui, settings: &mut Settings, activity: &mut FormA
             });
             ui.end_row();
 
+            ui.label("Search engine");
+            ui.vertical(|ui| {
+                let name = ui.add(
+                    egui::TextEdit::singleline(&mut settings.search.name).desired_width(300.0),
+                );
+                activity.edited |= name.changed();
+                if name.lost_focus() {
+                    activity.committed = true;
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "Named in the page menu: \u{201c}Search Google for \u{2026}\u{201d}.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
+            ui.end_row();
+
+            ui.label("Search URL");
+            ui.vertical(|ui| {
+                let url = ui
+                    .add(egui::TextEdit::singleline(&mut settings.search.url).desired_width(300.0));
+                activity.edited |= url.changed();
+                if url.lost_focus() {
+                    activity.committed = true;
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "Where address-bar text that is not a URL goes; {query} stands for \
+                         the text.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
+            ui.end_row();
+
             ui.label("Chrome colour");
             ui.horizontal(|ui| {
                 for color in ChromeColor::ALL {

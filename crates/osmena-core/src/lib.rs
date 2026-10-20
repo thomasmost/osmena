@@ -21,14 +21,17 @@ pub mod profile;
 pub mod settings;
 
 pub use bookmarks::{Bookmark, BookmarkGroup, Bookmarks, BookmarksError};
-pub use brand::{Brand, EngineInfo, ExtensionSupport};
-pub use command::{Command, EngineAction, FolderTarget, Prompt, dispatch};
-pub use event::{Cursor, EngineEvent, PendingTab, apply};
+pub use brand::{Brand, EngineInfo, ExtensionSupport, PageTools};
+pub use command::{Command, EngineAction, FolderTarget, PageCommand, Prompt, dispatch};
+pub use event::{
+    Cursor, EditState, EngineEvent, Media, MediaKind, Misspelling, PageContext, PendingTab, apply,
+};
 pub use extension::{Extension, ExtensionSource};
 pub use input::{ButtonAction, EngineInput, KeyInput, MouseButton};
 pub use keymap::{ChordParseError, CommandKind, KeyChord, Keymap, KeymapError, Platform};
 pub use model::{
-    Browser, Favicon, Folder, FolderId, LoadState, StripItem, Tab, TabId, Window, WindowId,
+    Browser, Favicon, Folder, FolderId, LoadState, RgbaImage, StripItem, Tab, TabId, Window,
+    WindowId,
 };
 pub use profile::{Profile, ProfileError};
-pub use settings::{ChromeColor, Settings, SettingsError};
+pub use settings::{ChromeColor, SearchSettings, Settings, SettingsError};

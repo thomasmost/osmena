@@ -15,7 +15,8 @@ use osmena_chrome::routing::{
 };
 use osmena_chrome::{icon, input, keyutils, menus, native_menu};
 use osmena_core::{
-    Brand, Browser, Command, Cursor, EngineInfo, EngineInput, Keymap, Prompt, TabId, WindowId,
+    Brand, Browser, Command, Cursor, EngineInfo, EngineInput, Keymap, PageContext, Platform,
+    Prompt, TabId, WindowId,
 };
 use osmena_engine::{
     BlitRect, Engine, EngineError, PagePaint, PhysicalSize, ScreenRect, Surface, TabHost,
@@ -206,6 +207,51 @@ impl<E: Engine> BrowserWindow<E> {
                 height: px(anchor.height()),
             },
         );
+    }
+
+    /// Show the context menu of `tab`'s page, over `context`, at
+    /// `position` (physical pixels from the page area's top left; the
+    /// pointer when `None`), and return what to do: the chosen command,
+    /// if any, then `ContextMenuClosed` so the engine lets go of what it
+    /// held for the menu.
+    pub fn show_page_menu(
+        &self,
+        browser: &Browser,
+        keymap: &Keymap,
+        tab: TabId,
+        position: Option<(f32, f32)>,
+        context: &PageContext,
+    ) -> Vec<Command> {
+        let mut commands = Vec::new();
+        if let Some(model) = browser.window(self.id)
+            && model.tab(tab).is_some()
+        {
+            let entries = menus::page_menu(
+                model,
+                tab,
+                context,
+                &self.engine_info.page_tools,
+                keymap,
+                Platform::current(),
+                &browser.settings.search.name,
+            );
+            let scale = self.window.scale_factor();
+            let position = match position {
+                Some((x, y)) => Some(LogicalPosition::new(
+                    f64::from(x) / scale,
+                    (f64::from(y) + f64::from(self.content_top_px)) / scale,
+                )),
+                None => self
+                    .cursor
+                    .map(|p| LogicalPosition::new(p.x / scale, p.y / scale)),
+            };
+            let menu = native_menu::NativeMenu::build(&entries);
+            if let Some(command) = menu.show(&self.window, position) {
+                commands.push(command);
+            }
+        }
+        commands.push(Command::ContextMenuClosed(tab));
+        commands
     }
 
     /// Ask the user something over this window's page.

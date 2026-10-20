@@ -5,7 +5,7 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-10-19 (tab folders, bookmark groups, prompts)._
+_Last updated: 2026-10-19 (the page context menu, the address-bar search)._
 
 ## Architecture
 
@@ -76,6 +76,22 @@ No engine is needed; the workspace builds in under a minute.
   its first tab is, `prune_folders` drops a folder whose last tab went
   (every tab removal calls it), and `strip_items` is the strip as drawn.
   New tabs go to the end, outside any folder.
+- **The page's context menu is the engine's report and the chrome's
+  menu.** An engine never shows its own: it reports what is under the
+  pointer as `EngineEvent::ContextMenuRequested` with a `PageContext`
+  (as much as it knows: link, media, selection, editable state,
+  misspelling), the window shows `menus::page_menu` from it (shaped like
+  Chromium's, with the entries `EngineInfo::page_tools` allows), and the
+  choice is a `Command`: what the model can do itself (open a link in a
+  tab or window, copy an address, search) stays in the model, what only
+  the engine can do (copy, paste, save, print, inspect, …) is a
+  `Command::Page` with a `PageCommand`, which reaches
+  `TabHost::page_command`; `ContextMenuClosed` follows either way so the
+  engine lets go of what it held. The point is the engine's to remember.
+- **Address-bar text is a URL or a search.** `location_input_to_url`
+  decides; what is not a URL is `Command::Search`, and `dispatch`
+  resolves it with `Settings::search` (`url_for`), the one place that
+  knows the provider. Nothing else builds a search URL.
 - **The native window is asked, never driven, by the chrome.** The strip
   records a `WindowRequest` (drag, minimize, maximize, system menu) the
   way it records a `MenuRequest`; `BrowserWindow` acts on it after the
@@ -141,7 +157,28 @@ list, folder menu) and bookmark groups (`bookmarks.toml`, the window
 menu's Bookmarks submenu), both reached from the tab context menu
 through prompts drawn by the chrome.
 
-Verified: `cargo test` (186 tests), clippy with `-D warnings`, formatting;
+Added 2026-10-20: the page's context menu (`PageContext` from the
+engine, `menus::page_menu`, `PageCommand` back to the engine, `PageTools`
+on `EngineInfo`), background tabs beside their opener and new windows
+from a page's request, the address-bar search (`Settings::search`),
+clipboard writes in the shell, and egui-winit's `clipboard` feature so
+the address bar pastes from the system clipboard.
+
+Verified 2026-10-20 with Nautilus on Windows, by scripted input on a
+local test page: the link, image, text-field, selection, and plain-page
+menus show the expected entries and shortcuts; "Open link in new tab"
+adds a tab beside the current one without activating it; "Copy link
+address" then Ctrl+V in the address bar pastes the URL; "Copy image"
+puts the image on the clipboard; Print opens the system dialog; "View
+page source" opens a `view-source:` tab; Inspect opens the developer
+tools; address-bar text that is not a URL loads a Google search; Ctrl+Q
+afterwards exits cleanly. Paladin builds and its tests pass against this
+revision; its page menu was not run by hand. Not verified: the media
+entries (no video was tried), spelling suggestions, "Paste as plain
+text", Shift-click and middle-click on a link, the Search fields in the
+settings window by hand.
+
+Verified: `cargo test` (205 tests), clippy with `-D warnings`, formatting;
 both browsers build against this revision; Nautilus on Windows launches
 frameless with the controls at the strip's right end, opens the settings
 window on `Ctrl+,`, captures a chord in the editor (New tab rebound to

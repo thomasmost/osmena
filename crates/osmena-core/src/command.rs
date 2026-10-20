@@ -128,7 +128,71 @@ pub enum Command {
     /// Remove `extension` for good; it is unpinned too.
     UninstallExtension(String),
     InstallExtension(ExtensionSource),
+    /// Load the search for `query` (`Settings::search`) in `tab`:
+    /// address-bar text that is not a URL.
+    Search {
+        tab: TabId,
+        query: String,
+    },
+    /// Open the search for `query` in a new tab of `window`.
+    SearchInNewTab {
+        window: WindowId,
+        query: String,
+    },
+    /// Open `url` in a new tab beside `opener`, in its window, without
+    /// leaving the active tab ("Open link in new tab").
+    NewBackgroundTab {
+        opener: TabId,
+        url: Url,
+    },
+    /// Open `url` in a new window ("Open link in new window").
+    OpenInNewWindow(Url),
+    /// Put `text` on the clipboard.
+    CopyText(String),
+    /// Act on the page of `tab` where its context menu was opened.
+    Page {
+        tab: TabId,
+        command: PageCommand,
+    },
+    /// The context menu of `tab`'s page closed, with or without a choice
+    /// (which was dispatched first): the engine may let go of what it
+    /// held for it.
+    ContextMenuClosed(TabId),
     Quit,
+}
+
+/// Something the page's context menu asks of the engine. It acts on the
+/// page of the tab where the menu was opened, at the point it was opened
+/// (the engine remembers the point).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PageCommand {
+    Undo,
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    PasteAsPlainText,
+    Delete,
+    SelectAll,
+    /// Replace the misspelled word under the pointer with this one.
+    ReplaceMisspelling(String),
+    /// Add the misspelled word to the dictionary.
+    AddToDictionary(String),
+    /// Save what `url` names (a link's target, an image, a video, the
+    /// page itself) to disk, asking where.
+    Save(Url),
+    /// Put the image at `url` on the clipboard: the engine fetches it and
+    /// reports `EngineEvent::ClipboardImage`.
+    CopyImage(Url),
+    /// Make the video or audio under the pointer loop, or stop it.
+    SetMediaLoop(bool),
+    /// Show or hide the controls of the video or audio under the pointer.
+    SetMediaControls(bool),
+    Print,
+    /// Show the page's source.
+    ViewSource,
+    /// Open the developer tools on the element under the pointer.
+    Inspect,
 }
 
 /// The folder `Command::MoveTabsToFolder` puts tabs in.
@@ -178,12 +242,21 @@ pub enum EngineAction {
         tab: TabId,
         url: Url,
     },
+    /// Create an engine tab for `tab` in `window` loading `url` that stays
+    /// hidden behind the active tab, which keeps the focus.
+    CreateHiddenTab {
+        window: WindowId,
+        tab: TabId,
+        url: Url,
+    },
     /// Adopt a tab the engine already created (a `window.open` request) as
-    /// `tab` in `window`, and show it.
+    /// `tab` in `window`, and show it, or, `background`, keep it hidden
+    /// behind the active tab.
     AdoptTab {
         window: WindowId,
         tab: TabId,
         pending: PendingTab,
+        background: bool,
     },
     Navigate {
         tab: TabId,
@@ -237,6 +310,15 @@ pub enum EngineAction {
     },
     UninstallExtension(String),
     InstallExtension(ExtensionSource),
+    /// Put `text` on the clipboard.
+    CopyText(String),
+    /// Act on `tab`'s page (see `PageCommand`).
+    Page {
+        tab: TabId,
+        command: PageCommand,
+    },
+    /// The context menu of `tab`'s page closed.
+    ContextMenuClosed(TabId),
     Quit,
 }
 
@@ -497,6 +579,28 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             actions
         }
         Command::InstallExtension(source) => vec![EngineAction::InstallExtension(source.clone())],
+        Command::Search { tab, query } => match browser.settings.search.url_for(query) {
+            Some(url) => dispatch(browser, &Command::Navigate { tab: *tab, url }),
+            None => Vec::new(),
+        },
+        Command::SearchInNewTab { window, query } => match browser.settings.search.url_for(query) {
+            Some(url) => new_tab(browser, *window, Some(url)),
+            None => Vec::new(),
+        },
+        Command::NewBackgroundTab { opener, url } => new_background_tab(browser, *opener, url),
+        Command::OpenInNewWindow(url) => open_window(browser, url.clone()),
+        Command::CopyText(text) => vec![EngineAction::CopyText(text.clone())],
+        Command::Page { tab, command } => pass_through(
+            browser,
+            *tab,
+            EngineAction::Page {
+                tab: *tab,
+                command: command.clone(),
+            },
+        ),
+        Command::ContextMenuClosed(tab) => {
+            pass_through(browser, *tab, EngineAction::ContextMenuClosed(*tab))
+        }
         Command::Quit => vec![EngineAction::Quit],
     }
 }
@@ -654,6 +758,24 @@ fn new_tab(browser: &mut Browser, window: WindowId, url: Option<Url>) -> Vec<Eng
         actions.push(EngineAction::FocusAddressBar(window));
     }
     actions
+}
+
+/// Add a tab at `url` beside `opener` that does not become active: the
+/// engine creates it hidden, and the active tab keeps the focus.
+fn new_background_tab(browser: &mut Browser, opener: TabId, url: &Url) -> Vec<EngineAction> {
+    let Some(window) = browser.window_of_tab(opener) else {
+        return Vec::new();
+    };
+    let tab = browser.allocate_tab_id();
+    let w = browser
+        .window_mut(window)
+        .expect("window_of_tab returned an existing window");
+    w.insert_tab_after(opener, Tab::new(tab, url.clone()));
+    vec![EngineAction::CreateHiddenTab {
+        window,
+        tab,
+        url: url.clone(),
+    }]
 }
 
 /// Remove `tab`. If it was active, the tab to its right becomes active, or
@@ -891,6 +1013,156 @@ mod tests {
             panic!("open_window returns OpenWindow");
         };
         (b, window, tab)
+    }
+
+    #[test]
+    fn a_search_loads_the_search_url_in_the_tab_or_a_new_tab() {
+        let (mut b, window, tab) = one_window();
+        let actions = dispatch(
+            &mut b,
+            &Command::Search {
+                tab,
+                query: "two words".to_string(),
+            },
+        );
+        assert_eq!(
+            actions,
+            vec![EngineAction::Navigate {
+                tab,
+                url: url("https://www.google.com/search?q=two+words"),
+            }]
+        );
+        assert_eq!(
+            b.tab(tab).unwrap().url.as_str(),
+            "https://www.google.com/search?q=two+words"
+        );
+        let actions = dispatch(
+            &mut b,
+            &Command::SearchInNewTab {
+                window,
+                query: "more".to_string(),
+            },
+        );
+        let w = b.window(window).unwrap();
+        assert_eq!(w.tabs.len(), 2);
+        assert_eq!(w.active, w.tabs[1].id);
+        assert!(matches!(
+            actions.as_slice(),
+            [EngineAction::Hide(_), EngineAction::CreateTab { url, .. }]
+                if url.as_str() == "https://www.google.com/search?q=more"
+        ));
+        // A blank query does nothing.
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::Search {
+                    tab,
+                    query: "  ".to_string(),
+                },
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_background_tab_opens_beside_its_opener_hidden_and_in_its_folder() {
+        let (mut b, window, opener) = one_window();
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window,
+                url: Some(url("https://z.example/")),
+            },
+        );
+        dispatch(&mut b, &Command::ActivateTab(opener));
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToFolder {
+                tabs: vec![opener],
+                folder: FolderTarget::New {
+                    name: String::new(),
+                },
+            },
+        );
+        let folder = b.tab(opener).unwrap().folder.expect("in a folder");
+        let actions = dispatch(
+            &mut b,
+            &Command::NewBackgroundTab {
+                opener,
+                url: url("https://link.example/"),
+            },
+        );
+        let w = b.window(window).unwrap();
+        assert_eq!(w.active, opener);
+        assert_eq!(w.tabs.len(), 3);
+        let new = &w.tabs[1];
+        assert_eq!(new.url.as_str(), "https://link.example/");
+        assert_eq!(new.folder, Some(folder));
+        assert_eq!(
+            actions,
+            vec![EngineAction::CreateHiddenTab {
+                window,
+                tab: new.id,
+                url: url("https://link.example/"),
+            }]
+        );
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::NewBackgroundTab {
+                    opener: TabId(999),
+                    url: url("https://link.example/"),
+                },
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn open_in_new_window_opens_a_window_at_the_url() {
+        let (mut b, _window, _tab) = one_window();
+        let actions = dispatch(&mut b, &Command::OpenInNewWindow(url("https://w.example/")));
+        assert_eq!(b.windows.len(), 2);
+        assert!(matches!(
+            actions.as_slice(),
+            [EngineAction::OpenWindow { url, .. }] if url.as_str() == "https://w.example/"
+        ));
+    }
+
+    #[test]
+    fn page_commands_and_the_menu_closing_pass_through_for_live_tabs() {
+        let (mut b, _window, tab) = one_window();
+        assert_eq!(
+            dispatch(
+                &mut b,
+                &Command::Page {
+                    tab,
+                    command: PageCommand::Copy,
+                },
+            ),
+            vec![EngineAction::Page {
+                tab,
+                command: PageCommand::Copy,
+            }]
+        );
+        assert_eq!(
+            dispatch(&mut b, &Command::ContextMenuClosed(tab)),
+            vec![EngineAction::ContextMenuClosed(tab)]
+        );
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::Page {
+                    tab: TabId(999),
+                    command: PageCommand::Copy,
+                },
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            dispatch(&mut b, &Command::CopyText("hi".to_string())),
+            vec![EngineAction::CopyText("hi".to_string())]
+        );
     }
 
     #[test]
