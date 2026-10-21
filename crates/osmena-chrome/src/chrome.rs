@@ -36,10 +36,12 @@ const ACTION_ICON: f32 = 16.0;
 const FOLDER_NAME_MAX_CHARS: usize = 18;
 
 /// The shades the chrome paints with, all derived from the profile's
-/// [`ChromeColor`]: the tab strip is the swatch itself, tabs are veils of
-/// white (or black, on a light swatch) over it, and the active tab shares
-/// the toolbar's fill, which is the swatch washed most of the way to the
-/// page background, so it reads as attached to the page.
+/// [`ChromeColor`]: the tab strip is the swatch at its top and fades to
+/// the toolbar's fill at its bottom edge ([`Palette::strip_at`]), tabs
+/// are veils of white (or black, on a light swatch) over it, and the
+/// active tab shares the toolbar's fill, which is the swatch washed most
+/// of the way to the page background, so it reads as attached to the
+/// page with no edge between strip and toolbar.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palette {
     pub strip: Color32,
@@ -81,6 +83,40 @@ impl Palette {
             tab_outline: veil_alpha(180),
         }
     }
+
+    /// The strip's fill `t` of the way down it (0 at the top, 1 at the
+    /// bottom edge): the swatch, easing into the toolbar's fill so the
+    /// two meet without a line. The ease is quadratic: the top half
+    /// stays close to the swatch, which keeps the tab titles legible on
+    /// it, and the fade happens under the tabs' lower half.
+    pub fn strip_at(&self, t: f32) -> Color32 {
+        let t = t.clamp(0.0, 1.0);
+        blend(self.strip, self.toolbar, t * t)
+    }
+}
+
+/// The strip's background: `rect` filled with [`Palette::strip_at`] from
+/// top to bottom, as a mesh of horizontal bands whose vertex colours
+/// egui interpolates (the bands keep the quadratic ease from flattening
+/// into one linear ramp).
+fn strip_background(rect: Rect, palette: &Palette) -> egui::Shape {
+    const BANDS: u32 = 8;
+    let mut mesh = egui::Mesh::default();
+    for band in 0..BANDS {
+        let t0 = band as f32 / BANDS as f32;
+        let t1 = (band + 1) as f32 / BANDS as f32;
+        let y0 = rect.top() + rect.height() * t0;
+        let y1 = rect.top() + rect.height() * t1;
+        let (c0, c1) = (palette.strip_at(t0), palette.strip_at(t1));
+        let base = mesh.vertices.len() as u32;
+        mesh.colored_vertex(Pos2::new(rect.left(), y0), c0);
+        mesh.colored_vertex(Pos2::new(rect.right(), y0), c0);
+        mesh.colored_vertex(Pos2::new(rect.right(), y1), c1);
+        mesh.colored_vertex(Pos2::new(rect.left(), y1), c1);
+        mesh.add_triangle(base, base + 1, base + 2);
+        mesh.add_triangle(base, base + 2, base + 3);
+    }
+    egui::Shape::mesh(mesh)
 }
 
 /// `a` moved `t` of the way to `b`, per channel.
@@ -294,13 +330,18 @@ pub fn draw(
         return commands;
     }
 
-    let strip_frame = Frame::new().fill(palette.strip).inner_margin(Margin {
-        left: 8,
-        right: 8,
-        top: 6,
-        bottom: 0,
-    });
-    Panel::top("tabs").frame(strip_frame).show_inside(ui, |ui| {
+    // The strip's fill is painted behind the panel once its rect is
+    // known: a gradient, which a `Frame` cannot fill with.
+    let strip_background_slot = ui.painter().add(egui::Shape::Noop);
+    let strip_frame = Frame::new()
+        .fill(Color32::TRANSPARENT)
+        .inner_margin(Margin {
+            left: 8,
+            right: 8,
+            top: 6,
+            bottom: 0,
+        });
+    let strip = Panel::top("tabs").frame(strip_frame).show_inside(ui, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             if frameless && cfg!(target_os = "macos") {
@@ -464,6 +505,10 @@ pub fn draw(
             });
         });
     });
+    ui.painter().set(
+        strip_background_slot,
+        strip_background(strip.response.rect, &palette),
+    );
 
     let toolbar_frame = Frame::new()
         .fill(palette.toolbar)
@@ -1555,6 +1600,19 @@ fn key_name(code: Code) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_strip_fades_from_the_swatch_to_the_toolbar() {
+        let palette = Palette::new(ChromeColor::default(), false);
+        assert_eq!(palette.strip_at(0.0), palette.strip);
+        assert_eq!(palette.strip_at(1.0), palette.toolbar);
+        // Mostly the swatch still halfway down.
+        assert_eq!(
+            palette.strip_at(0.5),
+            blend(palette.strip, palette.toolbar, 0.25)
+        );
+        assert_eq!(palette.strip_at(2.0), palette.toolbar);
+    }
     use keyboard_types::Modifiers;
 
     #[test]

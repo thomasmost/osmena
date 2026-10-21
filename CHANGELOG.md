@@ -4,6 +4,13 @@ All notable changes to the osmena crates. The crates version together.
 
 ## Unreleased
 
+### Changed
+
+- The tab strip fades from the chrome colour at its top into the
+  toolbar's fill at its bottom edge, so strip and toolbar meet without
+  a line; the active tab, which shares the toolbar's fill, now sits on
+  the strip without an edge under it (`Palette::strip_at`).
+
 ### Fixed
 
 - macOS: the tab context menu, the page context menu, and the window
