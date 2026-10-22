@@ -66,6 +66,9 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- `Command::MoveTabs { tabs, index }` reorders tabs within their window;
+  a tab dropped between two tabs of a folder joins it, one dropped
+  anywhere else leaves its folder.
 - The back and forward buttons of a mouse go back and forward in the
   active tab, wherever the pointer is over the window.
 - `--exit-after <seconds>` (hidden from `--help`): the browser quits
