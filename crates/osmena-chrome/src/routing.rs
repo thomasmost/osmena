@@ -108,12 +108,24 @@ impl PointerCapture {
         target
     }
 
-    /// Forget all buttons, for example when the window loses focus and the
-    /// releases will arrive elsewhere.
+    /// Forget all buttons, for example when the system took the pointer
+    /// for a window drag and the release will never arrive.
     pub fn clear(&mut self) {
         self.pressed.clear();
         self.target = None;
         self.tab = None;
+    }
+
+    /// End the capture because the window lost focus: the releases will
+    /// arrive elsewhere. Returns the tab and the buttons it holds down
+    /// when the page holds the capture, so the window can release them
+    /// there; egui forgets its own on focus loss.
+    pub fn release_all(&mut self) -> Option<(TabId, Vec<MouseButton>)> {
+        let held = self
+            .tab
+            .map(|tab| (tab, self.pressed.iter().copied().collect()));
+        self.clear();
+        held
     }
 }
 
@@ -226,11 +238,13 @@ impl KeyRouter {
         Some(KeyTarget::Page(tab))
     }
 
-    /// Forget every key, for example when the window loses focus. egui does
-    /// the same for its own held keys on `WindowFocused(false)`.
-    pub fn clear(&mut self) {
-        self.page_keys.clear();
+    /// Forget every key because the window lost focus: the releases will
+    /// arrive elsewhere. Returns the keys the page holds, with their tabs,
+    /// so the window can release them there; egui forgets its own held
+    /// keys on `WindowFocused(false)`.
+    pub fn release_all(&mut self) -> Vec<(Code, TabId)> {
         self.egui_keys.clear();
+        self.page_keys.drain().collect()
     }
 }
 
@@ -517,6 +531,25 @@ mod tests {
         );
     }
 
+    /// Focus lost with buttons down in the page: the window gets them
+    /// back, with the tab, to release there. A capture held by egui has
+    /// nothing to release in a page.
+    #[test]
+    fn losing_focus_hands_back_the_buttons_the_page_holds() {
+        let mut capture = PointerCapture::default();
+        capture.press(LEFT, PointerTarget::Page, Some(TAB_A));
+        capture.press(RIGHT, PointerTarget::Egui, Some(TAB_B));
+        let (tab, mut buttons) = capture.release_all().expect("the page held two buttons");
+        buttons.sort_by_key(|b| format!("{b:?}"));
+        assert_eq!(tab, TAB_A);
+        assert_eq!(buttons, [LEFT, RIGHT]);
+        assert_eq!(capture.captured(), None);
+
+        capture.press(LEFT, PointerTarget::Egui, Some(TAB_A));
+        assert_eq!(capture.release_all(), None);
+        assert_eq!(capture.captured(), None);
+    }
+
     fn mac() -> Keymap {
         Keymap::defaults(Platform::MacOs)
     }
@@ -751,14 +784,18 @@ mod tests {
         );
     }
 
+    /// Focus lost with A held in the page and Enter held in egui: the
+    /// window gets A back, with its tab, to release there; Enter is
+    /// egui's to forget. Afterwards neither release is anyone's.
     #[test]
-    fn clearing_forgets_both_sides() {
+    fn losing_focus_hands_back_the_keys_the_page_holds() {
         let mut keys = KeyRouter::default();
         plain(&mut keys, Code::KeyA, true, false, false);
         plain(&mut keys, Code::Enter, true, false, true);
-        keys.clear();
+        assert_eq!(keys.release_all(), [(Code::KeyA, TAB_A)]);
         assert_eq!(plain(&mut keys, Code::KeyA, false, false, false), None);
         assert_eq!(plain(&mut keys, Code::Enter, false, false, false), None);
+        assert!(keys.release_all().is_empty());
     }
 
     /// Holding Cmd+T over the page opens one tab: the press is a command,

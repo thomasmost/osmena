@@ -26,6 +26,12 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Fixed
 
+- A key or mouse button held in a page when the window lost focus
+  (Alt+Tab, a click into another window) stayed down in the page: the
+  system sends no release for it, and the real one, when it came, was
+  dropped as a release nobody here saw pressed. The window now releases
+  such keys and buttons in the page as it loses focus, each in the tab
+  that got its press.
 - A mouse button pressed in a page and released after a keyboard tab
   switch (Ctrl+Tab while dragging) released in the newly active tab,
   which had never seen the press, while the first tab kept the button

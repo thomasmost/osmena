@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use egui::{Color32, LayerId, PaintCallback, Rect as EguiRect, pos2};
 use egui_glow::{CallbackFn, EguiGlow};
-use keyboard_types::Modifiers;
+use keyboard_types::{KeyState, Modifiers};
 use osmena_chrome::chrome::{self, ChromeState, WindowRequest};
 use osmena_chrome::routing::{
     KeyRouter, KeyStroke, KeyTarget, PointerCapture, PointerContext, PointerTarget, content_pixels,
@@ -16,8 +16,8 @@ use osmena_chrome::routing::{
 };
 use osmena_chrome::{icon, input, keyutils, menus, native_menu};
 use osmena_core::{
-    Brand, Browser, Command, Cursor, EngineInfo, EngineInput, Keymap, PageContext, Platform,
-    Prompt, TabId, WindowId,
+    Brand, Browser, Command, Cursor, EngineInfo, EngineInput, KeyInput, Keymap, PageContext,
+    Platform, Prompt, TabId, WindowId,
 };
 use osmena_engine::{
     BlitRect, Engine, EngineError, PagePaint, PhysicalSize, ScreenRect, Surface, TabHost,
@@ -61,6 +61,9 @@ pub struct BrowserWindow<E: Engine> {
     /// Which side each held key went to, and which presses are keymap
     /// commands. See [`KeyRouter`].
     keys: KeyRouter,
+    /// The press the page got for each key it holds, so the key can be
+    /// released there if the real release never arrives.
+    page_presses: HashMap<keyboard_types::Code, KeyInput>,
     /// The uploaded frame of each tab that handed the shell pixels.
     textures: HashMap<TabId, PageTexture>,
     egui: EguiGlow,
@@ -119,6 +122,7 @@ impl<E: Engine> BrowserWindow<E> {
             page_cursor: CursorIcon::Default,
             capture: PointerCapture::default(),
             keys: KeyRouter::default(),
+            page_presses: HashMap::new(),
             textures: HashMap::new(),
             egui,
             host,
@@ -447,10 +451,7 @@ impl<E: Engine> BrowserWindow<E> {
                     // into the window, like any popup.
                     self.host.close_extension_popups();
                 } else {
-                    // Releases of keys and buttons held while focus moved
-                    // away arrive elsewhere; do not wait for them here.
-                    self.keys.clear();
-                    self.capture.clear();
+                    self.release_held(browser);
                 }
                 if let Some(tab) = active {
                     self.host.set_focused(tab, *focused);
@@ -566,6 +567,11 @@ impl<E: Engine> BrowserWindow<E> {
                 match target {
                     Some(KeyTarget::Page(tab)) => {
                         forward_to_egui = false;
+                        if stroke.pressed {
+                            self.page_presses.insert(stroke.code, key_input.clone());
+                        } else {
+                            self.page_presses.remove(&stroke.code);
+                        }
                         self.host.input(tab, EngineInput::Key(key_input));
                     }
                     Some(KeyTarget::Command(kind)) => {
@@ -597,6 +603,53 @@ impl<E: Engine> BrowserWindow<E> {
             }
         }
         commands
+    }
+
+    /// The window lost focus: the releases of the keys and buttons the
+    /// page holds will arrive elsewhere (Alt+Tab takes the Alt release;
+    /// the system does not synthesize one), so release them in the page
+    /// now, each in the tab that got its press, with the modifiers as
+    /// the window knows them (all up, on Windows, by this point). A page
+    /// that tracks key or button state is then never stuck with one
+    /// down; egui forgets its own on the same event.
+    fn release_held(&mut self, browser: &Browser) {
+        let live = |tab: TabId| {
+            browser
+                .window(self.id)
+                .is_some_and(|w| w.tab(tab).is_some())
+        };
+        let modifiers = self.modifiers();
+        for (code, tab) in self.keys.release_all() {
+            if let Some(press) = self.page_presses.remove(&code)
+                && live(tab)
+            {
+                let release = KeyInput {
+                    state: KeyState::Up,
+                    modifiers,
+                    repeat: false,
+                    ..press
+                };
+                self.host.input(tab, EngineInput::Key(release));
+            }
+        }
+        self.page_presses.clear();
+        if let Some((tab, buttons)) = self.capture.release_all()
+            && live(tab)
+        {
+            let (x, y) = self.content_point().unwrap_or((0.0, 0.0));
+            for button in buttons {
+                self.host.input(
+                    tab,
+                    EngineInput::MouseButton {
+                        action: osmena_core::ButtonAction::Up,
+                        button: input::mouse_button(button),
+                        x,
+                        y,
+                        modifiers,
+                    },
+                );
+            }
+        }
     }
 
     fn surrender_egui_focus(&self) {
