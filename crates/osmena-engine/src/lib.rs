@@ -87,6 +87,15 @@ pub struct ScreenRect {
     pub height: i32,
 }
 
+/// A rectangle of pixels in a frame, from its top left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PixelRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// A tab's latest pixels, BGRA8 with straight alpha, row-major from the
 /// top left, tightly packed.
 #[derive(Clone, Copy, Debug)]
@@ -97,6 +106,10 @@ pub struct FrameRef<'a> {
     /// True if the pixels changed since the last time they were handed
     /// out, so the shell can skip the upload otherwise.
     pub fresh: bool,
+    /// The parts that changed since the last time the frame was handed
+    /// out, when the engine knows them, so the shell uploads only those;
+    /// empty means all of it. Read only when `fresh`.
+    pub dirty: &'a [PixelRect],
 }
 
 /// How a tab's content reaches the window, handed to the shell by

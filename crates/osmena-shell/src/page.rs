@@ -7,6 +7,7 @@
 //! asks for a redraw. Every later frame updates the pixels in place.
 
 use glow::HasContext;
+use osmena_engine::PixelRect;
 
 pub struct PageTexture {
     texture: glow::Texture,
@@ -72,16 +73,30 @@ impl PageTexture {
         self.size
     }
 
-    /// Replace the pixels; a size change reallocates the texture's storage
-    /// under the same handle, so the egui id stays valid.
-    pub fn update(&mut self, gl: &glow::Context, width: u32, height: u32, bgra: &[u8]) {
+    /// Replace the pixels, or only the `dirty` parts of them when the
+    /// size is unchanged and the engine named some; a size change
+    /// reallocates the texture's storage under the same handle, so the
+    /// egui id stays valid.
+    pub fn update(
+        &mut self,
+        gl: &glow::Context,
+        width: u32,
+        height: u32,
+        bgra: &[u8],
+        dirty: &[PixelRect],
+    ) {
         if !fits(width, height, bgra) {
             return;
         }
-        // SAFETY: the context is current and the texture is ours.
+        // SAFETY: the context is current and the texture is ours; every
+        // rectangle is clipped to the frame and its bytes are within
+        // `bgra`, as `span` guarantees.
         unsafe {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
-            if (width, height) == self.size {
+            if (width, height) != self.size {
+                allocate(gl, width, height, bgra);
+                self.size = (width, height);
+            } else if dirty.is_empty() {
                 gl.tex_sub_image_2d(
                     glow::TEXTURE_2D,
                     0,
@@ -94,8 +109,23 @@ impl PageTexture {
                     glow::PixelUnpackData::Slice(Some(bgra)),
                 );
             } else {
-                allocate(gl, width, height, bgra);
-                self.size = (width, height);
+                // Rows of the rectangle are `width` pixels apart in the
+                // frame; the upload starts at the rectangle's first pixel.
+                gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, width as i32);
+                for (rect, bytes) in dirty.iter().filter_map(|rect| span(*rect, width, height)) {
+                    gl.tex_sub_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        rect.x as i32,
+                        rect.y as i32,
+                        rect.width as i32,
+                        rect.height as i32,
+                        glow::BGRA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(&bgra[bytes])),
+                    );
+                }
+                gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
             }
             gl.bind_texture(glow::TEXTURE_2D, None);
         }
@@ -126,6 +156,27 @@ fn fits(width: u32, height: u32, bgra: &[u8]) -> bool {
     width > 0 && height > 0 && bgra.len() == width as usize * height as usize * 4
 }
 
+/// `rect` clipped to a `width` by `height` frame, with the byte range of
+/// the frame's tightly packed BGRA buffer that holds it: from its first
+/// pixel to the end of its last row's part. `None` if nothing is left.
+fn span(rect: PixelRect, width: u32, height: u32) -> Option<(PixelRect, std::ops::Range<usize>)> {
+    let right = rect.x.checked_add(rect.width)?.min(width);
+    let bottom = rect.y.checked_add(rect.height)?.min(height);
+    if rect.x >= right || rect.y >= bottom {
+        return None;
+    }
+    let clipped = PixelRect {
+        x: rect.x,
+        y: rect.y,
+        width: right - rect.x,
+        height: bottom - rect.y,
+    };
+    let pixel = |x: u32, y: u32| (y as usize * width as usize + x as usize) * 4;
+    let start = pixel(clipped.x, clipped.y);
+    let end = pixel(right, bottom - 1);
+    Some((clipped, start..end))
+}
+
 /// Allocate the bound texture's storage and fill it. The context is
 /// current and a texture is bound.
 unsafe fn allocate(gl: &glow::Context, width: u32, height: u32, bgra: &[u8]) {
@@ -148,7 +199,7 @@ unsafe fn allocate(gl: &glow::Context, width: u32, height: u32, bgra: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::fits;
+    use super::{PixelRect, fits, span};
 
     #[test]
     fn a_frame_fits_only_at_its_exact_size() {
@@ -156,5 +207,34 @@ mod tests {
         assert!(!fits(2, 2, &[0; 15]));
         assert!(!fits(0, 2, &[]));
         assert!(!fits(2, 0, &[]));
+    }
+
+    fn rect(x: u32, y: u32, width: u32, height: u32) -> PixelRect {
+        PixelRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn a_rectangle_spans_from_its_first_pixel_to_the_end_of_its_last_row() {
+        // A 10 by 10 frame: rows are 40 bytes.
+        let (clipped, bytes) = span(rect(2, 3, 4, 2), 10, 10).unwrap();
+        assert_eq!(clipped, rect(2, 3, 4, 2));
+        assert_eq!(bytes, (3 * 10 + 2) * 4..(4 * 10 + 6) * 4);
+        // The whole frame is the whole buffer.
+        assert_eq!(span(rect(0, 0, 10, 10), 10, 10).unwrap().1, 0..400);
+    }
+
+    #[test]
+    fn a_rectangle_is_clipped_to_the_frame_or_dropped() {
+        let (clipped, bytes) = span(rect(8, 9, 5, 5), 10, 10).unwrap();
+        assert_eq!(clipped, rect(8, 9, 2, 1));
+        assert_eq!(bytes, (9 * 10 + 8) * 4..400);
+        assert_eq!(span(rect(10, 0, 1, 1), 10, 10), None);
+        assert_eq!(span(rect(0, 0, 0, 5), 10, 10), None);
+        assert_eq!(span(rect(u32::MAX, 0, 2, 2), 10, 10), None);
     }
 }

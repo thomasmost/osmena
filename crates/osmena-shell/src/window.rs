@@ -802,7 +802,13 @@ impl<E: Engine> BrowserWindow<E> {
                         PagePaint::Frame(frame) => {
                             if let Some(texture) = textures.get_mut(&active) {
                                 if frame.fresh || texture.size() != (frame.width, frame.height) {
-                                    texture.update(&gl, frame.width, frame.height, frame.bgra);
+                                    texture.update(
+                                        &gl,
+                                        frame.width,
+                                        frame.height,
+                                        frame.bgra,
+                                        frame.dirty,
+                                    );
                                 }
                             } else if let Some(texture) =
                                 PageTexture::new(&gl, frame.width, frame.height, frame.bgra)

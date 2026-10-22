@@ -6,6 +6,11 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- `FrameRef` carries `dirty`, the rectangles (`PixelRect`) that changed
+  since the frame was last handed out, and the shell uploads only those
+  to the page texture when the frame's size is unchanged. An engine
+  that does not track them passes an empty slice, which means all of
+  it.
 - `EngineInput::MouseMove`, `MouseButton`, and `Wheel` carry the
   keyboard `modifiers` held at that moment, from the window's own
   modifier state. An engine must use them instead of remembering the
