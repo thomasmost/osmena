@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use egui::{Color32, LayerId, PaintCallback, Rect as EguiRect, pos2};
 use egui_glow::{CallbackFn, EguiGlow};
+use keyboard_types::Modifiers;
 use osmena_chrome::chrome::{self, ChromeState, WindowRequest};
 use osmena_chrome::routing::{
     KeyRouter, KeyStroke, KeyTarget, PointerCapture, PointerContext, PointerTarget, content_pixels,
@@ -364,13 +365,23 @@ impl<E: Engine> BrowserWindow<E> {
         Some((p.x as f32, p.y as f32 - self.content_top_px))
     }
 
+    /// The keyboard modifiers held now, for pointer events. winit keeps
+    /// them from `ModifiersChanged`, which it also sends when the window
+    /// loses focus (all up) and regains it (the real state), so they
+    /// never go stale the way a modifier inferred from key events does.
+    fn modifiers(&self) -> Modifiers {
+        keyutils::keyboard_modifiers_from_winit_modifiers(self.modifiers)
+    }
+
     fn enter_content(&mut self, active: Option<TabId>, x: f32, y: f32) {
         if !self.pointer_in_content {
             self.window.set_cursor(self.page_cursor);
         }
         self.pointer_in_content = true;
         if let Some(tab) = active {
-            self.host.input(tab, EngineInput::MouseMove { x, y });
+            let modifiers = self.modifiers();
+            self.host
+                .input(tab, EngineInput::MouseMove { x, y, modifiers });
         }
     }
 
@@ -495,6 +506,7 @@ impl<E: Engine> BrowserWindow<E> {
                                 button: input::mouse_button(*button),
                                 x,
                                 y,
+                                modifiers: self.modifiers(),
                             },
                         );
                     }
@@ -505,7 +517,17 @@ impl<E: Engine> BrowserWindow<E> {
                     forward_to_egui = false;
                     if let (Some(tab), Some((x, y))) = (active, self.content_point()) {
                         let (dx, dy) = input::wheel_delta(*delta, self.engine_info.wheel_line_px);
-                        self.host.input(tab, EngineInput::Wheel { dx, dy, x, y });
+                        let modifiers = self.modifiers();
+                        self.host.input(
+                            tab,
+                            EngineInput::Wheel {
+                                dx,
+                                dy,
+                                x,
+                                y,
+                                modifiers,
+                            },
+                        );
                     }
                 }
             }

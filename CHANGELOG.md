@@ -6,6 +6,14 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- `EngineInput::MouseMove`, `MouseButton`, and `Wheel` carry the
+  keyboard `modifiers` held at that moment, from the window's own
+  modifier state. An engine must use them instead of remembering the
+  modifiers of the last key event it saw: those go stale when a
+  modifier is released while the window is not focused (Alt+Tab), or
+  when its release was never delivered (the tab that got the press
+  closed), and a stale Alt or Ctrl turns the next click on a link into
+  a download or a background tab.
 - Tabs in the strip are all one standard width (200 points) instead of
   each taking its title's width; when they no longer fit they all
   shrink alike, down to a minimum (64 points), and only then does the

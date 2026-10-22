@@ -33,18 +33,24 @@ pub struct KeyInput {
 }
 
 /// Input for a tab. Positions are physical pixels relative to the top-left
-/// of the page area (below the toolbar).
+/// of the page area (below the toolbar). Every pointer event carries the
+/// keyboard modifiers held at that moment, as the window knows them: an
+/// engine never infers them from the key events it saw, because a
+/// modifier can go down or up while the window is not focused (Alt+Tab
+/// takes the Alt release with it).
 #[derive(Clone, Debug, PartialEq)]
 pub enum EngineInput {
     MouseMove {
         x: f32,
         y: f32,
+        modifiers: Modifiers,
     },
     MouseButton {
         action: ButtonAction,
         button: MouseButton,
         x: f32,
         y: f32,
+        modifiers: Modifiers,
     },
     /// The pointer left the page area.
     MouseLeft,
@@ -56,6 +62,7 @@ pub enum EngineInput {
         dy: f64,
         x: f32,
         y: f32,
+        modifiers: Modifiers,
     },
     Key(KeyInput),
     ImeStart,

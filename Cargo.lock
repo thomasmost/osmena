@@ -1848,6 +1848,7 @@ dependencies = [
  "egui-winit",
  "egui_glow",
  "glow",
+ "keyboard-types",
  "log",
  "osmena-chrome",
  "osmena-core",
