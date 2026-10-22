@@ -505,6 +505,24 @@ impl<E: Engine> BrowserWindow<E> {
                 forward_to_egui = false;
                 self.start_system_drag(|w| w.drag_resize_window(edge));
             }
+            // The back and forward buttons of a mouse step through the
+            // active tab's history wherever the pointer is, as in other
+            // browsers; neither side sees them.
+            WindowEvent::MouseInput {
+                state,
+                button: button @ (MouseButton::Back | MouseButton::Forward),
+                ..
+            } => {
+                forward_to_egui = false;
+                if *state == ElementState::Pressed
+                    && let Some(tab) = active
+                {
+                    commands.push(match button {
+                        MouseButton::Back => Command::Back(tab),
+                        _ => Command::Forward(tab),
+                    });
+                }
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 let current = self.pointer_target();
                 let target = match state {

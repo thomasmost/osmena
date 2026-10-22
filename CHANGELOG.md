@@ -50,6 +50,8 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- The back and forward buttons of a mouse go back and forward in the
+  active tab, wherever the pointer is over the window.
 - `--exit-after <seconds>` (hidden from `--help`): the browser quits
   that long after its engine started, through the normal Quit path,
   after logging each open tab's title and URL. For scripted smoke tests
