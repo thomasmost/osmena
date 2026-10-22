@@ -31,6 +31,11 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Fixed
 
+- A tab shown or created in a window that did not have keyboard focus
+  (a tab activated by a drag into a window behind another, a new tab in
+  a window the user had left) was told it had focus, so two windows
+  could each show a blinking caret and page key handlers thought they
+  were foremost. Page focus now follows the window's.
 - The window redrew continuously, spinning the engine each time, while
   the address bar or a prompt's field had focus (the caret blink asks
   egui for a repaint half a second ahead, and the shell treated that as

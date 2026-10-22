@@ -157,6 +157,20 @@ impl<E: Engine> BrowserWindow<E> {
         self.host.has_tab(tab)
     }
 
+    /// The native window has keyboard focus. A tab is told it has focus
+    /// only while its window does; `Focused(true)` tells the active tab
+    /// when the window gets it later.
+    pub fn has_focus(&self) -> bool {
+        self.window.has_focus()
+    }
+
+    /// Tell the engine `tab` has focus, if this window does.
+    pub fn focus_tab(&self, tab: TabId) {
+        if self.has_focus() {
+            self.host.set_focused(tab, true);
+        }
+    }
+
     /// Close the tab in the engine and drop its texture, if it had one.
     pub fn close_tab(&mut self, tab: TabId) {
         self.host.close_tab(tab);

@@ -180,7 +180,7 @@ impl<E: Engine> App<E> {
                 ) {
                     Ok(mut bw) => {
                         bw.host_mut().create_tab(tab, url);
-                        bw.host().set_focused(tab, true);
+                        bw.focus_tab(tab);
                         self.windows.insert(bw.winit_id(), bw);
                     }
                     Err(e) => {
@@ -210,7 +210,7 @@ impl<E: Engine> App<E> {
             EngineAction::CreateTab { window, tab, url } => {
                 if let Some(w) = self.window_for_core_id(window) {
                     w.host_mut().create_tab(tab, url);
-                    w.host().set_focused(tab, true);
+                    w.focus_tab(tab);
                     w.request_redraw();
                 }
             }
@@ -233,7 +233,7 @@ impl<E: Engine> App<E> {
                         if adopted && background {
                             w.host().hide(tab);
                         } else if adopted {
-                            w.host().set_focused(tab, true);
+                            w.focus_tab(tab);
                         }
                         w.request_redraw();
                         Some(adopted)
@@ -287,7 +287,7 @@ impl<E: Engine> App<E> {
             EngineAction::Show(tab) => {
                 if let Some(w) = self.window_for_tab(tab) {
                     w.host().show(tab);
-                    w.host().set_focused(tab, true);
+                    w.focus_tab(tab);
                     w.request_redraw();
                 }
             }
