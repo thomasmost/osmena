@@ -18,6 +18,7 @@ mod app;
 mod clipboard;
 mod page;
 pub mod process;
+mod repaint;
 mod settings_window;
 mod window;
 

@@ -26,6 +26,12 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Fixed
 
+- The window redrew continuously, spinning the engine each time, while
+  the address bar or a prompt's field had focus (the caret blink asks
+  egui for a repaint half a second ahead, and the shell treated that as
+  a request for one now), and for as long as a tooltip was pending. The
+  shell now takes egui's repaint requests through its callback and
+  waits until the requested moment.
 - A folder's drop-down list stayed open after a click on the page: the
   click went to the page, so the list never saw it. It now goes to the
   chrome, which closes the list, as a click outside any other popup

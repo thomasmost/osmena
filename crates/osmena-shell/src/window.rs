@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use egui::{Color32, LayerId, PaintCallback, Rect as EguiRect, pos2};
 use egui_glow::{CallbackFn, EguiGlow};
@@ -30,6 +31,7 @@ use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::{CursorIcon, Fullscreen, ResizeDirection, Window, WindowAttributes};
 
 use crate::page::PageTexture;
+use crate::repaint::RepaintSchedule;
 
 /// How close to a frameless window's edge (physical pixels at 1x) the
 /// pointer resizes it instead of acting on what is under it.
@@ -66,6 +68,8 @@ pub struct BrowserWindow<E: Engine> {
     page_presses: HashMap<keyboard_types::Code, KeyInput>,
     /// The uploaded frame of each tab that handed the shell pixels.
     textures: HashMap<TabId, PageTexture>,
+    /// When egui wants the next frame.
+    repaints: RepaintSchedule,
     egui: EguiGlow,
     // Dropped before the surface: the host may hold render targets on it.
     host: E::Host,
@@ -107,6 +111,7 @@ impl<E: Engine> BrowserWindow<E> {
         egui.egui_ctx.options_mut(|options| {
             options.zoom_with_keyboard = false;
         });
+        let repaints = RepaintSchedule::install(&egui.egui_ctx);
 
         Ok(BrowserWindow {
             id,
@@ -124,6 +129,7 @@ impl<E: Engine> BrowserWindow<E> {
             keys: KeyRouter::default(),
             page_presses: HashMap::new(),
             textures: HashMap::new(),
+            repaints,
             egui,
             host,
             surface,
@@ -163,6 +169,13 @@ impl<E: Engine> BrowserWindow<E> {
 
     pub fn request_redraw(&self) {
         self.window.request_redraw();
+    }
+
+    /// Request a redraw if egui wants one now, and return when it wants
+    /// the next one otherwise (a caret blink, a tooltip delay), for the
+    /// event loop to wait until.
+    pub fn redraw_deadline(&mut self) -> Option<Instant> {
+        self.repaints.poll(&self.window)
     }
 
     pub fn focus_address_bar(&mut self) {
@@ -850,7 +863,9 @@ impl<E: Engine> BrowserWindow<E> {
         );
         self.egui.paint(&self.window);
         self.surface.present();
-        if registered || self.egui.egui_ctx.has_requested_repaint() {
+        // A texture registered this frame shows on the next one; what egui
+        // itself asked for, the application reads from `redraw_deadline`.
+        if registered {
             self.window.request_redraw();
         }
         // After the frame is on screen: the strip used as a title bar.

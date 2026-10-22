@@ -19,6 +19,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 
 use crate::StartEngine;
 use crate::clipboard;
+use crate::repaint;
 use crate::settings_window::{SettingsOutcome, SettingsWindow};
 use crate::window::BrowserWindow;
 
@@ -627,9 +628,6 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
             }
         }
         self.pump(event_loop);
-        if !self.exiting {
-            event_loop.set_control_flow(ControlFlow::Wait);
-        }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
@@ -653,9 +651,28 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
                 self.run_commands(vec![Command::Quit], event_loop);
             }
         }
-        if !self.exiting {
-            event_loop.set_control_flow(ControlFlow::Wait);
+    }
+
+    /// Everything pending is handled: ask each window what egui wants,
+    /// and sleep until the earliest delayed repaint (a caret blink, a
+    /// tooltip) or the next event, whichever comes first. A window whose
+    /// repaint is due now has asked for its redraw by the time this
+    /// returns.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.exiting {
+            return;
         }
+        let mut next = None;
+        for w in self.windows.values_mut() {
+            next = repaint::earliest(next, w.redraw_deadline());
+        }
+        if let Some(sw) = self.settings_window.as_mut() {
+            next = repaint::earliest(next, sw.redraw_deadline());
+        }
+        event_loop.set_control_flow(match next {
+            Some(at) => ControlFlow::WaitUntil(at),
+            None => ControlFlow::Wait,
+        });
     }
 
     /// Runs on every exit path, including macOS `terminate:` from the Dock

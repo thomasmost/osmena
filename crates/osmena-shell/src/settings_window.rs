@@ -4,6 +4,8 @@
 //! action has a primary and a secondary slot; clicking a slot captures
 //! the next key chord, which is taken from whatever action held it.
 
+use std::time::Instant;
+
 use egui_glow::EguiGlow;
 use osmena_chrome::chrome::{self, describe_chord, location_input_to_url};
 use osmena_chrome::input::{self, KeyRoute};
@@ -20,6 +22,8 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::ModifiersState;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::Window;
+
+use crate::repaint::RepaintSchedule;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SettingsOutcome {
@@ -60,6 +64,8 @@ pub struct SettingsWindow<S: Surface> {
     /// Commands the extensions section issued, taken by the app after
     /// each event.
     commands: Vec<Command>,
+    /// When egui wants the next frame.
+    repaints: RepaintSchedule,
     egui: EguiGlow,
     surface: S,
     // Dropped last, after the GL state that depends on it.
@@ -114,6 +120,7 @@ impl<S: Surface> SettingsWindow<S> {
         let surface = engine.open_surface(display_handle, window_handle, size)?;
         surface.make_current()?;
         let egui = EguiGlow::new(event_loop, surface.gl(), None, None, false);
+        let repaints = RepaintSchedule::install(&egui.egui_ctx);
         Ok(SettingsWindow {
             dirty: false,
             modifiers: ModifiersState::default(),
@@ -122,6 +129,7 @@ impl<S: Surface> SettingsWindow<S> {
             store_input: String::new(),
             store_notice: None,
             commands: Vec::new(),
+            repaints,
             egui,
             surface,
             window,
@@ -130,6 +138,12 @@ impl<S: Surface> SettingsWindow<S> {
 
     pub fn request_redraw(&self) {
         self.window.request_redraw();
+    }
+
+    /// Request a redraw if egui wants one now, and return when it wants
+    /// the next one otherwise, for the event loop to wait until.
+    pub fn redraw_deadline(&mut self) -> Option<Instant> {
+        self.repaints.poll(&self.window)
     }
 
     /// The commands the extensions section issued since the last call.
@@ -308,9 +322,6 @@ impl<S: Surface> SettingsWindow<S> {
         );
         self.egui.paint(&self.window);
         self.surface.present();
-        if self.egui.egui_ctx.has_requested_repaint() {
-            self.window.request_redraw();
-        }
         activity
     }
 }
