@@ -11,8 +11,8 @@ use egui::{
 };
 use keyboard_types::Code;
 use osmena_core::{
-    ChromeColor, Command, CommandKind, EngineInfo, Extension, Favicon, FolderId, FolderTarget,
-    KeyChord, Keymap, LoadState, Prompt, StripItem, Tab, TabId, Window,
+    ChromeColor, Command, CommandKind, EngineInfo, Extension, Favicon, Folder, FolderId,
+    FolderTarget, KeyChord, Keymap, LoadState, Prompt, StripItem, Tab, TabId, Window,
 };
 use url::{ParseError, Url};
 
@@ -43,6 +43,8 @@ const ACTION_SIZE: f32 = 26.0;
 const ACTION_ICON: f32 = 16.0;
 /// The widest a folder's name is drawn in the strip.
 const FOLDER_NAME_MAX_CHARS: usize = 18;
+/// How long a tab or chip takes to slide to a new place in the strip.
+const STRIP_SLIDE_SECS: f32 = 0.12;
 
 /// The shades the chrome paints with, all derived from the profile's
 /// [`ChromeColor`]: the tab strip is the swatch at its top and fades to
@@ -161,8 +163,10 @@ pub struct ChromeState {
     /// Where the extensions menu button was in the last frame: the anchor
     /// for the popup of an action opened from the menu.
     menu_anchor: Option<Rect>,
-    /// Set when a drag of tabs ends; the window takes it and works out
-    /// where the tabs were dropped.
+    /// The drag of tabs along the strip in progress, if any.
+    tab_drag: Option<TabDrag>,
+    /// Set when a drag of tabs ends outside the window; the window takes
+    /// it and works out where the tabs were dropped.
     tab_drop: Option<TabDrop>,
     /// Set when the user asks for a menu; the window shows it as a native
     /// popup (`native_menu`) once the frame is painted.
@@ -259,13 +263,24 @@ pub enum MenuRequest {
     Folder { folder: FolderId, position: Pos2 },
 }
 
-/// A drag of tabs that ended: the tabs to move and where the pointer was
-/// when the button was released, in egui points of this window (which may
-/// be outside the window while the drag held the pointer).
+/// A drag of tabs that ended outside the window: the tabs to move and
+/// where the pointer was when the button was released, in egui points of
+/// this window (outside it, since the drag held the pointer).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabDrop {
     pub tabs: Vec<TabId>,
     pub pointer: Pos2,
+}
+
+/// A drag of tabs along the strip: the tabs (in strip order), how far
+/// into the pressed tab the pointer took hold, and where the tabs would
+/// land now (the index `Command::MoveTabs` takes), as the last frame
+/// worked it out.
+#[derive(Clone, Debug, PartialEq)]
+struct TabDrag {
+    tabs: Vec<TabId>,
+    grab: f32,
+    index: usize,
 }
 
 /// An uploaded favicon texture. The `Arc` is a clone of the model's pixels:
@@ -414,69 +429,7 @@ pub fn draw(
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = tab_spacing;
-                        // How many tabs a drag in progress carries, for the overlay.
-                        let mut dragging: Option<usize> = None;
-                        for item in items {
-                            match item {
-                                StripItem::Tab(id) => {
-                                    if let Some(tab) = window.tab(id) {
-                                        strip_tab(
-                                            ui,
-                                            window,
-                                            tab,
-                                            &strip_tabs,
-                                            state,
-                                            &mut commands,
-                                            &mut dragging,
-                                        );
-                                    }
-                                }
-                                StripItem::Folder { folder, tabs } => {
-                                    strip_folder(
-                                        ui,
-                                        window,
-                                        folder,
-                                        &tabs,
-                                        &palette,
-                                        state,
-                                        &mut commands,
-                                    );
-                                    if window.folder(folder).is_some_and(|f| f.expanded) {
-                                        for id in tabs {
-                                            if let Some(tab) = window.tab(id) {
-                                                strip_tab(
-                                                    ui,
-                                                    window,
-                                                    tab,
-                                                    &strip_tabs,
-                                                    state,
-                                                    &mut commands,
-                                                    &mut dragging,
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if let (Some(count), Some(pointer)) =
-                            (dragging, ui.ctx().pointer_latest_pos())
-                        {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                            egui::Area::new(Id::new("tab-drag-overlay"))
-                                .order(egui::Order::Tooltip)
-                                .fixed_pos(pointer + Vec2::new(12.0, 12.0))
-                                .interactable(false)
-                                .show(ui.ctx(), |ui| {
-                                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                                        ui.label(if count == 1 {
-                                            "Move 1 tab".to_string()
-                                        } else {
-                                            format!("Move {count} tabs")
-                                        });
-                                    });
-                                });
-                        }
+                        strip_row(ui, window, &items, &strip_tabs, state, &mut commands);
                         ui.add_space(4.0);
                         if ui
                             .add(on_strip("+", 20.0))
@@ -719,29 +672,274 @@ struct StripTabs<'a> {
     width: f32,
 }
 
-/// One tab of the strip, with everything a tab answers to: click,
-/// Ctrl/Shift click, middle click, the close control, the context menu,
-/// and dragging.
+/// One place in the strip's row: a tab, or a folder's chip.
+enum SlotKind<'a> {
+    Tab(&'a Tab),
+    Chip(Chip),
+}
+
+/// A tab or chip of the row with where it sits when nothing is dragged.
+struct Slot<'a> {
+    kind: SlotKind<'a>,
+    width: f32,
+    /// The tab is one of those being dragged: it rides with the pointer
+    /// and leaves no room here.
+    dragged: bool,
+    /// How many tabs that are not being dragged come before this slot in
+    /// the window's tab order: the `Command::MoveTabs` index of a drop
+    /// just before it.
+    tab_index: usize,
+    /// Offset from the row's left edge, with the dragged tabs taken out.
+    compact: f32,
+}
+
+impl Slot<'_> {
+    /// The dragged tabs' place is judged against tabs and against chips
+    /// standing in for their tabs; an expanded chip is glued to the tabs
+    /// that follow it and judged with them.
+    fn stands_for_tabs(&self) -> bool {
+        match &self.kind {
+            SlotKind::Tab(_) => true,
+            SlotKind::Chip(chip) => !chip.expanded,
+        }
+    }
+
+    /// The key its slide is animated under.
+    fn slide_id(&self) -> Id {
+        match &self.kind {
+            SlotKind::Tab(tab) => Id::new(("strip-slide", tab.id)),
+            SlotKind::Chip(chip) => Id::new(("strip-slide", chip.folder)),
+        }
+    }
+}
+
+/// The row being measured: its slots so far and where the next goes.
+struct RowBuilder<'a> {
+    slots: Vec<Slot<'a>>,
+    spacing: f32,
+    /// Offset of the next slot with the dragged tabs taken out.
+    compact: f32,
+    /// Tabs not being dragged, so far.
+    tab_index: usize,
+    /// Width of everything so far, dragged tabs included, each with its
+    /// spacing.
+    total: f32,
+}
+
+impl<'a> RowBuilder<'a> {
+    /// A tab, dragged or not. A dragged one takes room in the total (it
+    /// is drawn somewhere) but none in the compact layout.
+    fn add(&mut self, kind: SlotKind<'a>, width: f32, dragged: bool) {
+        self.push(kind, width, dragged, usize::from(!dragged));
+    }
+
+    /// A chip, standing for `hidden` tabs of its folder that are not
+    /// drawn (none when it is expanded).
+    fn add_chip(&mut self, chip: Chip, hidden: usize) {
+        let width = chip.width;
+        self.push(SlotKind::Chip(chip), width, false, hidden);
+    }
+
+    fn push(&mut self, kind: SlotKind<'a>, width: f32, dragged: bool, tabs: usize) {
+        self.slots.push(Slot {
+            kind,
+            width,
+            dragged,
+            tab_index: self.tab_index,
+            compact: self.compact,
+        });
+        self.total += width + self.spacing;
+        if !dragged {
+            self.compact += width + self.spacing;
+        }
+        self.tab_index += tabs;
+    }
+}
+
+/// The row of tabs and chips, laid out by hand so each can slide: to
+/// its new place after a reorder, and out of the way of tabs being
+/// dragged along the row. While a drag is on, the dragged tabs ride
+/// with the pointer over the rest, a gap their width opens where they
+/// would land, and the drop is `Command::MoveTabs` with that place
+/// (or, outside the window, a [`TabDrop`] for the application).
+fn strip_row(
+    ui: &mut Ui,
+    window: &Window,
+    items: &[StripItem],
+    look: &StripTabs<'_>,
+    state: &mut ChromeState,
+    commands: &mut Vec<Command>,
+) {
+    let spacing = ui.spacing().item_spacing.x;
+    let dragging: Vec<TabId> = state
+        .tab_drag
+        .as_ref()
+        .map(|drag| drag.tabs.clone())
+        .unwrap_or_default();
+    let is_dragged = |id: TabId| dragging.contains(&id);
+
+    // Measure: every slot's width, and its place with the dragged tabs
+    // taken out.
+    let mut row = RowBuilder {
+        slots: Vec::new(),
+        spacing,
+        compact: 0.0,
+        tab_index: 0,
+        total: 0.0,
+    };
+    for item in items {
+        match item {
+            StripItem::Tab(id) => {
+                if let Some(tab) = window.tab(*id) {
+                    row.add(SlotKind::Tab(tab), look.width, is_dragged(*id));
+                }
+            }
+            StripItem::Folder { folder, tabs } => {
+                let Some(f) = window.folder(*folder) else {
+                    continue;
+                };
+                let chip = Chip::measure(ui, f, tabs.clone(), look.palette, window.active);
+                let hidden = if f.expanded {
+                    0
+                } else {
+                    tabs.iter().filter(|id| !is_dragged(**id)).count()
+                };
+                row.add_chip(chip, hidden);
+                if f.expanded {
+                    for id in tabs {
+                        if let Some(tab) = window.tab(*id) {
+                            row.add(SlotKind::Tab(tab), look.width, is_dragged(*id));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let RowBuilder {
+        slots,
+        tab_index: tab_count,
+        total,
+        ..
+    } = row;
+    let (row, _) = ui.allocate_exact_size(
+        Vec2::new((total - spacing).max(0.0), TAB_HEIGHT),
+        Sense::hover(),
+    );
+
+    // Where the dragged tabs are, and where they would land: before the
+    // first slot whose centre is right of their first tab's.
+    let step = look.width + spacing;
+    let block = dragging.len() as f32 * step;
+    let pointer = ui.ctx().pointer_latest_pos();
+    let drag_left = state.tab_drag.as_ref().zip(pointer).map(|(drag, pointer)| {
+        let rightmost = (row.right() - block + spacing).max(row.left());
+        (pointer.x - drag.grab).clamp(row.left(), rightmost)
+    });
+    let index = drag_left.map(|left| {
+        let centre = left + look.width / 2.0;
+        slots
+            .iter()
+            .filter(|slot| !slot.dragged && slot.stands_for_tabs())
+            .find(|slot| row.left() + slot.compact + slot.width / 2.0 >= centre)
+            .map_or(tab_count, |slot| slot.tab_index)
+    });
+    if let (Some(drag), Some(index)) = (state.tab_drag.as_mut(), index) {
+        drag.index = index;
+    }
+
+    // The slots that stay, each sliding to where it belongs now.
+    let mut live_drag = false;
+    for slot in &slots {
+        if slot.dragged {
+            continue;
+        }
+        let shifted = index.is_some_and(|index| slot.tab_index >= index);
+        let target = slot.compact + if shifted { block } else { 0.0 };
+        let offset = ui
+            .ctx()
+            .animate_value_with_time(slot.slide_id(), target, STRIP_SLIDE_SECS);
+        let rect = Rect::from_min_size(
+            Pos2::new(row.left() + offset, row.top()),
+            Vec2::new(slot.width, TAB_HEIGHT),
+        );
+        match &slot.kind {
+            SlotKind::Tab(tab) => {
+                live_drag |= strip_tab(ui, rect, window, tab, look, state, commands);
+            }
+            SlotKind::Chip(chip) => strip_folder(ui, rect, chip, window, state, commands),
+        }
+    }
+    // The dragged tabs ride with the pointer, over the rest. Their slide
+    // keys follow them with no delay, so on the drop they slide from
+    // where they were let go to where they landed.
+    if let Some(left) = drag_left {
+        for (k, id) in dragging.iter().enumerate() {
+            let Some(tab) = window.tab(*id) else {
+                continue;
+            };
+            let x = left + k as f32 * step;
+            ui.ctx()
+                .animate_value_with_time(Id::new(("strip-slide", tab.id)), x - row.left(), 0.0);
+            let rect =
+                Rect::from_min_size(Pos2::new(x, row.top()), Vec2::new(look.width, TAB_HEIGHT));
+            live_drag |= strip_tab(ui, rect, window, tab, look, state, commands);
+        }
+    }
+    if !live_drag {
+        // The drag ended without a drop here (focus went elsewhere).
+        state.tab_drag = None;
+    }
+
+    // Away from the row, the drag is headed for another window: say
+    // what it carries.
+    if let (Some(drag), Some(pointer)) = (&state.tab_drag, pointer) {
+        let count = drag.tabs.len();
+        let near_row = (row.top() - TAB_HEIGHT..=row.bottom() + TAB_HEIGHT).contains(&pointer.y);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        if !near_row || !ui.ctx().content_rect().contains(pointer) {
+            egui::Area::new(Id::new("tab-drag-overlay"))
+                .order(egui::Order::Tooltip)
+                .fixed_pos(pointer + Vec2::new(12.0, 12.0))
+                .interactable(false)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.label(if count == 1 {
+                            "Move 1 tab".to_string()
+                        } else {
+                            format!("Move {count} tabs")
+                        });
+                    });
+                });
+        }
+    }
+}
+
+/// One tab of the strip at `rect`, with everything a tab answers to:
+/// click, Ctrl/Shift click, middle click, the close control, the context
+/// menu, and dragging. Returns whether the tab is being dragged.
 fn strip_tab(
     ui: &mut Ui,
+    rect: Rect,
     window: &Window,
     tab: &Tab,
     look: &StripTabs<'_>,
     state: &mut ChromeState,
     commands: &mut Vec<Command>,
-    dragging: &mut Option<usize>,
-) {
+) -> bool {
     let is_active = tab.id == window.active;
     let is_selected = window.is_selected(tab.id);
     let favicon = favicon_texture(ui, state, tab.id, tab.favicon.as_ref()).map(|t| t.id());
     let (response, close_clicked) = tab_widget(
         ui,
+        rect,
+        Id::new(("tab", tab.id)),
         look.palette,
-        is_active,
-        is_selected,
-        favicon,
+        TabState {
+            is_active,
+            is_selected,
+            favicon,
+        },
         tab.display_title(),
-        look.width,
     );
     if close_clicked {
         commands.push(Command::CloseTab(tab.id));
@@ -780,21 +978,99 @@ fn strip_tab(
                 .unwrap_or_else(|| response.rect.left_bottom()),
         });
     }
-    if response.drag_started() && !is_selected {
-        commands.push(Command::ActivateTab(tab.id));
-    }
-    if response.dragged() {
-        *dragging = Some(targets.len());
-    }
-    if response.drag_stopped()
-        && let Some(pointer) = response.interact_pointer_pos()
-    {
-        state.tab_drop = Some(TabDrop {
+    if response.drag_started() {
+        if !is_selected {
+            commands.push(Command::ActivateTab(tab.id));
+        }
+        let grab = response
+            .interact_pointer_pos()
+            .map_or(look.width / 2.0, |pointer| pointer.x - rect.left());
+        // Where the tabs are now, among the others: the drop that would
+        // change nothing, until the row works out a better one.
+        let index = window
+            .tabs
+            .iter()
+            .take_while(|t| t.id != tab.id)
+            .filter(|t| !targets.contains(&t.id))
+            .count();
+        state.tab_drag = Some(TabDrag {
             tabs: targets,
-            pointer,
+            grab,
+            index,
         });
     }
+    if response.drag_stopped()
+        && let Some(drag) = state.tab_drag.take()
+        && let Some(pointer) = response.interact_pointer_pos()
+    {
+        if ui.ctx().content_rect().contains(pointer) {
+            commands.push(Command::MoveTabs {
+                tabs: drag.tabs,
+                index: drag.index,
+            });
+        } else {
+            state.tab_drop = Some(TabDrop {
+                tabs: drag.tabs,
+                pointer,
+            });
+        }
+    }
+    response.dragged()
 }
+
+/// A folder's chip, measured before the row is laid out: what it says
+/// and how wide it is.
+struct Chip {
+    folder: FolderId,
+    tabs: Vec<TabId>,
+    name: String,
+    expanded: bool,
+    /// The active tab's page shows through a collapsed chip: it takes
+    /// the active tab's look.
+    as_active: bool,
+    text_color: Color32,
+    galley: Arc<egui::Galley>,
+    width: f32,
+    palette: Palette,
+}
+
+impl Chip {
+    fn measure(ui: &Ui, f: &Folder, tabs: Vec<TabId>, palette: &Palette, active: TabId) -> Chip {
+        let as_active = tabs.contains(&active) && !f.expanded;
+        let label = if f.expanded {
+            truncate(&f.name, FOLDER_NAME_MAX_CHARS)
+        } else {
+            format!(
+                "{} ({})",
+                truncate(&f.name, FOLDER_NAME_MAX_CHARS),
+                tabs.len()
+            )
+        };
+        let font = TextStyle::Body.resolve(ui.style());
+        let text_color = if as_active {
+            ui.visuals().text_color()
+        } else {
+            palette.text_on_strip
+        };
+        let galley = ui.painter().layout_no_wrap(label, font, text_color);
+        // Room for the disclosure triangle before the name.
+        let width = TAB_PADDING_X + CHIP_GLYPH_WIDTH + galley.size().x + TAB_PADDING_X;
+        Chip {
+            folder: f.id,
+            tabs,
+            name: f.name.clone(),
+            expanded: f.expanded,
+            as_active,
+            text_color,
+            galley,
+            width,
+            palette: *palette,
+        }
+    }
+}
+
+/// Room for a chip's disclosure triangle before its name.
+const CHIP_GLYPH_WIDTH: f32 = 12.0;
 
 /// A folder's chip in the strip: its name with a disclosure glyph and,
 /// collapsed, its tab count. A click drops the list of its tabs down
@@ -803,45 +1079,31 @@ fn strip_tab(
 /// the strip, drawn by the caller.
 fn strip_folder(
     ui: &mut Ui,
+    rect: Rect,
+    chip: &Chip,
     window: &Window,
-    folder: FolderId,
-    tabs: &[TabId],
-    palette: &Palette,
     state: &mut ChromeState,
     commands: &mut Vec<Command>,
 ) {
-    let Some(f) = window.folder(folder) else {
-        return;
-    };
-    let holds_active = tabs.contains(&window.active);
-    // The active tab's page shows through a collapsed chip: it takes the
-    // active tab's look.
-    let as_active = holds_active && !f.expanded;
-    let label = if f.expanded {
-        truncate(&f.name, FOLDER_NAME_MAX_CHARS)
-    } else {
-        format!(
-            "{} ({})",
-            truncate(&f.name, FOLDER_NAME_MAX_CHARS),
-            tabs.len()
-        )
-    };
-    let font = TextStyle::Body.resolve(ui.style());
-    let text_color = if as_active {
-        ui.visuals().text_color()
-    } else {
-        palette.text_on_strip
-    };
-    let galley = ui.painter().layout_no_wrap(label, font, text_color);
-    // Room for the disclosure triangle before the name.
-    let glyph_width = 12.0;
-    let width = TAB_PADDING_X + glyph_width + galley.size().x + TAB_PADDING_X;
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, TAB_HEIGHT), Sense::click());
-    let response = response.on_hover_text(if f.expanded {
-        format!("{}: {} tabs", f.name, tabs.len())
-    } else {
-        format!("{}: click to list its tabs", f.name)
-    });
+    let Chip {
+        folder,
+        tabs,
+        name,
+        expanded,
+        as_active,
+        text_color,
+        galley,
+        ..
+    } = chip;
+    let (folder, expanded, as_active, text_color) = (*folder, *expanded, *as_active, *text_color);
+    let palette = &chip.palette;
+    let response = ui
+        .interact(rect, Id::new(("chip", folder)), Sense::click())
+        .on_hover_text(if expanded {
+            format!("{name}: {} tabs", tabs.len())
+        } else {
+            format!("{name}: click to list its tabs")
+        });
     if ui.is_rect_visible(rect) {
         let fill = if as_active {
             palette.toolbar
@@ -868,7 +1130,7 @@ fn strip_folder(
         // pointing right when collapsed, down when expanded.
         let c = Pos2::new(rect.left() + TAB_PADDING_X + 4.0, rect.center().y);
         let h = 4.0;
-        let points = if f.expanded {
+        let points = if expanded {
             vec![
                 Pos2::new(c.x - h, c.y - h / 2.0),
                 Pos2::new(c.x + h, c.y - h / 2.0),
@@ -888,10 +1150,10 @@ fn strip_folder(
         ));
         painter.galley(
             Pos2::new(
-                rect.left() + TAB_PADDING_X + glyph_width,
+                rect.left() + TAB_PADDING_X + CHIP_GLYPH_WIDTH,
                 rect.center().y - galley.size().y / 2.0,
             ),
-            galley,
+            galley.clone(),
             text_color,
         );
     }
@@ -1097,20 +1359,34 @@ fn tab_width_for(room: f32, tabs: usize, spacing: f32) -> f32 {
     share.clamp(TAB_MIN_WIDTH, TAB_WIDTH)
 }
 
-/// One tab: a rounded-top block `width` wide with the favicon, the
-/// title elided to the room left, and a close control (hidden on a
-/// narrow inactive tab until hovered), filled per its state. Returns the
-/// tab's response (click, drag, context menu) and whether the close
-/// control was clicked.
-fn tab_widget(
-    ui: &mut Ui,
-    palette: &Palette,
+/// What a tab is drawn as.
+#[derive(Clone, Copy)]
+struct TabState {
     is_active: bool,
     is_selected: bool,
     favicon: Option<egui::TextureId>,
+}
+
+/// One tab at `rect`: a rounded-top block with the favicon, the title
+/// elided to the room left, and a close control (hidden on a narrow
+/// inactive tab until hovered), filled per its state. `id` is the
+/// tab's own, the same every frame, so a drag keeps hold of it while
+/// the tab moves. Returns the tab's response (click, drag, context
+/// menu) and whether the close control was clicked.
+fn tab_widget(
+    ui: &mut Ui,
+    rect: Rect,
+    id: Id,
+    palette: &Palette,
+    tab: TabState,
     title: &str,
-    width: f32,
 ) -> (egui::Response, bool) {
+    let TabState {
+        is_active,
+        is_selected,
+        favicon,
+    } = tab;
+    let width = rect.width();
     let font = TextStyle::Body.resolve(ui.style());
     let text_color = if is_active {
         ui.visuals().text_color()
@@ -1122,8 +1398,7 @@ fn tab_widget(
     } else {
         0.0
     };
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(width, TAB_HEIGHT), Sense::click_and_drag());
+    let response = ui.interact(rect, id, Sense::click_and_drag());
     let show_close = is_active || width >= TAB_CLOSE_MIN_WIDTH || response.hovered();
     let close_rect = Rect::from_center_size(
         Pos2::new(

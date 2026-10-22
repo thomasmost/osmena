@@ -120,7 +120,8 @@ impl<E: Engine> App<E> {
     /// (physical screen pixels): move them to the other browser window
     /// under the pointer, to a new window when the pointer is outside every
     /// browser window, and nothing when it is still over the source window
-    /// (tabs are not reordered by dragging).
+    /// (a drop inside the strip's own window reorders the tabs there, and
+    /// the chrome handles that itself).
     fn tab_drop_command(
         &self,
         source: winit::window::WindowId,

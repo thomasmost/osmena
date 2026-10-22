@@ -66,6 +66,11 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- Tabs are reordered by dragging them along the strip: the dragged
+  tab (or selection) rides with the pointer, the others slide out of its
+  way, and it lands where it is let go. Tabs also slide to their places
+  after a close or any other reorder. A drag that leaves the window
+  still moves the tabs to the window under the pointer or a new one.
 - `Command::MoveTabs { tabs, index }` reorders tabs within their window;
   a tab dropped between two tabs of a folder joins it, one dropped
   anywhere else leaves its folder.

@@ -108,6 +108,12 @@ The engine contract, in `osmena-engine`:
   setting "Use the system title bar and borders" (`system_title_bar` in
   `settings.toml`) restores the system frame; on macOS it applies to
   windows opened afterwards.
+- **Tabs that drag.** A tab (or the selected tabs) dragged along the
+  strip slides between the others, which move out of its way, and lands
+  where it is let go; dropped between two tabs of a folder it joins the
+  folder, dropped anywhere else it leaves one. Dragged out of the window
+  it moves to the window under the pointer, or to a new one. Tabs also
+  slide to their places after a close or a reorder.
 - **Chromium's shortcuts**, with Cmd for Ctrl on macOS: tabs (`Ctrl+T`,
   `Ctrl+W`/`Ctrl+F4`, `Ctrl+Shift+T` reopens the last closed, `Ctrl+Tab`
   and `Ctrl+PgDn`/`Ctrl+PgUp` cycle, `Ctrl+1`–`Ctrl+8` and `Ctrl+9` jump),

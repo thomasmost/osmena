@@ -74,6 +74,15 @@ No engine is needed; the workspace builds in under a minute.
   to `ChromeState::open_prompt`, and the chrome draws it over the page;
   the answer is an ordinary `Command`. Nothing in the chrome decides what
   to ask.
+- **The strip's row is laid out by hand.** `strip_row` measures every
+  tab and chip (`Slot`), places each at an animated offset
+  (`Context::animate_value_with_time` keyed by the tab or folder id, so
+  a tab slides to its place after any reorder), and draws the tabs being
+  dragged (`ChromeState::tab_drag`) last, riding with the pointer, with
+  a gap opened at the index `Command::MoveTabs` would get. A drop inside
+  the window is that command; outside it is a `TabDrop` for the
+  application. A tab's widget id is `("tab", id)` every frame, which is
+  what lets egui keep the drag while the tab moves.
 - **Folders are contiguous runs of tabs.** `Tab::folder` names the
   folder; `Window::gather_folder` keeps a folder's tabs together where
   its first tab is, `prune_folders` drops a folder whose last tab went
