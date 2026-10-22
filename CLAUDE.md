@@ -5,7 +5,8 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-10-19 (the page context menu, the address-bar search)._
+_Last updated: 2026-10-22 (pointer modifiers, per-tab capture, repaint
+scheduling, dirty rectangles)._
 
 ## Architecture
 
@@ -105,12 +106,28 @@ No engine is needed; the workspace builds in under a minute.
   Add entries in `menus.rs` with a test.
 - **Key routing has one rule.** `osmena_chrome::input::route_key`, applied
   by `routing::KeyRouter`. Change it there, with a unit test.
+- **A held key or button belongs to the tab that got its press.**
+  `KeyRouter` and `PointerCapture` both record the tab, so a release
+  after a keyboard tab switch goes where the press went, and a hold
+  whose tab closed is dropped. On `Focused(false)` the window releases
+  what the page holds (`release_held`): the system sends no release
+  for a key held across Alt+Tab, and the real one would be dropped as
+  a release nobody saw pressed. Pointer events carry the modifiers from
+  the window's winit state for the same reason; an engine must not keep
+  its own.
+- **egui's repaint requests go through `repaint::RepaintSchedule`.** A
+  due request becomes `request_redraw`, a delayed one (caret blink,
+  tooltip) the event loop's `WaitUntil`, set in `App::about_to_wait`.
+  Never read `Context::has_requested_repaint` to decide on a redraw: it
+  counts delayed requests, and the window would redraw continuously
+  while a text field has focus.
 - **The page is painted two ways.** `TabHost::paint_page` hands the shell a
   `PagePaint::Blit` (the engine drew into the window's GL context; the
-  shell blits from egui's paint callback) or a `PagePaint::Frame` (pixels;
-  the shell keeps a `PageTexture` per tab and registers it with egui after
-  the UI pass that created it). Keep both paths working: Paladin uses the
-  first, Nautilus the second.
+  shell blits from egui's paint callback) or a `PagePaint::Frame` (pixels
+  with the `dirty` rectangles since the last hand-out; the shell keeps a
+  `PageTexture` per tab, uploads only those rectangles, and registers it
+  with egui after the UI pass that created it). Keep both paths working:
+  Paladin uses the first, Nautilus the second.
 - **Version pins move together.** `winit`, `egui`, `egui-winit`,
   `egui_glow`, and `glow` are pinned exactly in the workspace `Cargo.toml`
   because the engines share a GL context and window handles with them. A
@@ -211,6 +228,25 @@ Decisions, with reasons:
 - Licence MIT OR Apache-2.0 with "the osmena contributors" as the holder; the
   owner has not chosen a name. Nothing is published to crates.io; the names
   are free and the manifests are ready.
+
+Added 2026-10-22, from a review of click capture and the shell/page
+boundary: pointer events carry the keyboard modifiers (the fix for a
+link click turning into a download after Alt+Tab, when Nautilus kept the
+Alt of the last key event), the pointer capture follows the tab that
+got the press, held keys and buttons are released in the page on focus
+loss, the folder drop-down closes on a page click and prompts are modal
+(`ChromeState::popup_open`), the back and forward mouse buttons
+navigate, egui's delayed repaints are waited for instead of redrawn at
+once, `FrameRef::dirty` with partial texture uploads, and page focus
+gated on the window's. Verified: `cargo test`, clippy, formatting, and
+both browsers built against the revision. Not verified by hand: any of
+it in a running browser; the Alt+Tab download path is the one to try
+first (hold Alt, switch away, release, click a link).
+
+Known and left alone: a native menu (`native_menu`, `TrackPopupMenu` on
+Windows) blocks inside the event loop, so pages freeze under any
+context menu and the engine's wake requests queue up until it closes.
+Acceptable for a menu; do not add anything long-running there.
 
 Open items, most useful first:
 1. Run both browsers' manual checklists against the current revision, with

@@ -81,9 +81,12 @@ The engine contract, in `osmena-engine`:
   `set_extension_enabled`, and `uninstall_extension` (defaulted to
   nothing).
 - `TabHost`: create, adopt, close, navigate, history, show and hide, focus,
-  resize, input, `paint_page`, which hands the shell either a blit
-  function (the engine painted into GL) or a frame of BGRA pixels (the
-  engine paints into memory; the shell draws either under the toolbar),
+  resize, input (every pointer event carries the keyboard modifiers held
+  at that moment, from the window's own state; an engine never infers
+  them from the key events it saw), `paint_page`, which hands the shell
+  either a blit function (the engine painted into GL) or a frame of BGRA
+  pixels with the rectangles that changed (the engine paints into
+  memory; the shell uploads those and draws either under the toolbar),
   `open_extension_action` and `close_extension_popups` (defaulted to
   nothing), and `page_command` and `context_menu_closed` for the page's
   context menu: the engine reports what is under the pointer with
