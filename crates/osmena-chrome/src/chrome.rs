@@ -16,10 +16,19 @@ use osmena_core::{
 };
 use url::{ParseError, Url};
 
-const TAB_TITLE_MAX_CHARS: usize = 24;
+/// The widest a title is drawn in a folder's drop-down list.
+const FOLDER_LIST_TITLE_MAX_CHARS: usize = 36;
 const FAVICON_SIZE: f32 = 16.0;
 /// Tab geometry, in points.
 const TAB_HEIGHT: f32 = 32.0;
+/// Every tab in the strip is `TAB_WIDTH` wide until the strip runs out
+/// of room; then all of them shrink alike, down to `TAB_MIN_WIDTH`,
+/// after which the strip scrolls ([`tab_width_for`]).
+const TAB_WIDTH: f32 = 200.0;
+const TAB_MIN_WIDTH: f32 = 64.0;
+/// Narrower than this, an inactive tab shows its close control only
+/// while hovered, so its title keeps the room.
+const TAB_CLOSE_MIN_WIDTH: f32 = 110.0;
 const TAB_PADDING_X: f32 = 12.0;
 const TAB_CORNER: u8 = 8;
 const CLOSE_SIZE: f32 = 18.0;
@@ -363,15 +372,42 @@ pub fn draw(
                 + if controls { 3.0 * CONTROL_WIDTH } else { 0.0 }
                 + 2.0 * ui.spacing().item_spacing.x;
             let tabs_width = (ui.available_width() - right_width).max(0.0);
+            // What is left for the tabs after the "+" button, shared
+            // out evenly. A folder's chip takes its own width from the
+            // same room, so a strip with folders may scroll a little
+            // sooner than the count alone predicts.
+            let items = window.strip_items();
+            let tab_count = items
+                .iter()
+                .map(|item| match item {
+                    StripItem::Tab(_) => 1,
+                    StripItem::Folder { folder, tabs } => {
+                        if window.folder(*folder).is_some_and(|f| f.expanded) {
+                            tabs.len()
+                        } else {
+                            0
+                        }
+                    }
+                })
+                .sum();
+            let tab_spacing = 2.0;
+            let strip_tabs = StripTabs {
+                palette: &palette,
+                width: tab_width_for(
+                    tabs_width - (4.0 + MENU_WIDTH + tab_spacing),
+                    tab_count,
+                    tab_spacing,
+                ),
+            };
             egui::ScrollArea::horizontal()
                 .max_width(tabs_width)
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
+                        ui.spacing_mut().item_spacing.x = tab_spacing;
                         // How many tabs a drag in progress carries, for the overlay.
                         let mut dragging: Option<usize> = None;
-                        for item in window.strip_items() {
+                        for item in items {
                             match item {
                                 StripItem::Tab(id) => {
                                     if let Some(tab) = window.tab(id) {
@@ -379,7 +415,7 @@ pub fn draw(
                                             ui,
                                             window,
                                             tab,
-                                            &palette,
+                                            &strip_tabs,
                                             state,
                                             &mut commands,
                                             &mut dragging,
@@ -403,7 +439,7 @@ pub fn draw(
                                                     ui,
                                                     window,
                                                     tab,
-                                                    &palette,
+                                                    &strip_tabs,
                                                     state,
                                                     &mut commands,
                                                     &mut dragging,
@@ -667,6 +703,13 @@ pub fn background(ctx: &egui::Context, color: ChromeColor) -> [f32; 4] {
         .to_normalized_gamma_f32()
 }
 
+/// What every tab of one strip is drawn with: the palette and the width
+/// they share ([`tab_width_for`]).
+struct StripTabs<'a> {
+    palette: &'a Palette,
+    width: f32,
+}
+
 /// One tab of the strip, with everything a tab answers to: click,
 /// Ctrl/Shift click, middle click, the close control, the context menu,
 /// and dragging.
@@ -674,7 +717,7 @@ fn strip_tab(
     ui: &mut Ui,
     window: &Window,
     tab: &Tab,
-    palette: &Palette,
+    look: &StripTabs<'_>,
     state: &mut ChromeState,
     commands: &mut Vec<Command>,
     dragging: &mut Option<usize>,
@@ -682,9 +725,15 @@ fn strip_tab(
     let is_active = tab.id == window.active;
     let is_selected = window.is_selected(tab.id);
     let favicon = favicon_texture(ui, state, tab.id, tab.favicon.as_ref()).map(|t| t.id());
-    let title = truncate(tab.display_title(), TAB_TITLE_MAX_CHARS);
-    let (response, close_clicked) =
-        tab_widget(ui, palette, is_active, is_selected, favicon, &title);
+    let (response, close_clicked) = tab_widget(
+        ui,
+        look.palette,
+        is_active,
+        is_selected,
+        favicon,
+        tab.display_title(),
+        look.width,
+    );
     if close_clicked {
         commands.push(Command::CloseTab(tab.id));
     }
@@ -869,7 +918,7 @@ fn strip_folder(
                     };
                     let favicon =
                         favicon_texture(ui, state, tab.id, tab.favicon.as_ref()).map(|t| t.id());
-                    let title = truncate(tab.display_title(), TAB_TITLE_MAX_CHARS + 12);
+                    let title = truncate(tab.display_title(), FOLDER_LIST_TITLE_MAX_CHARS);
                     let row = ui.horizontal(|ui| {
                         if let Some(texture) = favicon {
                             ui.add(
@@ -1028,9 +1077,22 @@ fn draw_prompt(ui: &mut Ui, state: &mut ChromeState) -> Vec<Command> {
     }
 }
 
-/// One tab: a rounded-top block with the favicon, the title, and a close
-/// control, filled per its state. Returns the tab's response (click, drag,
-/// context menu) and whether the close control was clicked.
+/// The width of each tab in a strip with `room` points for `tabs` tabs
+/// and `spacing` between them: `TAB_WIDTH` while they fit, else the
+/// even share, never under `TAB_MIN_WIDTH`.
+fn tab_width_for(room: f32, tabs: usize, spacing: f32) -> f32 {
+    if tabs == 0 {
+        return TAB_WIDTH;
+    }
+    let share = (room - spacing * (tabs as f32 - 1.0)) / tabs as f32;
+    share.clamp(TAB_MIN_WIDTH, TAB_WIDTH)
+}
+
+/// One tab: a rounded-top block `width` wide with the favicon, the
+/// title elided to the room left, and a close control (hidden on a
+/// narrow inactive tab until hovered), filled per its state. Returns the
+/// tab's response (click, drag, context menu) and whether the close
+/// control was clicked.
 fn tab_widget(
     ui: &mut Ui,
     palette: &Palette,
@@ -1038,6 +1100,7 @@ fn tab_widget(
     is_selected: bool,
     favicon: Option<egui::TextureId>,
     title: &str,
+    width: f32,
 ) -> (egui::Response, bool) {
     let font = TextStyle::Body.resolve(ui.style());
     let text_color = if is_active {
@@ -1045,17 +1108,14 @@ fn tab_widget(
     } else {
         palette.text_on_strip
     };
-    let galley = ui
-        .painter()
-        .layout_no_wrap(title.to_string(), font.clone(), text_color);
     let icon_width = if favicon.is_some() {
         FAVICON_SIZE + 6.0
     } else {
         0.0
     };
-    let width = TAB_PADDING_X + icon_width + galley.size().x + 8.0 + CLOSE_SIZE + TAB_PADDING_X;
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(width, TAB_HEIGHT), Sense::click_and_drag());
+    let show_close = is_active || width >= TAB_CLOSE_MIN_WIDTH || response.hovered();
     let close_rect = Rect::from_center_size(
         Pos2::new(
             rect.right() - TAB_PADDING_X - CLOSE_SIZE / 2.0 + 4.0,
@@ -1064,7 +1124,14 @@ fn tab_widget(
         Vec2::splat(CLOSE_SIZE),
     );
     // Added after the tab, so it is on top and takes the pointer over it.
-    let close = ui.interact(close_rect, response.id.with("close"), Sense::click());
+    let close =
+        show_close.then(|| ui.interact(close_rect, response.id.with("close"), Sense::click()));
+    let close_room = if show_close { 8.0 + CLOSE_SIZE } else { 0.0 };
+    let title_room = (width - 2.0 * TAB_PADDING_X - icon_width - close_room).max(0.0);
+    let mut job =
+        egui::text::LayoutJob::simple_singleline(title.to_string(), font.clone(), text_color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(title_room);
+    let galley = ui.painter().layout_job(job);
 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
@@ -1110,24 +1177,26 @@ fn tab_widget(
             text_color,
         );
 
-        if close.hovered() {
-            let ring = if is_active {
-                Color32::from_black_alpha(28)
-            } else {
-                palette.tab_hover
-            };
-            painter.circle_filled(close_rect.center(), CLOSE_SIZE / 2.0, ring);
+        if let Some(close) = &close {
+            if close.hovered() {
+                let ring = if is_active {
+                    Color32::from_black_alpha(28)
+                } else {
+                    palette.tab_hover
+                };
+                painter.circle_filled(close_rect.center(), CLOSE_SIZE / 2.0, ring);
+            }
+            painter.text(
+                close_rect.center(),
+                Align2::CENTER_CENTER,
+                "×",
+                font,
+                text_color,
+            );
         }
-        painter.text(
-            close_rect.center(),
-            Align2::CENTER_CENTER,
-            "×",
-            font,
-            text_color,
-        );
     }
-    let close = close.on_hover_text("Close tab");
-    (response, close.clicked())
+    let close_clicked = close.is_some_and(|close| close.on_hover_text("Close tab").clicked());
+    (response, close_clicked)
 }
 
 /// The glyph of a window control, drawn as lines so it never depends on
@@ -1745,6 +1814,17 @@ mod tests {
         sync_address_text(&mut state, TabId(1), &url("https://a.test/next"));
         assert_eq!(state.address_text, "https://a.test/next");
         assert!(!state.address_dirty);
+    }
+
+    #[test]
+    fn tabs_share_the_strip_evenly_between_a_standard_and_a_minimum_width() {
+        assert_eq!(tab_width_for(1000.0, 0, 2.0), TAB_WIDTH);
+        assert_eq!(tab_width_for(1000.0, 1, 2.0), TAB_WIDTH);
+        assert_eq!(tab_width_for(1000.0, 4, 2.0), TAB_WIDTH);
+        // Ten tabs in 1000 points: the even share, spacing taken out.
+        assert_eq!(tab_width_for(1000.0, 10, 2.0), (1000.0 - 18.0) / 10.0);
+        assert_eq!(tab_width_for(100.0, 10, 2.0), TAB_MIN_WIDTH);
+        assert_eq!(tab_width_for(-50.0, 3, 2.0), TAB_MIN_WIDTH);
     }
 
     #[test]

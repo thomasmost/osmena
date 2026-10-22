@@ -6,6 +6,11 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- Tabs in the strip are all one standard width (200 points) instead of
+  each taking its title's width; when they no longer fit they all
+  shrink alike, down to a minimum (64 points), and only then does the
+  strip scroll. A title that does not fit is elided with an ellipsis,
+  and a narrow inactive tab shows its close control only while hovered.
 - The tab strip fades from the chrome colour at its top into the
   toolbar's fill at its bottom edge, so strip and toolbar meet without
   a line; the active tab, which shares the toolbar's fill, now sits on
