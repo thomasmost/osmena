@@ -234,6 +234,15 @@ impl ChromeState {
     pub fn has_prompt(&self) -> bool {
         self.prompt.is_some()
     }
+
+    /// Something the chrome drew over the page wants every click: a
+    /// folder's drop-down list (a click anywhere else closes it, which
+    /// it can only see if egui gets the click) or a prompt (modal: the
+    /// page waits for the answer). egui's own popups report themselves
+    /// through `egui::Popup::is_any_open`; this covers the rest.
+    pub fn popup_open(&self) -> bool {
+        self.open_folder.is_some() || self.prompt.is_some()
+    }
 }
 
 /// A menu the chrome wants shown, with where to put it (egui points of

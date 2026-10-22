@@ -26,6 +26,11 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Fixed
 
+- A folder's drop-down list stayed open after a click on the page: the
+  click went to the page, so the list never saw it. It now goes to the
+  chrome, which closes the list, as a click outside any other popup
+  does. A prompt (move to folder, bookmark, rename) is modal the same
+  way: clicks on the page wait for the answer.
 - A key or mouse button held in a page when the window lost focus
   (Alt+Tab, a click into another window) stayed down in the page: the
   system sends no release for it, and the real one, when it came, was

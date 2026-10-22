@@ -358,7 +358,7 @@ impl<E: Engine> BrowserWindow<E> {
             },
             content_is_egui: self.content_is_egui,
             over_egui: self.egui.egui_ctx.is_pointer_over_egui(),
-            popup_open: egui::Popup::is_any_open(&self.egui.egui_ctx),
+            popup_open: egui::Popup::is_any_open(&self.egui.egui_ctx) || self.chrome.popup_open(),
         };
         route_pointer(self.capture.captured(), ctx)
     }
