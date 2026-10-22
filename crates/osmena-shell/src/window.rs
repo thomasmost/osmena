@@ -359,6 +359,20 @@ impl<E: Engine> BrowserWindow<E> {
         route_pointer(self.capture.captured(), ctx)
     }
 
+    /// The tab a pointer event for the page goes to: the tab holding the
+    /// capture while one is held (even if another tab is active now),
+    /// otherwise the active tab. Nothing while the capturing tab is gone:
+    /// its release ends the capture without reaching anyone.
+    fn pointer_tab(&self, browser: &Browser, active: Option<TabId>) -> Option<TabId> {
+        match self.capture.tab() {
+            Some(tab) => browser
+                .window(self.id)
+                .is_some_and(|w| w.tab(tab).is_some())
+                .then_some(tab),
+            None => active,
+        }
+    }
+
     /// Cursor position in physical pixels relative to the page area.
     fn content_point(&self) -> Option<(f32, f32)> {
         let p = self.cursor?;
@@ -403,6 +417,7 @@ impl<E: Engine> BrowserWindow<E> {
         event: &WindowEvent,
     ) -> Vec<Command> {
         let active = browser.window(self.id).map(|w| w.active);
+        let pointer_tab = self.pointer_tab(browser, active);
         let mut commands = Vec::new();
         let mut forward_to_egui = true;
 
@@ -468,14 +483,14 @@ impl<E: Engine> BrowserWindow<E> {
                     // Nothing else to do: the pointer is on the border.
                 } else if self.pointer_target() == PointerTarget::Page {
                     if let Some((x, y)) = self.content_point() {
-                        self.enter_content(active, x, y);
+                        self.enter_content(pointer_tab, x, y);
                     }
                 } else {
-                    self.leave_content(active);
+                    self.leave_content(pointer_tab);
                 }
             }
             WindowEvent::CursorLeft { .. } => {
-                self.leave_content(active);
+                self.leave_content(pointer_tab);
                 if self.resize_edge.take().is_some() {
                     self.window.set_cursor(CursorIcon::Default);
                 }
@@ -492,13 +507,13 @@ impl<E: Engine> BrowserWindow<E> {
             WindowEvent::MouseInput { state, button, .. } => {
                 let current = self.pointer_target();
                 let target = match state {
-                    ElementState::Pressed => self.capture.press(*button, current),
+                    ElementState::Pressed => self.capture.press(*button, current, pointer_tab),
                     ElementState::Released => self.capture.release(*button, current),
                 };
                 if target == PointerTarget::Page {
                     forward_to_egui = false;
                     self.surrender_egui_focus();
-                    if let (Some(tab), Some((x, y))) = (active, self.content_point()) {
+                    if let (Some(tab), Some((x, y))) = (pointer_tab, self.content_point()) {
                         self.host.input(
                             tab,
                             EngineInput::MouseButton {
@@ -515,7 +530,7 @@ impl<E: Engine> BrowserWindow<E> {
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.pointer_target() == PointerTarget::Page {
                     forward_to_egui = false;
-                    if let (Some(tab), Some((x, y))) = (active, self.content_point()) {
+                    if let (Some(tab), Some((x, y))) = (pointer_tab, self.content_point()) {
                         let (dx, dy) = input::wheel_delta(*delta, self.engine_info.wheel_line_px);
                         let modifiers = self.modifiers();
                         self.host.input(

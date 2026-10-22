@@ -54,10 +54,18 @@ pub fn route_pointer(captured: Option<PointerTarget>, ctx: PointerContext) -> Po
 /// pointer event until the last pressed button is released, so a drag that
 /// crosses the toolbar edge ends where it started, and holding a second
 /// button does not hand the pointer over in the middle.
+///
+/// A capture held by the page also remembers the tab that got the press:
+/// its moves and release go to that tab even if another tab became active
+/// meanwhile (a press in tab A, then Ctrl+Tab makes B active, then the
+/// release: A gets it, so A never keeps a button down and B never sees a
+/// release it did not start).
 #[derive(Debug, Default)]
 pub struct PointerCapture {
     pressed: HashSet<MouseButton>,
     target: Option<PointerTarget>,
+    /// The tab holding a page capture.
+    tab: Option<TabId>,
 }
 
 impl PointerCapture {
@@ -66,11 +74,23 @@ impl PointerCapture {
         self.target
     }
 
-    /// A button went down while `current` was the pointer's side. Returns
-    /// the side that gets this press.
-    pub fn press(&mut self, button: MouseButton, current: PointerTarget) -> PointerTarget {
+    /// The tab holding the capture, when the page holds it.
+    pub fn tab(&self) -> Option<TabId> {
+        self.tab
+    }
+
+    /// A button went down while `current` was the pointer's side and
+    /// `tab` was the tab a page press would reach. Returns the side that
+    /// gets this press.
+    pub fn press(
+        &mut self,
+        button: MouseButton,
+        current: PointerTarget,
+        tab: Option<TabId>,
+    ) -> PointerTarget {
         if self.pressed.is_empty() {
             self.target = Some(current);
+            self.tab = (current == PointerTarget::Page).then_some(tab).flatten();
         }
         self.pressed.insert(button);
         self.target.unwrap_or(current)
@@ -83,6 +103,7 @@ impl PointerCapture {
         self.pressed.remove(&button);
         if self.pressed.is_empty() {
             self.target = None;
+            self.tab = None;
         }
         target
     }
@@ -92,6 +113,7 @@ impl PointerCapture {
     pub fn clear(&mut self) {
         self.pressed.clear();
         self.target = None;
+        self.tab = None;
     }
 }
 
@@ -365,9 +387,10 @@ mod tests {
     fn press_and_release_keep_one_side_for_the_whole_click() {
         let mut capture = PointerCapture::default();
         assert_eq!(
-            capture.press(LEFT, PointerTarget::Page),
+            capture.press(LEFT, PointerTarget::Page, Some(TAB_A)),
             PointerTarget::Page
         );
+        assert_eq!(capture.tab(), Some(TAB_A));
         // Dragging onto the toolbar: the pointer is now egui's, but the
         // capture keeps the release with the page.
         let now = route_pointer(
@@ -380,6 +403,29 @@ mod tests {
         assert_eq!(now, PointerTarget::Page);
         assert_eq!(capture.release(LEFT, now), PointerTarget::Page);
         assert_eq!(capture.captured(), None);
+        assert_eq!(capture.tab(), None);
+    }
+
+    /// A press in tab A, then a keyboard tab switch makes B active: the
+    /// capture still names A, so the window sends A the moves and the
+    /// release. A press on the chrome names no tab.
+    #[test]
+    fn a_page_capture_remembers_the_tab_that_got_the_press() {
+        let mut capture = PointerCapture::default();
+        capture.press(LEFT, PointerTarget::Page, Some(TAB_A));
+        // B is active now; a second button joins A's capture.
+        assert_eq!(
+            capture.press(RIGHT, PointerTarget::Page, Some(TAB_B)),
+            PointerTarget::Page
+        );
+        assert_eq!(capture.tab(), Some(TAB_A));
+        capture.release(RIGHT, PointerTarget::Page);
+        assert_eq!(capture.tab(), Some(TAB_A));
+        capture.release(LEFT, PointerTarget::Page);
+        assert_eq!(capture.tab(), None);
+
+        capture.press(LEFT, PointerTarget::Egui, Some(TAB_A));
+        assert_eq!(capture.tab(), None);
     }
 
     /// The reviewer's scenario: left pressed over the page, right pressed
@@ -390,13 +436,13 @@ mod tests {
     fn releasing_one_button_does_not_end_a_capture_held_by_another() {
         let mut capture = PointerCapture::default();
         assert_eq!(
-            capture.press(LEFT, PointerTarget::Page),
+            capture.press(LEFT, PointerTarget::Page, Some(TAB_A)),
             PointerTarget::Page
         );
 
         // Right press and release while the pointer is still over the page.
         assert_eq!(
-            capture.press(RIGHT, PointerTarget::Page),
+            capture.press(RIGHT, PointerTarget::Page, Some(TAB_A)),
             PointerTarget::Page
         );
         assert_eq!(
@@ -429,11 +475,11 @@ mod tests {
     #[test]
     fn a_second_button_pressed_over_the_chrome_joins_the_page_capture() {
         let mut capture = PointerCapture::default();
-        capture.press(LEFT, PointerTarget::Page);
+        capture.press(LEFT, PointerTarget::Page, Some(TAB_A));
         // A right press while the pointer is over the chrome still belongs
         // to the page capture held by the left button.
         assert_eq!(
-            capture.press(RIGHT, PointerTarget::Egui),
+            capture.press(RIGHT, PointerTarget::Egui, Some(TAB_A)),
             PointerTarget::Page
         );
         assert_eq!(
@@ -460,12 +506,13 @@ mod tests {
     #[test]
     fn clearing_forgets_every_button() {
         let mut capture = PointerCapture::default();
-        capture.press(LEFT, PointerTarget::Page);
+        capture.press(LEFT, PointerTarget::Page, Some(TAB_A));
         capture.clear();
         assert_eq!(capture.captured(), None);
+        assert_eq!(capture.tab(), None);
         // A later press starts a fresh capture on whichever side it lands.
         assert_eq!(
-            capture.press(RIGHT, PointerTarget::Egui),
+            capture.press(RIGHT, PointerTarget::Egui, Some(TAB_A)),
             PointerTarget::Egui
         );
     }

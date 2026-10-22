@@ -26,6 +26,12 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Fixed
 
+- A mouse button pressed in a page and released after a keyboard tab
+  switch (Ctrl+Tab while dragging) released in the newly active tab,
+  which had never seen the press, while the first tab kept the button
+  down. The pointer capture now remembers the tab that got the press,
+  as the key router does for keys, and sends it the moves and the
+  release.
 - macOS: the tab context menu, the page context menu, and the window
   menu opened along the bottom edge of the window instead of at the
   pointer. muda mirrors the y coordinate for an AppKit view with its
