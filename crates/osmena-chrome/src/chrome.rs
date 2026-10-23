@@ -12,7 +12,8 @@ use egui::{
 use keyboard_types::Code;
 use osmena_core::{
     ChromeColor, Command, CommandKind, EngineInfo, Extension, Favicon, Folder, FolderId,
-    FolderTarget, KeyChord, Keymap, LoadState, Prompt, StripItem, Tab, TabId, Window,
+    FolderTarget, History, HistoryEntry, KeyChord, Keymap, LoadState, Prompt, StripItem, Tab,
+    TabId, Window,
 };
 use url::{ParseError, Url};
 
@@ -45,6 +46,12 @@ const ACTION_ICON: f32 = 16.0;
 const FOLDER_NAME_MAX_CHARS: usize = 18;
 /// How long a tab or chip takes to slide to a new place in the strip.
 const STRIP_SLIDE_SECS: f32 = 0.12;
+/// The new-tab launcher's box: its widest, and its field's font size.
+const LAUNCHER_WIDTH: f32 = 640.0;
+const LAUNCHER_FONT_SIZE: f32 = 22.0;
+/// The widest a history match's title and address are drawn.
+const SUGGESTION_TITLE_MAX_CHARS: usize = 64;
+const SUGGESTION_URL_MAX_CHARS: usize = 90;
 
 /// The shades the chrome paints with, all derived from the profile's
 /// [`ChromeColor`]: the tab strip is the swatch at its top and fades to
@@ -178,6 +185,20 @@ pub struct ChromeState {
     open_folder: Option<FolderId>,
     /// The question being asked over the page, if any.
     prompt: Option<PromptState>,
+    /// The new-tab launcher, while it is open.
+    launcher: Option<Launcher>,
+}
+
+/// The new-tab launcher: what the user typed, and the history match
+/// picked with the arrow keys, if any, whose address then stands in the
+/// field (`typed` keeps what they typed, for going back up).
+#[derive(Default)]
+struct Launcher {
+    text: String,
+    typed: String,
+    picked: Option<usize>,
+    /// The field takes focus on the first frame.
+    focus: bool,
 }
 
 /// A [`Prompt`] being answered: the typed text, and which existing
@@ -239,13 +260,27 @@ impl ChromeState {
         self.prompt.is_some()
     }
 
+    /// Open the new-tab launcher (`EngineAction::ShowLauncher`): nothing
+    /// is opened until the user answers it; see [`draw_launcher`].
+    pub fn open_launcher(&mut self) {
+        self.launcher = Some(Launcher {
+            focus: true,
+            ..Launcher::default()
+        });
+        self.open_folder = None;
+    }
+
+    pub fn has_launcher(&self) -> bool {
+        self.launcher.is_some()
+    }
+
     /// Something the chrome drew over the page wants every click: a
     /// folder's drop-down list (a click anywhere else closes it, which
     /// it can only see if egui gets the click) or a prompt (modal: the
     /// page waits for the answer). egui's own popups report themselves
     /// through `egui::Popup::is_any_open`; this covers the rest.
     pub fn popup_open(&self) -> bool {
-        self.open_folder.is_some() || self.prompt.is_some()
+        self.open_folder.is_some() || self.prompt.is_some() || self.launcher.is_some()
     }
 }
 
@@ -312,6 +347,8 @@ pub struct ChromeContext<'a> {
     /// (`Browser::pinned_extensions`). Only drawn when the engine runs
     /// extensions (`EngineInfo::extensions`).
     pub pinned: &'a [&'a Extension],
+    /// Where the user has been, for the suggestions under what they type.
+    pub history: &'a History,
 }
 
 /// Something the chrome asks of the native window, recorded while drawing
@@ -345,6 +382,7 @@ pub fn draw(
         frameless,
         maximized,
         pinned,
+        history,
     } = *context;
     let mut commands = Vec::new();
     let active = window.active_tab();
@@ -625,6 +663,7 @@ pub fn draw(
         });
 
     commands.extend(draw_prompt(ui, state));
+    commands.extend(draw_launcher(ui, window, history, state));
 
     // The status text floats over the bottom-left corner of the page as an
     // overlay, so showing or hiding it never resizes the page.
@@ -1215,6 +1254,179 @@ fn strip_folder(
     if clicked_elsewhere || ui.input(|i| i.key_pressed(Key::Escape)) {
         state.open_folder = None;
     }
+}
+
+/// The new-tab launcher over the window: a dimmed backdrop and, near
+/// the top, a large field with the history's matches under it. Enter
+/// opens what was typed in a new tab (an address loads, anything else
+/// is a search) or the picked match; Up and Down pick a match, whose
+/// address then stands in the field; Escape, or a click anywhere
+/// outside the box, opens nothing.
+fn draw_launcher(
+    ui: &mut Ui,
+    window: &Window,
+    history: &History,
+    state: &mut ChromeState,
+) -> Vec<Command> {
+    let Some(launcher) = state.launcher.as_mut() else {
+        return Vec::new();
+    };
+    let ctx = ui.ctx().clone();
+    let content = ctx.content_rect();
+    let mut commands = Vec::new();
+    let mut close = false;
+
+    // The backdrop dims everything and takes the click that cancels.
+    let backdrop = egui::Area::new(Id::new(("launcher-backdrop", window.id)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(content.min)
+        .show(&ctx, |ui| {
+            let (rect, response) = ui.allocate_exact_size(content.size(), Sense::click());
+            ui.painter()
+                .rect_filled(rect, 0.0, Color32::from_black_alpha(96));
+            response
+        });
+    if backdrop.inner.clicked() {
+        close = true;
+    }
+
+    let matches = history.matches(&launcher.typed);
+    let width = (content.width() - 48.0).clamp(200.0, LAUNCHER_WIDTH);
+    let top_left = Pos2::new(
+        content.center().x - width / 2.0,
+        content.top() + content.height() * 0.18,
+    );
+    egui::Area::new(Id::new(("launcher", window.id)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(top_left)
+        .show(&ctx, |ui| {
+            Frame::popup(ui.style())
+                .corner_radius(12)
+                .inner_margin(Margin::same(14))
+                .show(ui, |ui| {
+                    ui.set_width(width - 28.0);
+                    let id = Id::new(("launcher-field", window.id));
+                    let field = ui.add(
+                        egui::TextEdit::singleline(&mut launcher.text)
+                            .id(id)
+                            .font(egui::FontId::proportional(LAUNCHER_FONT_SIZE))
+                            .hint_text("Search or enter address")
+                            .desired_width(f32::INFINITY),
+                    );
+                    if launcher.focus {
+                        launcher.focus = false;
+                        field.request_focus();
+                    }
+                    if field.changed() {
+                        launcher.typed = launcher.text.clone();
+                        launcher.picked = None;
+                    }
+                    let (down, up) = ui.input_mut(|i| {
+                        (
+                            i.consume_key(egui::Modifiers::NONE, Key::ArrowDown),
+                            i.consume_key(egui::Modifiers::NONE, Key::ArrowUp),
+                        )
+                    });
+                    if (down || up) && !matches.is_empty() {
+                        launcher.picked = step_pick(launcher.picked, matches.len(), down);
+                        launcher.text = match launcher.picked {
+                            Some(i) => matches[i].url.to_string(),
+                            None => launcher.typed.clone(),
+                        };
+                    }
+                    let (escape, enter) =
+                        ui.input(|i| (i.key_pressed(Key::Escape), i.key_pressed(Key::Enter)));
+                    if escape {
+                        close = true;
+                    } else if field.lost_focus() && enter {
+                        let text = launcher.text.trim();
+                        if let Some(i) = launcher.picked {
+                            commands.push(Command::NewTab {
+                                window: window.id,
+                                url: Some(matches[i].url.clone()),
+                            });
+                        } else if let Some(url) = location_input_to_url(text) {
+                            commands.push(Command::NewTab {
+                                window: window.id,
+                                url: Some(url),
+                            });
+                        } else if !text.is_empty() {
+                            commands.push(Command::SearchInNewTab {
+                                window: window.id,
+                                query: text.to_string(),
+                            });
+                        }
+                        close = true;
+                    }
+                    if !matches.is_empty() {
+                        ui.add_space(8.0);
+                        for (i, entry) in matches.iter().enumerate() {
+                            if suggestion_row(ui, entry, launcher.picked == Some(i)).clicked() {
+                                commands.push(Command::NewTab {
+                                    window: window.id,
+                                    url: Some(entry.url.clone()),
+                                });
+                                close = true;
+                            }
+                        }
+                    }
+                });
+        });
+    if close {
+        state.launcher = None;
+    }
+    commands
+}
+
+/// The pick after an arrow key over `count` matches: Down from nothing
+/// picks the first and stops at the last; Up from the first picks
+/// nothing again (what the user typed).
+fn step_pick(picked: Option<usize>, count: usize, down: bool) -> Option<usize> {
+    match (picked, down) {
+        (None, true) => Some(0),
+        (Some(i), true) => Some((i + 1).min(count.saturating_sub(1))),
+        (None, false) => None,
+        (Some(0), false) => None,
+        (Some(i), false) => Some(i - 1),
+    }
+}
+
+/// One history match as a row: its title (or address, untitled) with the
+/// address after it, small; highlighted when picked.
+fn suggestion_row(ui: &mut Ui, entry: &HistoryEntry, picked: bool) -> egui::Response {
+    let style = ui.style();
+    let title = if entry.title.is_empty() {
+        entry.url.as_str()
+    } else {
+        entry.title.as_str()
+    };
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        &truncate(title, SUGGESTION_TITLE_MAX_CHARS),
+        0.0,
+        egui::TextFormat {
+            font_id: TextStyle::Body.resolve(style),
+            color: style.visuals.text_color(),
+            ..Default::default()
+        },
+    );
+    job.append(
+        &format!(
+            "  {}",
+            truncate(entry.url.as_str(), SUGGESTION_URL_MAX_CHARS)
+        ),
+        0.0,
+        egui::TextFormat {
+            font_id: TextStyle::Small.resolve(style),
+            color: style.visuals.weak_text_color(),
+            ..Default::default()
+        },
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(ui.available_width() - 16.0);
+    ui.add_sized(
+        Vec2::new(ui.available_width(), 0.0),
+        Button::selectable(picked, job),
+    )
 }
 
 /// The question the chrome is asking, as a small window over the page:
@@ -2066,6 +2278,20 @@ mod tests {
 
     fn url(text: &str) -> Url {
         Url::parse(text).unwrap()
+    }
+
+    #[test]
+    fn arrow_keys_pick_matches_and_go_back_to_the_typed_text() {
+        assert_eq!(step_pick(None, 3, true), Some(0));
+        assert_eq!(step_pick(Some(0), 3, true), Some(1));
+        assert_eq!(step_pick(Some(2), 3, true), Some(2), "stops at the last");
+        assert_eq!(step_pick(Some(1), 3, false), Some(0));
+        assert_eq!(
+            step_pick(Some(0), 3, false),
+            None,
+            "up from the first: the typed text"
+        );
+        assert_eq!(step_pick(None, 3, false), None);
     }
 
     #[test]

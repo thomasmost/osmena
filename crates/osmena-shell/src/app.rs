@@ -339,6 +339,11 @@ impl<E: Engine> App<E> {
                     w.open_prompt(prompt);
                 }
             }
+            EngineAction::ShowLauncher { window } => {
+                if let Some(w) = self.window_for_core_id(window) {
+                    w.open_launcher();
+                }
+            }
             EngineAction::OpenExtensionAction { window, extension } => {
                 let tab = self.browser.window(window).map(|w| w.active);
                 if let (Some(tab), Some(w)) = (tab, self.window_for_core_id(window)) {

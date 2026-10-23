@@ -305,6 +305,13 @@ pub enum EngineAction {
     /// The history changed: persist it (the shell may wait a moment and
     /// save once for a run of changes).
     SaveHistory,
+    /// Show the new-tab launcher over `window`: a large field in which
+    /// the user types an address or a search, or picks a page from the
+    /// history. Nothing is opened until they do; cancelling opens
+    /// nothing.
+    ShowLauncher {
+        window: WindowId,
+    },
     /// Show `prompt` in `window`'s chrome.
     ShowPrompt {
         window: WindowId,
@@ -337,7 +344,13 @@ pub enum EngineAction {
 /// Apply a command to the model and return what the app must do next.
 pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
     match cmd {
-        Command::NewTab { window, url } => new_tab(browser, *window, url.clone()),
+        Command::NewTab { window, url } => match url {
+            Some(url) => new_tab(browser, *window, url.clone()),
+            None if browser.window(*window).is_some() => {
+                vec![EngineAction::ShowLauncher { window: *window }]
+            }
+            None => Vec::new(),
+        },
         Command::CloseTab(tab) => {
             remember_closed(browser, &[*tab]);
             close_tab(browser, *tab)
@@ -414,7 +427,7 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
                 .unwrap_or_default();
             let mut actions = Vec::new();
             for url in urls {
-                actions.extend(new_tab(browser, *window, Some(url)));
+                actions.extend(new_tab(browser, *window, url));
             }
             actions
         }
@@ -490,7 +503,7 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
                 return Vec::new();
             }
             match browser.closed_tabs.pop() {
-                Some(url) => new_tab(browser, *window, Some(url)),
+                Some(url) => new_tab(browser, *window, url),
                 None => Vec::new(),
             }
         }
@@ -600,7 +613,7 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             None => Vec::new(),
         },
         Command::SearchInNewTab { window, query } => match browser.settings.search.url_for(query) {
-            Some(url) => new_tab(browser, *window, Some(url)),
+            Some(url) => new_tab(browser, *window, url),
             None => Vec::new(),
         },
         Command::NewBackgroundTab { opener, url } => new_background_tab(browser, *opener, url),
@@ -749,12 +762,11 @@ fn history_step(browser: &mut Browser, tab: TabId, action: EngineAction) -> Vec<
     }
 }
 
-fn new_tab(browser: &mut Browser, window: WindowId, url: Option<Url>) -> Vec<EngineAction> {
+/// A new tab at `url`, active, with the focus left on its page.
+fn new_tab(browser: &mut Browser, window: WindowId, url: Url) -> Vec<EngineAction> {
     if browser.window(window).is_none() {
         return Vec::new();
     }
-    let focus_address = url.is_none();
-    let url = url.unwrap_or_else(|| browser.new_tab_url());
     let tab = browser.allocate_tab_id();
     let w = browser
         .window_mut(window)
@@ -763,17 +775,10 @@ fn new_tab(browser: &mut Browser, window: WindowId, url: Option<Url>) -> Vec<Eng
     w.tabs.push(Tab::new(tab, url.clone()));
     w.active = tab;
     w.select_only(tab);
-    let mut actions = vec![
+    vec![
         EngineAction::Hide(previous),
         EngineAction::CreateTab { window, tab, url },
-    ];
-    // A tab the user opened empty is there to type an address into; a tab
-    // opened on a URL (a popup, a link into a new tab) keeps the focus on
-    // the page.
-    if focus_address {
-        actions.push(EngineAction::FocusAddressBar(window));
-    }
-    actions
+    ]
 }
 
 /// Add a tab at `url` beside `opener` that does not become active: the
@@ -990,7 +995,7 @@ fn place_moved_tabs(
         .map(|w| w.tabs.len() - already)
         .unwrap_or(0);
     for (_, url, _) in &moving[already..] {
-        actions.extend(new_tab(browser, window, Some(url.clone())));
+        actions.extend(new_tab(browser, window, url.clone()));
     }
     let to_activate = {
         let w = browser.window(window).expect("window existence checked");
@@ -1226,25 +1231,23 @@ mod tests {
     }
 
     #[test]
-    fn new_tab_uses_new_tab_url_and_becomes_active() {
-        let (mut b, window, first) = one_window();
-        b.settings.new_tab_url = "https://new.example/".to_string();
+    /// Ctrl+T and the "+" button ask for an address before any tab
+    /// exists: nothing changes in the model until the launcher answers
+    /// with a URL or a search.
+    fn new_tab_without_a_url_opens_the_launcher_and_no_tab() {
+        let (mut b, window, _) = one_window();
         let actions = dispatch(&mut b, &Command::NewTab { window, url: None });
-        let w = b.window(window).unwrap();
-        assert_eq!(w.tabs.len(), 2);
-        let second = w.tabs[1].id;
-        assert_eq!(w.active, second);
-        assert_eq!(
-            actions,
-            vec![
-                EngineAction::Hide(first),
-                EngineAction::CreateTab {
-                    window,
-                    tab: second,
-                    url: url("https://new.example/"),
-                },
-                EngineAction::FocusAddressBar(window),
-            ]
+        assert_eq!(actions, vec![EngineAction::ShowLauncher { window }]);
+        assert_eq!(b.window(window).unwrap().tabs.len(), 1);
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::NewTab {
+                    window: WindowId(99),
+                    url: None
+                }
+            )
+            .is_empty()
         );
     }
 
@@ -1290,7 +1293,13 @@ mod tests {
     #[test]
     fn activate_tab_hides_previous_and_shows_target() {
         let (mut b, window, first) = one_window();
-        dispatch(&mut b, &Command::NewTab { window, url: None });
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window,
+                url: Some(url("https://tab.example/")),
+            },
+        );
         let second = b.window(window).unwrap().active;
         let actions = dispatch(&mut b, &Command::ActivateTab(first));
         assert_eq!(b.window(window).unwrap().active, first);
@@ -1304,9 +1313,21 @@ mod tests {
     #[test]
     fn close_active_tab_activates_tab_to_the_right_then_left() {
         let (mut b, window, t1) = one_window();
-        dispatch(&mut b, &Command::NewTab { window, url: None });
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window,
+                url: Some(url("https://tab.example/")),
+            },
+        );
         let t2 = b.window(window).unwrap().active;
-        dispatch(&mut b, &Command::NewTab { window, url: None });
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window,
+                url: Some(url("https://tab.example/")),
+            },
+        );
         let t3 = b.window(window).unwrap().active;
 
         dispatch(&mut b, &Command::ActivateTab(t2));
@@ -1332,7 +1353,13 @@ mod tests {
     #[test]
     fn close_inactive_tab_keeps_active_and_emits_no_show() {
         let (mut b, window, t1) = one_window();
-        dispatch(&mut b, &Command::NewTab { window, url: None });
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window,
+                url: Some(url("https://tab.example/")),
+            },
+        );
         let t2 = b.window(window).unwrap().active;
         let actions = dispatch(&mut b, &Command::CloseTab(t1));
         assert_eq!(b.window(window).unwrap().active, t2);
@@ -1374,9 +1401,21 @@ mod tests {
     #[test]
     fn next_and_previous_tab_wrap_around() {
         let (mut b, window, t1) = one_window();
-        dispatch(&mut b, &Command::NewTab { window, url: None });
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window,
+                url: Some(url("https://tab.example/")),
+            },
+        );
         let t2 = b.window(window).unwrap().active;
-        dispatch(&mut b, &Command::NewTab { window, url: None });
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window,
+                url: Some(url("https://tab.example/")),
+            },
+        );
         let t3 = b.window(window).unwrap().active;
 
         dispatch(&mut b, &Command::NextTab(window));
@@ -1492,7 +1531,13 @@ mod tests {
     #[test]
     fn close_window_closes_all_its_tabs_and_quits_when_last() {
         let (mut b, window, t1) = one_window();
-        dispatch(&mut b, &Command::NewTab { window, url: None });
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window,
+                url: Some(url("https://tab.example/")),
+            },
+        );
         let t2 = b.window(window).unwrap().active;
         let actions = dispatch(&mut b, &Command::CloseWindow(window));
         assert_eq!(
@@ -2103,7 +2148,13 @@ mod tests {
         let (mut b, window, first) = one_window();
         let mut tabs = vec![first];
         for _ in 1..n {
-            dispatch(&mut b, &Command::NewTab { window, url: None });
+            dispatch(
+                &mut b,
+                &Command::NewTab {
+                    window,
+                    url: Some(url("https://tab.example/")),
+                },
+            );
             tabs.push(b.window(window).unwrap().active);
         }
         (b, window, tabs)

@@ -6,6 +6,13 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- A new tab (Ctrl+T, the "+" button) no longer opens a blank page. It
+  opens the launcher: a large field over the window in which the user
+  types an address or a search, with the history's matches under it
+  (Up and Down pick one). Enter opens the result in a new tab; Escape
+  or a click outside opens nothing. `Command::NewTab` without a URL now
+  answers with `EngineAction::ShowLauncher`; the `new_tab_url` setting
+  still names what a new window opens on.
 - `FrameRef` carries `dirty`, the rectangles (`PixelRect`) that changed
   since the frame was last handed out, and the shell uploads only those
   to the page texture when the frame's size is unchanged. An engine

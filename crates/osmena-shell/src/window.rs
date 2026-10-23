@@ -286,6 +286,12 @@ impl<E: Engine> BrowserWindow<E> {
         commands
     }
 
+    /// Open the new-tab launcher over this window.
+    pub fn open_launcher(&mut self) {
+        self.chrome.open_launcher();
+        self.window.request_redraw();
+    }
+
     /// Ask the user something over this window's page.
     pub fn open_prompt(&mut self, prompt: Prompt) {
         self.chrome.open_prompt(prompt);
@@ -750,6 +756,7 @@ impl<E: Engine> BrowserWindow<E> {
         let frameless = self.frameless;
         let maximized = self.window.is_maximized();
         let pinned = browser.pinned_extensions();
+        let history = &browser.history;
         let mut commands = Vec::new();
         let mut content_top_px = 0.0;
 
@@ -775,6 +782,7 @@ impl<E: Engine> BrowserWindow<E> {
                 frameless,
                 maximized,
                 pinned: &pinned,
+                history,
             };
             commands = chrome::draw(ui, model, &context, chrome_state, keymap);
             let rect = ui.available_rect_before_wrap();
