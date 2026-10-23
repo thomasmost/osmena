@@ -512,7 +512,7 @@ fn draw_general(ui: &mut egui::Ui, settings: &mut Settings, activity: &mut FormA
             });
             ui.end_row();
 
-            ui.label("New tab URL");
+            ui.label("New window URL");
             ui.vertical(|ui| {
                 let new_tab = ui.add(
                     egui::TextEdit::singleline(&mut settings.new_tab_url).desired_width(300.0),

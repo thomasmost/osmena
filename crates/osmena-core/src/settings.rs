@@ -17,7 +17,8 @@ pub struct Settings {
     /// in [`Settings::default`]; [`Settings::load`] fills it from the
     /// brand, so a file that never set it follows the brand's default.
     pub homepage: String,
-    /// Loaded in every new tab and new window.
+    /// Loaded in every new window. A new tab asks for its address first
+    /// (the launcher), so this is not what it opens on.
     pub new_tab_url: String,
     /// Reserved for session restore; stored but not acted on in Phase 1.
     pub restore_windows_on_launch: bool,

@@ -5,8 +5,9 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-10-22 (pointer modifiers, per-tab capture, repaint
-scheduling, dirty rectangles)._
+_Last updated: 2026-10-22 (the new-tab launcher, history and its
+suggestions; earlier that day pointer modifiers, per-tab capture,
+repaint scheduling, dirty rectangles)._
 
 ## Architecture
 
@@ -104,6 +105,18 @@ No engine is needed; the workspace builds in under a minute.
   decides; what is not a URL is `Command::Search`, and `dispatch`
   resolves it with `Settings::search` (`url_for`), the one place that
   knows the provider. Nothing else builds a search URL.
+- **A new tab asks for its address first.** `Command::NewTab` without a
+  URL is `EngineAction::ShowLauncher`, never a tab; the chrome's
+  launcher (`draw_launcher`, `ChromeState::open_launcher`) answers with
+  `NewTab { url: Some(..) }` or `SearchInNewTab`, or with nothing. The
+  `new_tab_url` setting is what a new *window* opens on.
+- **The history is the model's, written by the shell.** `apply` records
+  a visit when a load completes and a title when one arrives, answering
+  `EngineAction::SaveHistory`; the shell writes `history.toml` a few
+  seconds after the last change (`App::about_to_wait`) and at exit.
+  `History::matches` ranks suggestions; the chrome draws them under the
+  address bar (`address_suggestions`) and in the launcher, with
+  `step_pick` for the arrow keys. Nothing else reads or writes the file.
 - **The native window is asked, never driven, by the chrome.** The strip
   records a `WindowRequest` (drag, minimize, maximize, system menu) the
   way it records a `MenuRequest`; `BrowserWindow` acts on it after the
@@ -237,6 +250,16 @@ Decisions, with reasons:
 - Licence MIT OR Apache-2.0 with "the osmena contributors" as the holder; the
   owner has not chosen a name. Nothing is published to crates.io; the names
   are free and the manifests are ready.
+
+Added 2026-10-22 (later): the browsing history (`osmena-core::history`,
+`history.toml`, 5000 entries, least recently visited evicted) recorded
+in `apply`; the new-tab launcher in place of a blank page (`Ctrl+T` and
+"+" open it; Enter, Up/Down, Escape, click outside); history matches
+under the address bar. Verified: `cargo test` (the ranking, the arrow
+pick, recording and persistence), clippy, formatting, and a scripted
+run in Nautilus (see its handoff). Not verified by hand on macOS. Open:
+the launcher has no bookmarks or open-tab matches yet, only history;
+the history has no UI to browse or clear it.
 
 Added 2026-10-22, from a review of click capture and the shell/page
 boundary: pointer events carry the keyboard modifiers (the fix for a

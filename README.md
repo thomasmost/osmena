@@ -108,6 +108,14 @@ The engine contract, in `osmena-engine`:
   setting "Use the system title bar and borders" (`system_title_bar` in
   `settings.toml`) restores the system frame; on macOS it applies to
   windows opened afterwards.
+- **A new tab asks first.** Ctrl+T and the "+" button open the
+  launcher, a large field over the window, instead of a blank page:
+  type an address or a search and press Enter, or pick a page from the
+  history's matches with Up and Down; Escape or a click outside opens
+  nothing. The same matches drop down under the address bar of an
+  existing tab as you type. The history (`history.toml` in the
+  profile) keeps every page that finished loading, with its title and
+  visit count, up to 5000 entries.
 - **Tabs that drag.** A tab (or the selected tabs) dragged along the
   strip slides between the others, which move out of its way, and lands
   where it is let go; dropped between two tabs of a folder it joins the

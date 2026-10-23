@@ -12,7 +12,8 @@ All notable changes to the osmena crates. The crates version together.
   (Up and Down pick one). Enter opens the result in a new tab; Escape
   or a click outside opens nothing. `Command::NewTab` without a URL now
   answers with `EngineAction::ShowLauncher`; the `new_tab_url` setting
-  still names what a new window opens on.
+  still names what a new window opens on, and the settings window
+  labels it "New window URL".
 - `FrameRef` carries `dirty`, the rectangles (`PixelRect`) that changed
   since the frame was last handed out, and the shell uploads only those
   to the page texture when the frame's size is unchanged. An engine
