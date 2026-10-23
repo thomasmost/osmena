@@ -204,7 +204,9 @@ pub enum EngineEvent {
 }
 
 /// Fold an engine event into the model. Returns follow-up actions; only
-/// `NewTabRequested`, `NewWindowRequested`, and `TabClosed` produce any.
+/// `NewTabRequested`, `NewWindowRequested`, `TabClosed`, and the events
+/// that change the history (a page finishing its load, a title) produce
+/// any.
 pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
     match event {
         EngineEvent::UrlChanged { tab, url } => {
@@ -213,11 +215,32 @@ pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
         }
         EngineEvent::TitleChanged { tab, title } => {
             with_tab(browser, *tab, |t| t.title = title.clone());
-            Vec::new()
+            let url = browser.tab(*tab).map(|t| t.url.clone());
+            let changed = url.is_some_and(|url| browser.history.retitle(&url, title));
+            if changed {
+                vec![EngineAction::SaveHistory]
+            } else {
+                Vec::new()
+            }
         }
         EngineEvent::LoadStateChanged { tab, state } => {
             with_tab(browser, *tab, |t| t.load = *state);
-            Vec::new()
+            // A visit is a page that finished loading, under its address
+            // and title at that moment; the title may still arrive.
+            let changed = match browser.tab(*tab) {
+                Some(t) if *state == LoadState::Complete => {
+                    let (url, title) = (t.url.clone(), t.title.clone());
+                    browser
+                        .history
+                        .record(&url, &title, crate::history::unix_now())
+                }
+                _ => false,
+            };
+            if changed {
+                vec![EngineAction::SaveHistory]
+            } else {
+                Vec::new()
+            }
         }
         EngineEvent::HistoryChanged {
             tab,
@@ -365,6 +388,87 @@ mod tests {
             },
         );
         assert_eq!(b.tab(tab).unwrap().load, LoadState::Complete);
+    }
+
+    /// A page that finished loading is a visit in the history, under the
+    /// title known then; the title that arrives later replaces it. Each
+    /// change asks the shell to save; a load that is still going, or of a
+    /// page the history does not keep, does not.
+    #[test]
+    fn a_completed_load_and_its_title_go_into_the_history() {
+        let (mut b, _, tab) = one_window();
+        apply(
+            &mut b,
+            &EngineEvent::UrlChanged {
+                tab,
+                url: url("https://visited.example/page"),
+            },
+        );
+        assert!(
+            apply(
+                &mut b,
+                &EngineEvent::LoadStateChanged {
+                    tab,
+                    state: LoadState::Loading,
+                },
+            )
+            .is_empty()
+        );
+        assert!(b.history.is_empty());
+        assert_eq!(
+            apply(
+                &mut b,
+                &EngineEvent::LoadStateChanged {
+                    tab,
+                    state: LoadState::Complete,
+                },
+            ),
+            vec![EngineAction::SaveHistory]
+        );
+        assert_eq!(
+            apply(
+                &mut b,
+                &EngineEvent::TitleChanged {
+                    tab,
+                    title: "Visited".to_string(),
+                },
+            ),
+            vec![EngineAction::SaveHistory]
+        );
+        let entry = &b.history.entries()[0];
+        assert_eq!(entry.url.as_str(), "https://visited.example/page");
+        assert_eq!(entry.title, "Visited");
+        assert_eq!(entry.visits, 1);
+        // The same title again changes nothing.
+        assert!(
+            apply(
+                &mut b,
+                &EngineEvent::TitleChanged {
+                    tab,
+                    title: "Visited".to_string(),
+                },
+            )
+            .is_empty()
+        );
+        // A blank page is not a visit.
+        apply(
+            &mut b,
+            &EngineEvent::UrlChanged {
+                tab,
+                url: url("about:blank"),
+            },
+        );
+        assert!(
+            apply(
+                &mut b,
+                &EngineEvent::LoadStateChanged {
+                    tab,
+                    state: LoadState::Complete,
+                },
+            )
+            .is_empty()
+        );
+        assert_eq!(b.history.entries().len(), 1);
     }
 
     #[test]
@@ -586,7 +690,13 @@ mod tests {
     #[test]
     fn tab_closed_behaves_like_close_tab_command() {
         let (mut b, window, t1) = one_window();
-        dispatch(&mut b, &Command::NewTab { window, url: None });
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window,
+                url: Some(url("https://tab.example/")),
+            },
+        );
         let t2 = b.window(window).unwrap().active;
         let actions = apply(&mut b, &EngineEvent::TabClosed(t2));
         assert_eq!(
@@ -658,7 +768,13 @@ mod tests {
     #[test]
     fn tab_closed_echo_after_close_tab_command_is_a_no_op() {
         let (mut b, window, t1) = one_window();
-        dispatch(&mut b, &Command::NewTab { window, url: None });
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window,
+                url: Some(url("https://tab.example/")),
+            },
+        );
         let t2 = b.window(window).unwrap().active;
         let closed = dispatch(&mut b, &Command::CloseTab(t2));
         assert_eq!(

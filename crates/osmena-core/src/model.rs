@@ -7,6 +7,7 @@ use url::Url;
 
 use crate::bookmarks::Bookmarks;
 use crate::extension::Extension;
+use crate::history::History;
 use crate::profile::Profile;
 use crate::settings::Settings;
 
@@ -313,6 +314,8 @@ pub struct Browser {
     /// for an engine without extensions.
     pub extensions: Vec<Extension>,
     pub bookmarks: Bookmarks,
+    /// Where the user has been; see [`History`].
+    pub history: History,
     next_window_id: u64,
     next_tab_id: u64,
     next_folder_id: u64,
@@ -331,6 +334,7 @@ impl Browser {
             closed_tabs: Vec::new(),
             extensions: Vec::new(),
             bookmarks: Bookmarks::default(),
+            history: History::default(),
             next_window_id: 1,
             next_tab_id: 1,
             next_folder_id: 1,

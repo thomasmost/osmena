@@ -66,6 +66,12 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- Browsing history: every page that finishes loading is remembered in
+  the profile's `history.toml` with its title, visit count, and last
+  visit (`History` in `osmena-core`; `EngineAction::SaveHistory` asks
+  the shell to write it, which it does a few seconds after the last
+  change and at exit). Blank, internal, and view-source pages are not
+  kept; the least recently visited entry goes when there are 5000.
 - Tabs are reordered by dragging them along the strip: the dragged
   tab (or selection) rides with the pointer, the others slide out of its
   way, and it lands where it is let go. Tabs also slide to their places

@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use osmena_chrome::fatal::report_fatal;
 use osmena_chrome::icon;
@@ -22,6 +23,10 @@ use crate::clipboard;
 use crate::repaint;
 use crate::settings_window::{SettingsOutcome, SettingsWindow};
 use crate::window::BrowserWindow;
+
+/// How long after a history change the file is written, so a run of
+/// page loads is saved once.
+const HISTORY_SAVE_DELAY: Duration = Duration::from_secs(3);
 
 /// The user events: the engine asked us to spin its message loop, or
 /// the `--exit-after` timer ran out.
@@ -66,6 +71,8 @@ pub struct App<E: Engine> {
     engine_failed: bool,
     /// The first window could not be opened, so the app has nothing to show.
     window_failed: bool,
+    /// When the history last changed without being saved since.
+    history_dirty: Option<Instant>,
 }
 
 impl<E: Engine> App<E> {
@@ -99,6 +106,7 @@ impl<E: Engine> App<E> {
             exiting: false,
             engine_failed: false,
             window_failed: false,
+            history_dirty: None,
         }
     }
 
@@ -323,6 +331,9 @@ impl<E: Engine> App<E> {
                     log::error!("cannot save bookmarks to {}: {e}", path.display());
                 }
             }
+            EngineAction::SaveHistory => {
+                self.history_dirty.get_or_insert_with(Instant::now);
+            }
             EngineAction::ShowPrompt { window, prompt } => {
                 if let Some(w) = self.window_for_core_id(window) {
                     w.open_prompt(prompt);
@@ -452,6 +463,17 @@ impl<E: Engine> App<E> {
         let path = self.browser.profile.settings_path();
         if let Err(e) = self.browser.settings.save(&path) {
             log::error!("cannot save settings to {}: {e}", path.display());
+        }
+    }
+
+    /// Write the history if it changed, now.
+    fn save_history(&mut self) {
+        if self.history_dirty.take().is_none() {
+            return;
+        }
+        let path = self.browser.profile.history_path();
+        if let Err(e) = self.browser.history.save(&path) {
+            log::error!("cannot save history to {}: {e}", path.display());
         }
     }
 
@@ -664,6 +686,14 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
             return;
         }
         let mut next = None;
+        // The history is written a moment after it last changed.
+        if let Some(since) = self.history_dirty {
+            if since.elapsed() >= HISTORY_SAVE_DELAY {
+                self.save_history();
+            } else {
+                next = repaint::earliest(next, Some(since + HISTORY_SAVE_DELAY));
+            }
+        }
         for w in self.windows.values_mut() {
             next = repaint::earliest(next, w.redraw_deadline());
         }
@@ -681,6 +711,7 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
     /// down in dependency order: windows (tab hosts, GL) before the engine.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.exiting = true;
+        self.save_history();
         self.close_settings_window();
         self.windows.clear();
         self.engine = None;

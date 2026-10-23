@@ -32,7 +32,8 @@ use osmena_chrome::fatal::report_fatal;
 use osmena_core::command::open_window;
 use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
-    Bookmarks, Brand, Browser, Command, EngineInfo, Keymap, Platform, Profile, Settings, dispatch,
+    Bookmarks, Brand, Browser, Command, EngineInfo, History, Keymap, Platform, Profile, Settings,
+    dispatch,
 };
 use osmena_engine::{Engine, EngineError, Waker};
 use url::Url;
@@ -145,8 +146,22 @@ pub fn run<E: Engine>(launch: Launch<E>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // A history that cannot be read is not worth refusing to start over:
+    // it is logged and starts empty (the file is replaced on the next
+    // visit).
+    let history = match History::load(&profile.history_path()) {
+        Ok(h) => h,
+        Err(e) => {
+            log::warn!(
+                "{e} (in {}); starting with an empty history",
+                profile.history_path().display()
+            );
+            History::default()
+        }
+    };
     let mut browser = Browser::new(profile, settings);
     browser.bookmarks = bookmarks;
+    browser.history = history;
     let first: Url = urls.first().cloned().unwrap_or_else(|| browser.homepage());
     let mut actions = open_window(&mut browser, first);
     let window = browser.windows[0].id;

@@ -14,6 +14,7 @@ pub mod brand;
 pub mod command;
 pub mod event;
 pub mod extension;
+pub mod history;
 pub mod input;
 pub mod keymap;
 pub mod model;
@@ -27,6 +28,7 @@ pub use event::{
     Cursor, EditState, EngineEvent, Media, MediaKind, Misspelling, PageContext, PendingTab, apply,
 };
 pub use extension::{Extension, ExtensionSource};
+pub use history::{History, HistoryEntry, HistoryError};
 pub use input::{ButtonAction, EngineInput, KeyInput, MouseButton};
 pub use keymap::{ChordParseError, CommandKind, KeyChord, Keymap, KeymapError, Platform};
 pub use model::{

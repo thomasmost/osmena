@@ -302,6 +302,9 @@ pub enum EngineAction {
     SaveSettings,
     /// The bookmarks changed: persist them.
     SaveBookmarks,
+    /// The history changed: persist it (the shell may wait a moment and
+    /// save once for a run of changes).
+    SaveHistory,
     /// Show `prompt` in `window`'s chrome.
     ShowPrompt {
         window: WindowId,

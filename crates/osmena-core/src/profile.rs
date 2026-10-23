@@ -103,6 +103,10 @@ impl Profile {
         self.dir.join("bookmarks.toml")
     }
 
+    pub fn history_path(&self) -> PathBuf {
+        self.dir.join("history.toml")
+    }
+
     /// Create the profile directory and the engine's subdirectory.
     pub fn ensure_dirs(&self) -> io::Result<()> {
         std::fs::create_dir_all(&self.engine_dir)
