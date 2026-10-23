@@ -1335,7 +1335,13 @@ fn draw_launcher(
                             .id(id)
                             .margin(Margin::symmetric(14, 8))
                             .font(egui::FontId::proportional(LAUNCHER_FONT_SIZE))
-                            .hint_text("Search or enter address")
+                            // The hint takes the field's font: egui lays
+                            // it out in the body size at the top-left
+                            // otherwise, small and above the caret line.
+                            .hint_text(
+                                egui::RichText::new("Search or enter address")
+                                    .font(egui::FontId::proportional(LAUNCHER_FONT_SIZE)),
+                            )
                             .desired_width(f32::INFINITY),
                     );
                     if launcher.focus {
