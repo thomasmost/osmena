@@ -17,6 +17,8 @@ use osmena_core::{
 };
 use url::{ParseError, Url};
 
+use crate::theme;
+
 /// The widest a title is drawn in a folder's drop-down list.
 const FOLDER_LIST_TITLE_MAX_CHARS: usize = 36;
 const FAVICON_SIZE: f32 = 16.0;
@@ -31,7 +33,7 @@ const TAB_MIN_WIDTH: f32 = 64.0;
 /// while hovered, so its title keeps the room.
 const TAB_CLOSE_MIN_WIDTH: f32 = 110.0;
 const TAB_PADDING_X: f32 = 12.0;
-const TAB_CORNER: u8 = 8;
+const TAB_CORNER: u8 = theme::CORNER;
 const CLOSE_SIZE: f32 = 18.0;
 /// The "+" and "☰" buttons on the strip.
 const MENU_WIDTH: f32 = 28.0;
@@ -639,10 +641,12 @@ pub fn draw(
                         }
                     }
                     let address_id = Id::new(("address", window.id));
+                    theme::pill_fields(ui);
                     let field = ui.add_sized(
                         ui.available_size(),
                         egui::TextEdit::singleline(&mut state.address_text)
                             .id(address_id)
+                            .margin(theme::INPUT_MARGIN)
                             .hint_text("Enter address"),
                     );
                     if field.changed() {
@@ -1325,9 +1329,11 @@ fn draw_launcher(
                 .show(ui, |ui| {
                     ui.set_width(width - 28.0);
                     let id = Id::new(("launcher-field", window.id));
+                    theme::pill_fields(ui);
                     let field = ui.add(
                         egui::TextEdit::singleline(&mut launcher.text)
                             .id(id)
+                            .margin(Margin::symmetric(14, 8))
                             .font(egui::FontId::proportional(LAUNCHER_FONT_SIZE))
                             .hint_text("Search or enter address")
                             .desired_width(f32::INFINITY),
@@ -1583,8 +1589,11 @@ fn draw_prompt(ui: &mut Ui, state: &mut ChromeState) -> Vec<Command> {
         .show(ui.ctx(), |ui| {
             ui.set_min_width(320.0);
             ui.label(field_label);
-            let field =
-                ui.add(egui::TextEdit::singleline(&mut prompt.text).desired_width(f32::INFINITY));
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut prompt.text)
+                    .margin(theme::INPUT_MARGIN)
+                    .desired_width(f32::INFINITY),
+            );
             if prompt.focus {
                 prompt.focus = false;
                 field.request_focus();

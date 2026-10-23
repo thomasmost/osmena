@@ -23,5 +23,6 @@ pub mod keyutils;
 pub mod menus;
 pub mod native_menu;
 pub mod routing;
+pub mod theme;
 
 pub use keyboard_types;

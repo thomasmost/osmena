@@ -6,6 +6,10 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- The chrome's typeface is Inter (SIL Open Font License, bundled in
+  `osmena-chrome/assets/fonts`), with its medium weight for headings;
+  egui's fonts stay behind it for the glyphs it lacks. `theme::install`
+  sets it, with the shared style, on every window's egui context.
 - The macOS menu bar: the application menu (About, Settings…,
   Services, Hide, Hide Others, Show All, Quit), File, Edit, View,
   History (Back, Forward, Home, Reopen Closed Tab, the ten most
@@ -29,6 +33,10 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- Inputs share one padding (10 px by 5 px, `theme::INPUT_MARGIN`); the
+  address bar and the launcher's field are pills; widgets, menus and
+  windows round at 8, 10 and 12 px, matching the tabs; buttons have
+  8 px by 4 px padding and text is a half point larger.
 - A new tab (Ctrl+T, the "+" button) no longer opens a blank page. It
   opens the launcher: a large field over the window in which the user
   types an address or a search, with the history's matches under it

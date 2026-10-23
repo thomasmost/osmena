@@ -15,7 +15,7 @@ use osmena_chrome::routing::{
     KeyRouter, KeyStroke, KeyTarget, PointerCapture, PointerContext, PointerTarget, content_pixels,
     resize_edge, route_pointer,
 };
-use osmena_chrome::{icon, input, keyutils, menus, native_menu};
+use osmena_chrome::{icon, input, keyutils, menus, native_menu, theme};
 use osmena_core::{
     Brand, Browser, Command, Cursor, EngineInfo, EngineInput, KeyInput, Keymap, PageContext,
     Platform, Prompt, TabId, WindowId,
@@ -108,6 +108,7 @@ impl<E: Engine> BrowserWindow<E> {
         surface.make_current()?;
         let host = engine.open_host(&surface, window_handle, window.scale_factor() as f32)?;
         let egui = EguiGlow::new(event_loop, surface.gl(), None, None, false);
+        theme::install(&egui.egui_ctx);
         egui.egui_ctx.options_mut(|options| {
             options.zoom_with_keyboard = false;
         });

@@ -5,9 +5,9 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-10-23 (the macOS menu bar; the day before, the
-new-tab launcher, history and its suggestions, pointer modifiers,
-per-tab capture, repaint scheduling, dirty rectangles)._
+_Last updated: 2026-10-23 (the theme: Inter, pill inputs, the Shell
+swatch and a brand's default chrome colour; the macOS menu bar; the
+day before, the new-tab launcher, history and its suggestions)._
 
 ## Architecture
 
@@ -42,12 +42,20 @@ No engine is needed; the workspace builds in under a minute.
   browsers' repositories and implement the traits in `osmena-engine`.
   Everything that crosses the boundary is a core type: `Command`,
   `EngineAction`, `EngineEvent`, `EngineInput`, `PagePaint`.
-- **Branding is injected, never embedded.** A product string, path, or
-  icon comes from the `Brand` the binary passes in; an engine fact (name,
-  version, data directory, what it supports, wheel distance) comes from
-  `EngineInfo`. Neither is a global: functions that need one take a
-  reference. Grep for "Paladin", "Nautilus", "Servo", "Chromium" before
-  committing; only the README and this file may name them.
+- **Branding is injected, never embedded.** A product string, path,
+  icon, or a fresh profile's chrome colour comes from the `Brand` the
+  binary passes in; an engine fact (name, version, data directory,
+  what it supports, wheel distance) comes from `EngineInfo`. Neither
+  is a global: functions that need one take a reference. Grep for
+  "Paladin", "Nautilus", "Servo", "Chromium" before committing; only
+  the README and this file may name them.
+- **The look is `osmena_chrome::theme`.** The typeface (Inter, bundled
+  under `assets/fonts` with its licence), the text sizes, the widget
+  rounding (`CORNER`, which the tabs share), the input padding
+  (`INPUT_MARGIN`) and the pill fields (`pill_fields`) are set there
+  once per egui context (`install`, called by both windows). A new
+  field takes `INPUT_MARGIN`; a new colour goes through `Palette`, which
+  picks dark or light text by the swatch's luminance.
 - **Every user action is a `Command`.** New chrome controls and shortcuts
   add a `Command` (and a `CommandKind` if it needs a hotkey), never a
   direct engine call. A new `CommandKind` needs a `name` (stable: it is

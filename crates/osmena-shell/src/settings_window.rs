@@ -10,7 +10,7 @@ use egui_glow::EguiGlow;
 use osmena_chrome::chrome::{self, describe_chord, location_input_to_url};
 use osmena_chrome::input::{self, KeyRoute};
 use osmena_chrome::keyboard_types::{Code, Modifiers};
-use osmena_chrome::{icon, keyutils};
+use osmena_chrome::{icon, keyutils, theme};
 use osmena_core::{
     Brand, ChromeColor, Command, CommandKind, Extension, ExtensionSource, ExtensionSupport,
     KeyChord, Keymap, Platform, Settings,
@@ -120,6 +120,7 @@ impl<S: Surface> SettingsWindow<S> {
         let surface = engine.open_surface(display_handle, window_handle, size)?;
         surface.make_current()?;
         let egui = EguiGlow::new(event_loop, surface.gl(), None, None, false);
+        theme::install(&egui.egui_ctx);
         let repaints = RepaintSchedule::install(&egui.egui_ctx);
         Ok(SettingsWindow {
             dirty: false,
@@ -513,8 +514,11 @@ fn draw_general(ui: &mut egui::Ui, settings: &mut Settings, activity: &mut FormA
         .show(ui, |ui| {
             ui.label("Homepage");
             ui.vertical(|ui| {
-                let homepage =
-                    ui.add(egui::TextEdit::singleline(&mut settings.homepage).desired_width(300.0));
+                let homepage = ui.add(
+                    egui::TextEdit::singleline(&mut settings.homepage)
+                        .margin(theme::INPUT_MARGIN)
+                        .desired_width(300.0),
+                );
                 activity.edited |= homepage.changed();
                 if homepage.lost_focus() {
                     activity.committed = true;
@@ -527,7 +531,9 @@ fn draw_general(ui: &mut egui::Ui, settings: &mut Settings, activity: &mut FormA
             ui.label("New window URL");
             ui.vertical(|ui| {
                 let new_tab = ui.add(
-                    egui::TextEdit::singleline(&mut settings.new_tab_url).desired_width(300.0),
+                    egui::TextEdit::singleline(&mut settings.new_tab_url)
+                        .margin(theme::INPUT_MARGIN)
+                        .desired_width(300.0),
                 );
                 activity.edited |= new_tab.changed();
                 if new_tab.lost_focus() {
@@ -541,7 +547,9 @@ fn draw_general(ui: &mut egui::Ui, settings: &mut Settings, activity: &mut FormA
             ui.label("Search engine");
             ui.vertical(|ui| {
                 let name = ui.add(
-                    egui::TextEdit::singleline(&mut settings.search.name).desired_width(300.0),
+                    egui::TextEdit::singleline(&mut settings.search.name)
+                        .margin(theme::INPUT_MARGIN)
+                        .desired_width(300.0),
                 );
                 activity.edited |= name.changed();
                 if name.lost_focus() {
@@ -559,8 +567,11 @@ fn draw_general(ui: &mut egui::Ui, settings: &mut Settings, activity: &mut FormA
 
             ui.label("Search URL");
             ui.vertical(|ui| {
-                let url = ui
-                    .add(egui::TextEdit::singleline(&mut settings.search.url).desired_width(300.0));
+                let url = ui.add(
+                    egui::TextEdit::singleline(&mut settings.search.url)
+                        .margin(theme::INPUT_MARGIN)
+                        .desired_width(300.0),
+                );
                 activity.edited |= url.changed();
                 if url.lost_focus() {
                     activity.committed = true;
@@ -591,7 +602,7 @@ fn draw_general(ui: &mut egui::Ui, settings: &mut Settings, activity: &mut FormA
                             egui::Button::new("")
                                 .fill(egui::Color32::from_rgb(r, g, b))
                                 .stroke(stroke)
-                                .corner_radius(6.0)
+                                .corner_radius(theme::CORNER)
                                 .min_size(egui::Vec2::splat(26.0)),
                         )
                         .on_hover_text(color.label());
@@ -713,6 +724,7 @@ fn draw_extensions(
     ui.horizontal(|ui| {
         let field = ui.add(
             egui::TextEdit::singleline(store_input)
+                .margin(theme::INPUT_MARGIN)
                 .desired_width(300.0)
                 .hint_text(format!("{} page URL or extension id", support.store_name)),
         );
