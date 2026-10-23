@@ -52,6 +52,8 @@ const LAUNCHER_FONT_SIZE: f32 = 22.0;
 /// The widest a history match's title and address are drawn.
 const SUGGESTION_TITLE_MAX_CHARS: usize = 64;
 const SUGGESTION_URL_MAX_CHARS: usize = 90;
+/// Inside a suggestion row, around its text.
+const SUGGESTION_PADDING: f32 = 4.0;
 
 /// The shades the chrome paints with, all derived from the profile's
 /// [`ChromeColor`]: the tab strip is the swatch at its top and fades to
@@ -1477,22 +1479,33 @@ fn step_pick(picked: Option<usize>, count: usize, down: bool) -> Option<usize> {
     }
 }
 
-/// One history match as a row: its title (or address, untitled) with the
-/// address after it, small; highlighted when picked.
+/// One history match as a row the width of its list: its title (or
+/// address, untitled) with the address after it, small; filled when
+/// picked or hovered. Returns the row's response (click).
 fn suggestion_row(ui: &mut Ui, entry: &HistoryEntry, picked: bool) -> egui::Response {
-    let style = ui.style();
     let title = if entry.title.is_empty() {
         entry.url.as_str()
     } else {
         entry.title.as_str()
     };
+    let (body, small) = (
+        TextStyle::Body.resolve(ui.style()),
+        TextStyle::Small.resolve(ui.style()),
+    );
+    let (text_color, weak) = (ui.visuals().text_color(), ui.visuals().weak_text_color());
+    let width = ui.available_width();
+    let row_height = ui.fonts_mut(|f| f.row_height(&body)) + 2.0 * SUGGESTION_PADDING;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, row_height), Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
     let mut job = egui::text::LayoutJob::default();
     job.append(
         &truncate(title, SUGGESTION_TITLE_MAX_CHARS),
         0.0,
         egui::TextFormat {
-            font_id: TextStyle::Body.resolve(style),
-            color: style.visuals.text_color(),
+            font_id: body,
+            color: text_color,
             ..Default::default()
         },
     );
@@ -1503,16 +1516,28 @@ fn suggestion_row(ui: &mut Ui, entry: &HistoryEntry, picked: bool) -> egui::Resp
         ),
         0.0,
         egui::TextFormat {
-            font_id: TextStyle::Small.resolve(style),
-            color: style.visuals.weak_text_color(),
+            font_id: small,
+            color: weak,
             ..Default::default()
         },
     );
-    job.wrap = egui::text::TextWrapping::truncate_at_width(ui.available_width() - 16.0);
-    ui.add_sized(
-        Vec2::new(ui.available_width(), 0.0),
-        Button::selectable(picked, job),
-    )
+    job.wrap = egui::text::TextWrapping::truncate_at_width(width - 2.0 * SUGGESTION_PADDING);
+    let galley = ui.painter().layout_job(job);
+    let painter = ui.painter();
+    if picked {
+        painter.rect_filled(rect, 4.0, ui.visuals().selection.bg_fill);
+    } else if response.hovered() {
+        painter.rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill);
+    }
+    painter.galley(
+        Pos2::new(
+            rect.left() + SUGGESTION_PADDING,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        text_color,
+    );
+    response
 }
 
 /// The question the chrome is asking, as a small window over the page:
