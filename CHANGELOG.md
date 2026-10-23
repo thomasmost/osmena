@@ -73,6 +73,9 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- Typing in the address bar drops the history's matches down under it;
+  Up and Down put a match's address in the field, a click on one loads
+  it.
 - Browsing history: every page that finishes loading is remembered in
   the profile's `history.toml` with its title, visit count, and last
   visit (`History` in `osmena-core`; `EngineAction::SaveHistory` asks

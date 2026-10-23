@@ -187,6 +187,19 @@ pub struct ChromeState {
     prompt: Option<PromptState>,
     /// The new-tab launcher, while it is open.
     launcher: Option<Launcher>,
+    /// The history's matches under the address bar.
+    suggest: Suggest,
+}
+
+/// The address bar's suggestions: what the user typed (the field shows
+/// the picked match's address instead while one is picked), the pick,
+/// and whether the list was drawn last frame, so a click on a row still
+/// lands after the field lost focus to it.
+#[derive(Default)]
+struct Suggest {
+    typed: String,
+    picked: Option<usize>,
+    open: bool,
 }
 
 /// The new-tab launcher: what the user typed, and the history match
@@ -280,7 +293,10 @@ impl ChromeState {
     /// page waits for the answer). egui's own popups report themselves
     /// through `egui::Popup::is_any_open`; this covers the rest.
     pub fn popup_open(&self) -> bool {
-        self.open_folder.is_some() || self.prompt.is_some() || self.launcher.is_some()
+        self.open_folder.is_some()
+            || self.prompt.is_some()
+            || self.launcher.is_some()
+            || self.suggest.open
     }
 }
 
@@ -641,6 +657,9 @@ pub fn draw(
                     if field.gained_focus() || focus_requested {
                         select_all(ui, address_id, state.address_text.chars().count());
                     }
+                    commands.extend(address_suggestions(
+                        ui, window, history, state, &field, active.id,
+                    ));
                     if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                         // A URL loads; anything else is a search.
                         let text = state.address_text.trim();
@@ -1375,6 +1394,73 @@ fn draw_launcher(
     if close {
         state.launcher = None;
     }
+    commands
+}
+
+/// The history's matches for what is typed in the address bar, dropped
+/// down under it while the field has focus and the text is the user's
+/// (not the page's address). Up and Down put a match's address in the
+/// field, so Enter loads it; a click on a match loads it at once.
+fn address_suggestions(
+    ui: &mut Ui,
+    window: &Window,
+    history: &History,
+    state: &mut ChromeState,
+    field: &egui::Response,
+    tab: TabId,
+) -> Vec<Command> {
+    let mut commands = Vec::new();
+    if field.changed() {
+        state.suggest.typed = state.address_text.clone();
+        state.suggest.picked = None;
+    }
+    let typing = field.has_focus() && state.address_dirty && !state.address_text.trim().is_empty();
+    if !typing && !state.suggest.open {
+        return commands;
+    }
+    let matches = history.matches(&state.suggest.typed);
+    if matches.is_empty() {
+        state.suggest.open = false;
+        return commands;
+    }
+    if typing {
+        let (down, up) = ui.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, Key::ArrowDown),
+                i.consume_key(egui::Modifiers::NONE, Key::ArrowUp),
+            )
+        });
+        if down || up {
+            state.suggest.picked = step_pick(state.suggest.picked, matches.len(), down);
+            state.address_text = match state.suggest.picked {
+                Some(i) => matches[i].url.to_string(),
+                None => state.suggest.typed.clone(),
+            };
+        }
+    }
+    let mut clicked = false;
+    let picked = state.suggest.picked;
+    egui::Area::new(Id::new(("address-suggestions", window.id)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(field.rect.left_bottom() + Vec2::new(0.0, 2.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(field.rect.width() - 16.0);
+                for (i, entry) in matches.iter().enumerate() {
+                    if suggestion_row(ui, entry, picked == Some(i)).clicked() {
+                        commands.push(Command::Navigate {
+                            tab,
+                            url: entry.url.clone(),
+                        });
+                        clicked = true;
+                    }
+                }
+            });
+        });
+    if clicked {
+        state.address_dirty = false;
+    }
+    state.suggest.open = typing && !clicked;
     commands
 }
 
