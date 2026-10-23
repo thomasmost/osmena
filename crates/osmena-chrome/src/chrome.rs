@@ -1354,6 +1354,7 @@ fn draw_launcher(
                             Some(i) => matches[i].url.to_string(),
                             None => launcher.typed.clone(),
                         };
+                        caret_to_end(ui, id, launcher.text.chars().count());
                     }
                     let (escape, enter) =
                         ui.input(|i| (i.key_pressed(Key::Escape), i.key_pressed(Key::Enter)));
@@ -1438,6 +1439,7 @@ fn address_suggestions(
                 Some(i) => matches[i].url.to_string(),
                 None => state.suggest.typed.clone(),
             };
+            caret_to_end(ui, field.id, state.address_text.chars().count());
         }
     }
     let mut clicked = false;
@@ -2086,6 +2088,18 @@ fn sync_address_text(state: &mut ChromeState, tab: TabId, url: &Url) {
     }
     state.shown_tab = Some(tab);
     state.shown_url = Some(url.clone());
+}
+
+/// Put the caret at the end of the text in the field `id`, for a text
+/// put there from outside (a picked suggestion).
+fn caret_to_end(ui: &Ui, id: Id, len: usize) {
+    use egui::text::{CCursor, CCursorRange};
+    use egui::text_edit::TextEditState;
+    if let Some(mut edit) = TextEditState::load(ui.ctx(), id) {
+        edit.cursor
+            .set_char_range(Some(CCursorRange::one(CCursor::new(len))));
+        edit.store(ui.ctx(), id);
+    }
 }
 
 fn select_all(ui: &Ui, id: Id, len: usize) {
