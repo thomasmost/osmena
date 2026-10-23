@@ -20,11 +20,16 @@ pub struct Brand {
     pub data_dir: &'static str,
     /// The homepage of a fresh profile.
     pub homepage: &'static str,
+    /// The chrome colour of a fresh profile (the settings window offers
+    /// every [`ChromeColor`]).
+    pub chrome_color: ChromeColor,
     /// The application icon as a PNG, straight RGBA8, 256 px square.
     pub icon_png: &'static [u8],
 }
 
 use url::Url;
+
+use crate::settings::ChromeColor;
 
 /// What an engine offers for browser extensions. `None` in
 /// [`EngineInfo::extensions`] means the engine runs none, and the chrome
@@ -128,6 +133,7 @@ pub(crate) mod test_support {
         binary: "osmena",
         data_dir: "Osmena",
         homepage: "https://home.example/",
+        chrome_color: ChromeColor::Slate,
         icon_png: &[],
     };
 

@@ -10,6 +10,9 @@ All notable changes to the osmena crates. The crates version together.
   `osmena-chrome/assets/fonts`), with its medium weight for headings;
   egui's fonts stay behind it for the glyphs it lacks. `theme::install`
   sets it, with the shared style, on every window's egui context.
+- The `Shell` chrome colour, a warm sand, light enough that the strip's
+  text turns dark; and `Brand::chrome_color`, the swatch a fresh profile
+  of that brand starts with (a required field: every brand chooses).
 - The macOS menu bar: the application menu (About, Settings…,
   Services, Hide, Hide Others, Show All, Quit), File, Edit, View,
   History (Back, Forward, Home, Reopen Closed Tab, the ten most

@@ -101,6 +101,9 @@ impl SearchSettings {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ChromeColor {
+    /// A warm sand, like the inside of a shell: light, so the text on
+    /// the strip is dark.
+    Shell,
     #[default]
     Slate,
     Ocean,
@@ -113,7 +116,8 @@ pub enum ChromeColor {
 
 impl ChromeColor {
     /// Every swatch, in the order the settings window shows them.
-    pub const ALL: [ChromeColor; 7] = [
+    pub const ALL: [ChromeColor; 8] = [
+        ChromeColor::Shell,
         ChromeColor::Slate,
         ChromeColor::Ocean,
         ChromeColor::Forest,
@@ -125,6 +129,7 @@ impl ChromeColor {
 
     pub fn label(self) -> &'static str {
         match self {
+            ChromeColor::Shell => "Shell",
             ChromeColor::Slate => "Slate",
             ChromeColor::Ocean => "Ocean",
             ChromeColor::Forest => "Forest",
@@ -135,9 +140,11 @@ impl ChromeColor {
         }
     }
 
-    /// The base colour, sRGB. All swatches are dark enough for white text.
+    /// The base colour, sRGB. The chrome picks dark or light text by the
+    /// swatch's luminance (`Palette`), so a swatch may be light.
     pub fn rgb(self) -> [u8; 3] {
         match self {
+            ChromeColor::Shell => [229, 214, 194],
             ChromeColor::Slate => [71, 85, 105],
             ChromeColor::Ocean => [14, 110, 140],
             ChromeColor::Forest => [31, 112, 72],
@@ -179,6 +186,7 @@ impl Settings {
     pub fn for_brand(brand: &Brand) -> Settings {
         Settings {
             homepage: brand.homepage.to_string(),
+            chrome_color: brand.chrome_color,
             ..Settings::default()
         }
     }
@@ -286,7 +294,7 @@ mod tests {
             Settings::parse("chrome_color = \"neon\"\n"),
             Err(SettingsError::Parse(_))
         ));
-        assert_eq!(ChromeColor::ALL.len(), 7);
+        assert_eq!(ChromeColor::ALL.len(), 8);
         assert_eq!(ChromeColor::default(), ChromeColor::Slate);
     }
 
