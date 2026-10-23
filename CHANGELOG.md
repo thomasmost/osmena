@@ -39,6 +39,12 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Fixed
 
+- The new-tab launcher opened dimmed, its field and suggestions under
+  the grey backdrop, once a launcher had been cancelled by a click
+  outside the box: that click raised the backdrop above the box in
+  egui's layer order, and the two kept that order. The backdrop is now
+  painted into the box's own layer, under it, and a press anywhere
+  outside the box (the toolbar included) cancels the launcher.
 - A tab shown or created in a window that did not have keyboard focus
   (a tab activated by a drag into a window behind another, a new tab in
   a window the user had left) was told it had focus, so two windows

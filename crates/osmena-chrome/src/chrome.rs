@@ -1297,19 +1297,17 @@ fn draw_launcher(
     let mut commands = Vec::new();
     let mut close = false;
 
-    // The backdrop dims everything and takes the click that cancels.
-    let backdrop = egui::Area::new(Id::new(("launcher-backdrop", window.id)))
-        .order(egui::Order::Foreground)
-        .fixed_pos(content.min)
-        .show(&ctx, |ui| {
-            let (rect, response) = ui.allocate_exact_size(content.size(), Sense::click());
-            ui.painter()
-                .rect_filled(rect, 0.0, Color32::from_black_alpha(96));
-            response
-        });
-    if backdrop.inner.clicked() {
-        close = true;
-    }
+    // The backdrop is painted into the box's own layer, before the box,
+    // so it dims the page (which the shell paints in a middle-order
+    // layer of its own, above every middle-order area) and stays under
+    // the box whatever sequence egui keeps areas in: as an area of its
+    // own it ended up above the box once a click on it had cancelled a
+    // launcher, and every launcher after that opened dimmed. A press
+    // anywhere outside the box cancels; the page sees no pointer events
+    // while the launcher is open (`popup_open`).
+    let area_id = Id::new(("launcher", window.id));
+    ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, area_id))
+        .rect_filled(content, 0.0, Color32::from_black_alpha(96));
 
     let matches = history.matches(&launcher.typed);
     let width = (content.width() - 48.0).clamp(200.0, LAUNCHER_WIDTH);
@@ -1317,7 +1315,7 @@ fn draw_launcher(
         content.center().x - width / 2.0,
         content.top() + content.height() * 0.18,
     );
-    egui::Area::new(Id::new(("launcher", window.id)))
+    let shown = egui::Area::new(area_id)
         .order(egui::Order::Foreground)
         .fixed_pos(top_left)
         .show(&ctx, |ui| {
@@ -1394,6 +1392,15 @@ fn draw_launcher(
                     }
                 });
         });
+    let pressed_outside = ctx.input(|i| {
+        i.pointer.any_pressed()
+            && i.pointer
+                .interact_pos()
+                .is_some_and(|p| !shown.response.rect.contains(p))
+    });
+    if pressed_outside {
+        close = true;
+    }
     if close {
         state.launcher = None;
     }
