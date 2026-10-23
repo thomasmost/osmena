@@ -2,14 +2,14 @@
 //! native windows, and runs the dispatch loop (see the crate docs).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use osmena_chrome::fatal::report_fatal;
-use osmena_chrome::icon;
+use osmena_chrome::{icon, menus, native_menu};
 use osmena_core::{
-    Brand, Browser, Command, CommandKind, EngineAction, EngineEvent, EngineInfo, Keymap, TabId,
-    WindowId, apply, dispatch,
+    Brand, Browser, Command, CommandKind, EngineAction, EngineEvent, EngineInfo, Keymap,
+    PageCommand, TabId, WindowId, apply, dispatch,
 };
 use osmena_engine::{Engine, TabHost, Waker};
 use url::Url;
@@ -28,12 +28,14 @@ use crate::window::BrowserWindow;
 /// page loads is saved once.
 const HISTORY_SAVE_DELAY: Duration = Duration::from_secs(3);
 
-/// The user events: the engine asked us to spin its message loop, or
-/// the `--exit-after` timer ran out.
+/// The user events: the engine asked us to spin its message loop, the
+/// `--exit-after` timer ran out, or an item of the menu bar was picked
+/// (its id waits in `native_menu::take_menu_ids`).
 #[derive(Debug)]
 pub enum AppEvent {
     Wake,
     ExitAfter(std::time::Duration),
+    Menu,
 }
 
 struct WinitWaker(Mutex<EventLoopProxy<AppEvent>>);
@@ -73,6 +75,12 @@ pub struct App<E: Engine> {
     window_failed: bool,
     /// When the history last changed without being saved since.
     history_dirty: Option<Instant>,
+    /// The application's menu bar (macOS), rebuilt from the model after
+    /// every event when its entries change.
+    menu_bar: native_menu::MenuBar,
+    /// The other profiles on this machine, for the menu bar; read when
+    /// a window gains focus.
+    profiles: Vec<String>,
 }
 
 impl<E: Engine> App<E> {
@@ -90,6 +98,14 @@ impl<E: Engine> App<E> {
         event_loop: &EventLoop<AppEvent>,
         exit_after: Option<std::time::Duration>,
     ) -> App<E> {
+        let menu_proxy = Mutex::new(event_loop.create_proxy());
+        native_menu::install_event_handler(move || {
+            let proxy = menu_proxy.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Err(e) = proxy.send_event(AppEvent::Menu) {
+                log::warn!("failed to report a menu pick to the event loop: {e}");
+            }
+        });
+        let profiles = browser.profile.others();
         App {
             brand,
             engine_info,
@@ -107,6 +123,8 @@ impl<E: Engine> App<E> {
             engine_failed: false,
             window_failed: false,
             history_dirty: None,
+            menu_bar: native_menu::MenuBar::default(),
+            profiles,
         }
     }
 
@@ -160,6 +178,64 @@ impl<E: Engine> App<E> {
         for command in commands {
             let actions = dispatch(&mut self.browser, &command);
             self.perform_all(actions, event_loop);
+        }
+    }
+
+    /// The browser window the menu bar acts on: the focused one, else
+    /// any (a settings window may have the focus).
+    fn menu_window(&self) -> Option<WindowId> {
+        self.windows
+            .values()
+            .find(|w| w.has_focus())
+            .or_else(|| self.windows.values().next())
+            .map(BrowserWindow::core_id)
+    }
+
+    /// Rebuild the menu bar if the model it shows changed.
+    fn sync_menu_bar(&mut self) {
+        let window = self.menu_window().and_then(|id| self.browser.window(id));
+        let entries = menus::menu_bar(&menus::MenuBarInput {
+            brand: self.brand.name,
+            window,
+            keymap: &self.keymap,
+            can_reopen: !self.browser.closed_tabs.is_empty(),
+            bookmarks: &self.browser.bookmarks,
+            history: &self.browser.history,
+            profiles: &self.profiles,
+            current_profile: &self.browser.profile.name,
+        });
+        self.menu_bar.sync(entries);
+    }
+
+    /// Run the commands of the menu bar items picked since the last
+    /// time. An editing command goes to whatever has the keyboard: a
+    /// text field of the chrome or of the settings window gets it as the
+    /// egui events its key chord would have been, the page otherwise.
+    fn menu_picks(&mut self, event_loop: &ActiveEventLoop) {
+        for id in native_menu::take_menu_ids() {
+            let Some(command) = self.menu_bar.command(&id) else {
+                continue;
+            };
+            if let Command::Page { command: page, .. } = &command
+                && let Some(events) = edit_events(page)
+            {
+                if let Some(sw) = self.settings_window.as_mut()
+                    && sw.has_focus()
+                {
+                    sw.inject_egui_events(events);
+                    continue;
+                }
+                if let Some(w) = self.windows.values_mut().find(|w| w.has_focus())
+                    && w.egui_wants_keyboard()
+                {
+                    w.inject_egui_events(events);
+                    continue;
+                }
+            }
+            self.run_commands(vec![command], event_loop);
+            if self.exiting {
+                return;
+            }
         }
     }
 
@@ -529,6 +605,32 @@ impl<E: Engine> App<E> {
     }
 }
 
+/// The egui events an editing command stands for in a text field, or
+/// `None` for a command that is the page's only.
+fn edit_events(command: &PageCommand) -> Option<Vec<egui::Event>> {
+    use egui::{Event, Key, Modifiers};
+    let key = |key: Key, modifiers: Modifiers| Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    };
+    Some(match command {
+        PageCommand::Undo => vec![key(Key::Z, Modifiers::COMMAND)],
+        PageCommand::Redo => vec![key(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT)],
+        PageCommand::Cut => vec![Event::Cut],
+        PageCommand::Copy => vec![Event::Copy],
+        PageCommand::Paste | PageCommand::PasteAsPlainText => clipboard::get_text()
+            .map(Event::Paste)
+            .into_iter()
+            .collect(),
+        PageCommand::Delete => vec![key(Key::Delete, Modifiers::NONE)],
+        PageCommand::SelectAll => vec![key(Key::A, Modifiers::COMMAND)],
+        _ => return None,
+    })
+}
+
 fn tab_of(event: &EngineEvent) -> Option<TabId> {
     match event {
         EngineEvent::UrlChanged { tab, .. }
@@ -646,6 +748,10 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
             }
             self.run_commands(commands, event_loop);
         } else if let Some(window) = self.windows.get_mut(&window_id) {
+            if matches!(event, WindowEvent::Focused(true)) {
+                // Another profile may have been created meanwhile.
+                self.profiles = self.browser.profile.others();
+            }
             let commands = window.handle_event(&self.browser, &self.keymap, &event);
             let drop = window.take_tab_drop();
             self.run_commands(commands, event_loop);
@@ -661,6 +767,10 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
             AppEvent::Wake => self.pump(event_loop),
+            AppEvent::Menu => {
+                self.menu_picks(event_loop);
+                self.pump(event_loop);
+            }
             AppEvent::ExitAfter(delay) => {
                 // What a smoke test reads: did the pages load.
                 let tabs: Vec<String> = self
@@ -689,6 +799,9 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.exiting {
             return;
+        }
+        if cfg!(target_os = "macos") {
+            self.sync_menu_bar();
         }
         let mut next = None;
         // The history is written a moment after it last changed.

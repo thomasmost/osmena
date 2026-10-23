@@ -164,6 +164,20 @@ impl<E: Engine> BrowserWindow<E> {
         self.window.has_focus()
     }
 
+    /// Whether a text field of the chrome (the address bar, the launcher,
+    /// a prompt) has the keyboard, so an editing command from the menu
+    /// bar is its rather than the page's.
+    pub fn egui_wants_keyboard(&self) -> bool {
+        self.egui.egui_ctx.egui_wants_keyboard_input()
+    }
+
+    /// Hand egui input events it did not get from the window (an editing
+    /// command from the menu bar, as the key presses it stands for).
+    pub fn inject_egui_events(&mut self, events: Vec<egui::Event>) {
+        self.egui.egui_winit.egui_input_mut().events.extend(events);
+        self.window.request_redraw();
+    }
+
     /// Tell the engine `tab` has focus, if this window does.
     pub fn focus_tab(&self, tab: TabId) {
         if self.has_focus() {

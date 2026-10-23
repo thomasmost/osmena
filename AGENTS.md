@@ -5,9 +5,9 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-10-22 (the new-tab launcher, history and its
-suggestions; earlier that day pointer modifiers, per-tab capture,
-repaint scheduling, dirty rectangles)._
+_Last updated: 2026-10-23 (the macOS menu bar; the day before, the
+new-tab launcher, history and its suggestions, pointer modifiers,
+per-tab capture, repaint scheduling, dirty rectangles)._
 
 ## Architecture
 
@@ -125,7 +125,17 @@ No engine is needed; the workspace builds in under a minute.
 - **Menus are native, the rest of the chrome is egui.** A menu is a
   `Vec<MenuEntry>` from `menus.rs`, shown by `native_menu::NativeMenu`
   after the frame is painted; the chrome only records a `MenuRequest`.
-  Add entries in `menus.rs` with a test.
+  Add entries in `menus.rs` with a test. The macOS menu bar is the same
+  data (`menus::menu_bar`, one `Submenu` per menu, `System` entries for
+  what the system does itself), shown by `native_menu::MenuBar`: the
+  shell rebuilds the entries in `about_to_wait` for the focused window
+  and the bar changes only when they differ. Every pick, from a popup
+  or the bar, lands in one queue (`install_event_handler`,
+  `take_menu_ids`); the bar's reach the shell as `AppEvent::Menu`. Its
+  Edit entries are `Command::Page`s with the standard chords, which
+  the bar intercepts before the window sees the keys: the shell hands
+  them to a focused egui text field as the key events they stand for
+  (`edit_events`), to the page otherwise.
 - **Key routing has one rule.** `osmena_chrome::input::route_key`, applied
   by `routing::KeyRouter`. Change it there, with a unit test.
 - **A held key or button belongs to the tab that got its press.**

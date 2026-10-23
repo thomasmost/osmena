@@ -27,7 +27,7 @@ Dependencies point only downwards.
 | --- | --- | --- | --- |
 | `osmena-core` | model | `Browser`/`Window`/`Tab`, `Command` and `dispatch`, `EngineEvent` and `apply`, `EngineInput`, keymap, settings, profiles, `Brand`, `EngineInfo`. Pure and unit-tested. | serde, url, keyboard-types |
 | `osmena-engine` | engine contract | The `Engine`, `TabHost`, and `Surface` traits, `PagePaint`, `Waker`, `EngineError`; with the `glutin` feature, a `Surface` for engines that paint into memory. | osmena-core, glow, raw-window-handle |
-| `osmena-chrome` | chrome | The egui tab strip, toolbar, status overlay and crash panel; the window and tab menus as data and as native popups; pointer and key routing; the icon and the fatal-error dialog. | osmena-core, egui, winit, muda |
+| `osmena-chrome` | chrome | The egui tab strip, toolbar, status overlay and crash panel; the window, tab and page menus and the macOS menu bar as data and as native menus; pointer and key routing; the icon and the fatal-error dialog. | osmena-core, egui, winit, muda |
 | `osmena-shell` | shell | The winit `App`, `BrowserWindow`, `SettingsWindow`, the process glue, and `run`. Generic over `Engine`. | osmena-chrome, osmena-engine, egui_glow |
 | `osmena-xtask` | tool | `icons`: renders a browser's `assets/logo.svg` into its icon set. | resvg |
 

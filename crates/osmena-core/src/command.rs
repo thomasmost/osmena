@@ -54,6 +54,9 @@ pub enum Command {
         tabs: Vec<TabId>,
         profile: String,
     },
+    /// Start a browser for `profile` (another process) on its new-window
+    /// page; nothing for the current profile.
+    OpenProfile(String),
     /// Put these tabs in a folder of their window (a new one, or one
     /// of its existing ones), together where the first of them is.
     MoveTabsToFolder {
@@ -377,6 +380,11 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
         Command::OpenTabsInProfile { tabs, profile } => {
             open_tabs_in_profile(browser, tabs, profile)
         }
+        Command::OpenProfile(profile) if *profile == browser.profile.name => Vec::new(),
+        Command::OpenProfile(profile) => vec![EngineAction::OpenInProfile {
+            profile: profile.clone(),
+            urls: Vec::new(),
+        }],
         Command::MoveTabsToFolder { tabs, folder } => {
             move_tabs_to_folder(browser, tabs, folder);
             Vec::new()
@@ -1903,6 +1911,20 @@ mod tests {
             .is_empty()
         );
         assert_eq!(b.windows, before);
+    }
+
+    #[test]
+    fn opening_another_profile_starts_it_with_no_tabs() {
+        let (mut b, _, _) = three_tabs();
+        assert_eq!(
+            dispatch(&mut b, &Command::OpenProfile("work".to_string())),
+            vec![EngineAction::OpenInProfile {
+                profile: "work".to_string(),
+                urls: Vec::new(),
+            }]
+        );
+        let own_profile = b.profile.name.clone();
+        assert!(dispatch(&mut b, &Command::OpenProfile(own_profile)).is_empty());
     }
 
     #[test]

@@ -4,6 +4,29 @@ All notable changes to the osmena crates. The crates version together.
 
 ## Unreleased
 
+### Added
+
+- The macOS menu bar: the application menu (About, Settings…,
+  Services, Hide, Hide Others, Show All, Quit), File, Edit, View,
+  History (Back, Forward, Home, Reopen Closed Tab, the ten most
+  recently visited pages), Bookmarks (Bookmark This Tab… and the
+  groups), Profiles (the current one checked, the others open a
+  browser for that profile), Tab and Window (the system's, with the
+  open windows). Every entry is a `Command` for the focused window or
+  one the system carries out; the shortcuts shown are the keymap's.
+  The Edit entries carry the standard chords and reach the page as
+  `PageCommand`s, or a focused text field of the chrome or the
+  settings window as the key presses they stand for. `menus::menu_bar`
+  builds it, `native_menu::MenuBar` shows it; the shell rebuilds it
+  after any event that changes what it shows.
+- `Command::OpenProfile`: start a browser for another profile with no
+  tabs (its new-window page). Nothing for the current profile.
+- `MenuEntry::Disabled` (an item that cannot be picked and has no
+  command) and `MenuEntry::System` (an item the system provides) for
+  the menu bar; `native_menu::install_event_handler` and
+  `take_menu_ids` route every menu pick through one queue the shell
+  drains, for popups and the menu bar alike.
+
 ### Changed
 
 - A new tab (Ctrl+T, the "+" button) no longer opens a blank page. It

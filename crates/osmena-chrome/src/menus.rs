@@ -5,8 +5,8 @@
 use keyboard_types::{Code, Modifiers};
 use osmena_core::{
     Bookmarks, Command, CommandKind, Extension, ExtensionSource, ExtensionSupport, FolderId,
-    KeyChord, Keymap, MediaKind, PageCommand, PageContext, PageTools, Platform, TabId, Window,
-    WindowId,
+    History, HistoryEntry, KeyChord, Keymap, LoadState, MediaKind, PageCommand, PageContext,
+    PageTools, Platform, TabId, Window, WindowId,
 };
 use url::Url;
 
@@ -33,7 +33,57 @@ pub enum MenuEntry {
         checked: bool,
         command: Command,
     },
+    /// An item that cannot be picked and has nothing to do: a window
+    /// action in a menu bar while no browser window is open.
+    Disabled {
+        label: String,
+        chord: Option<KeyChord>,
+    },
+    /// An item the system provides and carries out itself (the
+    /// application and Window menus of a macOS menu bar).
+    System {
+        label: String,
+        item: SystemItem,
+    },
     Separator,
+}
+
+/// The standard items a macOS menu bar takes from the system.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SystemItem {
+    About,
+    Services,
+    Hide,
+    HideOthers,
+    ShowAll,
+    Minimize,
+    Zoom,
+    BringAllToFront,
+}
+
+/// The label of the menu bar's Window menu. The system appends the open
+/// windows to the submenu with this label.
+pub const WINDOW_MENU_LABEL: &str = "Window";
+
+/// How many pages the menu bar's History menu lists, most recent first.
+pub const RECENT_HISTORY: usize = 10;
+
+/// What the menu bar is built from.
+pub struct MenuBarInput<'a> {
+    /// The product name, for "About …", "Hide …" and "Quit …".
+    pub brand: &'a str,
+    /// The browser window the menus act on (the focused one). `None`
+    /// when no browser window is open: the entries that need one are
+    /// disabled.
+    pub window: Option<&'a Window>,
+    pub keymap: &'a Keymap,
+    /// Whether a closed tab is there to reopen.
+    pub can_reopen: bool,
+    pub bookmarks: &'a Bookmarks,
+    pub history: &'a History,
+    /// The other profiles on this machine.
+    pub profiles: &'a [String],
+    pub current_profile: &'a str,
 }
 
 impl MenuEntry {
@@ -97,44 +147,312 @@ fn bookmarks_menu(window: WindowId, bookmarks: &Bookmarks) -> MenuEntry {
     MenuEntry::Submenu {
         label: "Bookmarks".to_string(),
         enabled: !bookmarks.groups.is_empty(),
-        entries: bookmarks
-            .groups
-            .iter()
-            .map(|group| {
-                let mut entries = vec![
-                    MenuEntry::item(
-                        format!("Open all ({})", group.bookmarks.len()),
-                        !group.bookmarks.is_empty(),
-                        Command::OpenBookmarkGroup {
-                            window,
-                            group: group.name.clone(),
-                        },
-                    ),
-                    MenuEntry::Separator,
-                ];
-                entries.extend(group.bookmarks.iter().map(|b| {
-                    let label = if b.title.is_empty() {
-                        b.url.to_string()
-                    } else {
-                        b.title.clone()
-                    };
-                    MenuEntry::item(
-                        label,
-                        true,
-                        Command::NewTab {
-                            window,
-                            url: Some(b.url.clone()),
-                        },
-                    )
-                }));
-                MenuEntry::Submenu {
-                    label: group.name.clone(),
-                    enabled: true,
-                    entries,
-                }
-            })
-            .collect(),
+        entries: bookmark_groups(window, bookmarks),
     }
+}
+
+/// One submenu per bookmark group, holding "Open all" and one entry per
+/// page (a new tab of `window`).
+fn bookmark_groups(window: WindowId, bookmarks: &Bookmarks) -> Vec<MenuEntry> {
+    bookmarks
+        .groups
+        .iter()
+        .map(|group| {
+            let mut entries = vec![
+                MenuEntry::item(
+                    format!("Open all ({})", group.bookmarks.len()),
+                    !group.bookmarks.is_empty(),
+                    Command::OpenBookmarkGroup {
+                        window,
+                        group: group.name.clone(),
+                    },
+                ),
+                MenuEntry::Separator,
+            ];
+            entries.extend(group.bookmarks.iter().map(|b| {
+                let label = if b.title.is_empty() {
+                    b.url.to_string()
+                } else {
+                    b.title.clone()
+                };
+                MenuEntry::item(
+                    label,
+                    true,
+                    Command::NewTab {
+                        window,
+                        url: Some(b.url.clone()),
+                    },
+                )
+            }));
+            MenuEntry::Submenu {
+                label: group.name.clone(),
+                enabled: true,
+                entries,
+            }
+        })
+        .collect()
+}
+
+/// The application's menu bar, as macOS shows it: the application menu
+/// (named by the system after the bundle), then File, Edit, View,
+/// History, Bookmarks, Profiles, Tab and Window. Every entry is a
+/// `Command` for the focused window or one the system carries out
+/// itself; the shortcuts shown are the keymap's, so the menu bar and the
+/// keyboard agree, and the Edit entries carry the standard editing
+/// chords. Without a browser window only the window-free entries are
+/// enabled.
+pub fn menu_bar(input: &MenuBarInput<'_>) -> Vec<MenuEntry> {
+    let MenuBarInput {
+        brand,
+        window,
+        keymap,
+        can_reopen,
+        bookmarks,
+        history,
+        profiles,
+        current_profile,
+    } = *input;
+    let ids = window.map(|w| (w.id, w.active));
+    let active = window.map(Window::active_tab);
+    let system = |label: String, item: SystemItem| MenuEntry::System { label, item };
+    // A keymap action with its chord: for the whole application, or
+    // for the focused window (disabled without one).
+    let global = |kind: CommandKind, label: &str, command: Command| MenuEntry::Item {
+        label: label.to_string(),
+        enabled: true,
+        chord: keymap.chord_for(kind),
+        command,
+    };
+    let bound = |kind: CommandKind, label: &str, enabled: bool| match ids {
+        Some((window, tab)) => MenuEntry::Item {
+            label: label.to_string(),
+            enabled,
+            chord: keymap.chord_for(kind),
+            command: kind.into_command(window, tab),
+        },
+        None => MenuEntry::Disabled {
+            label: label.to_string(),
+            chord: keymap.chord_for(kind),
+        },
+    };
+    // A command on the active tab, without a chord.
+    let on_tab = |label: &str, enabled: bool, command: fn(TabId) -> Command| match ids {
+        Some((_, tab)) => MenuEntry::Item {
+            label: label.to_string(),
+            enabled,
+            chord: None,
+            command: command(tab),
+        },
+        None => MenuEntry::Disabled {
+            label: label.to_string(),
+            chord: None,
+        },
+    };
+    let edit = |label: &str, modifiers: Modifiers, code: Code, command: PageCommand| match ids {
+        Some((_, tab)) => MenuEntry::Item {
+            label: label.to_string(),
+            enabled: true,
+            chord: Some(KeyChord::new(modifiers, code)),
+            command: Command::Page { tab, command },
+        },
+        None => MenuEntry::Disabled {
+            label: label.to_string(),
+            chord: Some(KeyChord::new(modifiers, code)),
+        },
+    };
+    let menu = |label: &str, entries: Vec<MenuEntry>| MenuEntry::Submenu {
+        label: label.to_string(),
+        enabled: true,
+        entries,
+    };
+    let loading = active.is_some_and(|t| t.load == LoadState::Loading);
+    let several_tabs = window.is_some_and(|w| w.tabs.len() > 1);
+    let cmd = Modifiers::META;
+    let cmd_shift = Modifiers::META | Modifiers::SHIFT;
+    let cmd_alt_shift = Modifiers::META | Modifiers::ALT | Modifiers::SHIFT;
+
+    let mut recent: Vec<&HistoryEntry> = history.entries().iter().collect();
+    recent.sort_by_key(|entry| std::cmp::Reverse(entry.last_visit));
+    recent.truncate(RECENT_HISTORY);
+    let mut history_menu = vec![
+        bound(
+            CommandKind::Back,
+            "Back",
+            active.is_some_and(|t| t.can_go_back),
+        ),
+        bound(
+            CommandKind::Forward,
+            "Forward",
+            active.is_some_and(|t| t.can_go_forward),
+        ),
+        bound(CommandKind::Home, "Home", true),
+        MenuEntry::Separator,
+        bound(
+            CommandKind::ReopenClosedTab,
+            "Reopen Closed Tab",
+            can_reopen,
+        ),
+    ];
+    if !recent.is_empty() {
+        history_menu.push(MenuEntry::Separator);
+    }
+    for entry in recent {
+        let label = if entry.title.is_empty() {
+            entry.url.to_string()
+        } else {
+            entry.title.clone()
+        };
+        history_menu.push(match ids {
+            Some((_, tab)) => MenuEntry::item(
+                label,
+                true,
+                Command::Navigate {
+                    tab,
+                    url: entry.url.clone(),
+                },
+            ),
+            None => MenuEntry::Disabled { label, chord: None },
+        });
+    }
+
+    let mut bookmarks_menu = vec![
+        on_tab("Bookmark This Tab…", true, |tab| {
+            Command::PromptBookmarkTabs(vec![tab])
+        }),
+        MenuEntry::Separator,
+    ];
+    match ids {
+        Some((window, _)) if !bookmarks.groups.is_empty() => {
+            bookmarks_menu.extend(bookmark_groups(window, bookmarks));
+        }
+        _ => bookmarks_menu.push(MenuEntry::Disabled {
+            label: "No Bookmarks".to_string(),
+            chord: None,
+        }),
+    }
+
+    let mut profiles_menu = vec![
+        MenuEntry::Check {
+            label: current_profile.to_string(),
+            enabled: false,
+            checked: true,
+            command: Command::OpenProfile(current_profile.to_string()),
+        },
+        MenuEntry::Separator,
+    ];
+    if profiles.is_empty() {
+        profiles_menu.push(MenuEntry::Disabled {
+            label: "No Other Profiles".to_string(),
+            chord: None,
+        });
+    }
+    for profile in profiles {
+        profiles_menu.push(MenuEntry::item(
+            profile.clone(),
+            true,
+            Command::OpenProfile(profile.clone()),
+        ));
+    }
+
+    vec![
+        menu(
+            brand,
+            vec![
+                system(format!("About {brand}"), SystemItem::About),
+                MenuEntry::Separator,
+                global(
+                    CommandKind::OpenSettings,
+                    "Settings…",
+                    Command::OpenSettings,
+                ),
+                MenuEntry::Separator,
+                system("Services".to_string(), SystemItem::Services),
+                MenuEntry::Separator,
+                system(format!("Hide {brand}"), SystemItem::Hide),
+                system("Hide Others".to_string(), SystemItem::HideOthers),
+                system("Show All".to_string(), SystemItem::ShowAll),
+                MenuEntry::Separator,
+                global(CommandKind::Quit, &format!("Quit {brand}"), Command::Quit),
+            ],
+        ),
+        menu(
+            "File",
+            vec![
+                bound(CommandKind::NewTab, "New Tab", true),
+                global(CommandKind::NewWindow, "New Window", Command::NewWindow),
+                bound(
+                    CommandKind::ReopenClosedTab,
+                    "Reopen Closed Tab",
+                    can_reopen,
+                ),
+                MenuEntry::Separator,
+                bound(CommandKind::CloseTab, "Close Tab", true),
+                bound(CommandKind::CloseWindow, "Close Window", true),
+            ],
+        ),
+        menu(
+            "Edit",
+            vec![
+                edit("Undo", cmd, Code::KeyZ, PageCommand::Undo),
+                edit("Redo", cmd_shift, Code::KeyZ, PageCommand::Redo),
+                MenuEntry::Separator,
+                edit("Cut", cmd, Code::KeyX, PageCommand::Cut),
+                edit("Copy", cmd, Code::KeyC, PageCommand::Copy),
+                edit("Paste", cmd, Code::KeyV, PageCommand::Paste),
+                edit(
+                    "Paste and Match Style",
+                    cmd_alt_shift,
+                    Code::KeyV,
+                    PageCommand::PasteAsPlainText,
+                ),
+                on_tab("Delete", true, |tab| Command::Page {
+                    tab,
+                    command: PageCommand::Delete,
+                }),
+                edit("Select All", cmd, Code::KeyA, PageCommand::SelectAll),
+            ],
+        ),
+        menu(
+            "View",
+            vec![
+                bound(CommandKind::Reload, "Reload Page", true),
+                bound(CommandKind::Stop, "Stop Loading", loading),
+                MenuEntry::Separator,
+                bound(CommandKind::FocusAddressBar, "Open Location…", true),
+                MenuEntry::Separator,
+                bound(CommandKind::ToggleFullscreen, "Toggle Full Screen", true),
+            ],
+        ),
+        menu("History", history_menu),
+        menu("Bookmarks", bookmarks_menu),
+        menu("Profiles", profiles_menu),
+        menu(
+            "Tab",
+            vec![
+                bound(CommandKind::NextTab, "Show Next Tab", several_tabs),
+                bound(CommandKind::PreviousTab, "Show Previous Tab", several_tabs),
+                MenuEntry::Separator,
+                on_tab("Move Tab to New Window", several_tabs, |tab| {
+                    Command::MoveTabsToNewWindow(vec![tab])
+                }),
+                on_tab("Move Tab to Folder…", true, |tab| {
+                    Command::PromptMoveToFolder(vec![tab])
+                }),
+            ],
+        ),
+        menu(
+            WINDOW_MENU_LABEL,
+            vec![
+                system("Minimize".to_string(), SystemItem::Minimize),
+                system("Zoom".to_string(), SystemItem::Zoom),
+                MenuEntry::Separator,
+                system(
+                    "Bring All to Front".to_string(),
+                    SystemItem::BringAllToFront,
+                ),
+            ],
+        ),
+    ]
 }
 
 /// The context menu of a folder in the strip.
@@ -696,7 +1014,9 @@ mod tests {
             .map(|e| match e {
                 MenuEntry::Item { label, .. }
                 | MenuEntry::Submenu { label, .. }
-                | MenuEntry::Check { label, .. } => label.clone(),
+                | MenuEntry::Check { label, .. }
+                | MenuEntry::Disabled { label, .. }
+                | MenuEntry::System { label, .. } => label.clone(),
                 MenuEntry::Separator => "-".to_string(),
             })
             .collect()
@@ -709,7 +1029,8 @@ mod tests {
                 MenuEntry::Item { enabled, .. }
                 | MenuEntry::Submenu { enabled, .. }
                 | MenuEntry::Check { enabled, .. } => *enabled,
-                MenuEntry::Separator => true,
+                MenuEntry::Disabled { .. } => false,
+                MenuEntry::System { .. } | MenuEntry::Separator => true,
             })
             .collect()
     }
@@ -1085,7 +1406,9 @@ mod page_menu_tests {
             .map(|e| match e {
                 MenuEntry::Item { label, .. }
                 | MenuEntry::Submenu { label, .. }
-                | MenuEntry::Check { label, .. } => label.clone(),
+                | MenuEntry::Check { label, .. }
+                | MenuEntry::Disabled { label, .. }
+                | MenuEntry::System { label, .. } => label.clone(),
                 MenuEntry::Separator => "-".to_string(),
             })
             .collect()
@@ -1110,6 +1433,7 @@ mod page_menu_tests {
         entries
             .iter()
             .find_map(|e| match e {
+                MenuEntry::Disabled { label: l, .. } if l == label => Some(false),
                 MenuEntry::Item {
                     label: l, enabled, ..
                 }
@@ -1510,6 +1834,213 @@ mod page_menu_tests {
         let entries = menu(&none, &PageTools::NONE, Platform::Windows);
         assert_eq!(labels(&entries)[0], "No spelling suggestions");
         assert!(!is_enabled(&entries, "No spelling suggestions"));
+    }
+
+    fn submenu<'a>(entries: &'a [MenuEntry], name: &str) -> &'a [MenuEntry] {
+        entries
+            .iter()
+            .find_map(|e| match e {
+                MenuEntry::Submenu { label, entries, .. } if label == name => Some(&entries[..]),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no menu {name:?} in {:?}", labels(entries)))
+    }
+
+    fn chord(entries: &[MenuEntry], label: &str) -> Option<KeyChord> {
+        entries.iter().find_map(|e| match e {
+            MenuEntry::Item {
+                label: l, chord, ..
+            }
+            | MenuEntry::Disabled { label: l, chord }
+                if l == label =>
+            {
+                *chord
+            }
+            _ => None,
+        })
+    }
+
+    fn menu_bar_input<'a>(
+        window: Option<&'a Window>,
+        keymap: &'a Keymap,
+        history: &'a History,
+        bookmarks: &'a Bookmarks,
+        profiles: &'a [String],
+    ) -> MenuBarInput<'a> {
+        MenuBarInput {
+            brand: "Test",
+            window,
+            keymap,
+            can_reopen: false,
+            bookmarks,
+            history,
+            profiles,
+            current_profile: "default",
+        }
+    }
+
+    #[test]
+    fn the_menu_bar_is_the_application_menu_then_the_eight_menus() {
+        let mut w = Window::with_tab(
+            WindowId(1),
+            Tab::new(TabId(1), Url::parse("https://a.example/").unwrap()),
+        );
+        w.tabs.push(Tab::new(
+            TabId(2),
+            Url::parse("https://b.example/").unwrap(),
+        ));
+        let keymap = Keymap::defaults(Platform::MacOs);
+        let mut history = History::default();
+        let old = Url::parse("https://old.example/").unwrap();
+        let new = Url::parse("https://new.example/").unwrap();
+        history.record(&old, "Old", 10);
+        history.record(&new, "New", 20);
+        let bookmarks = Bookmarks::default();
+        let profiles = vec!["work".to_string()];
+        let entries = menu_bar(&menu_bar_input(
+            Some(&w),
+            &keymap,
+            &history,
+            &bookmarks,
+            &profiles,
+        ));
+        assert_eq!(
+            labels(&entries),
+            [
+                "Test",
+                "File",
+                "Edit",
+                "View",
+                "History",
+                "Bookmarks",
+                "Profiles",
+                "Tab",
+                WINDOW_MENU_LABEL
+            ]
+        );
+
+        // The application menu: the system's items around ours.
+        let app = submenu(&entries, "Test");
+        assert!(matches!(
+            app[0],
+            MenuEntry::System {
+                item: SystemItem::About,
+                ..
+            }
+        ));
+        assert_eq!(labels(app)[0], "About Test");
+        assert_eq!(command(app, "Settings…"), Command::OpenSettings);
+        assert_eq!(command(app, "Quit Test"), Command::Quit);
+        assert_eq!(chord(app, "Quit Test"), keymap.chord_for(CommandKind::Quit));
+
+        // File acts on the window with the keymap's chords.
+        let file = submenu(&entries, "File");
+        assert_eq!(
+            command(file, "New Tab"),
+            Command::NewTab {
+                window: w.id,
+                url: None,
+            }
+        );
+        assert_eq!(
+            chord(file, "New Tab"),
+            keymap.chord_for(CommandKind::NewTab)
+        );
+        assert_eq!(command(file, "Close Tab"), Command::CloseTab(TabId(1)));
+        assert!(!is_enabled(file, "Reopen Closed Tab"));
+
+        // Edit is the page's, with the standard chords.
+        let edit = submenu(&entries, "Edit");
+        assert_eq!(
+            command(edit, "Copy"),
+            Command::Page {
+                tab: TabId(1),
+                command: PageCommand::Copy,
+            }
+        );
+        assert_eq!(
+            chord(edit, "Copy"),
+            Some(KeyChord::new(Modifiers::META, Code::KeyC))
+        );
+        assert_eq!(
+            chord(edit, "Redo"),
+            Some(KeyChord::new(
+                Modifiers::META | Modifiers::SHIFT,
+                Code::KeyZ
+            ))
+        );
+
+        // View knows the tab is not loading.
+        let view = submenu(&entries, "View");
+        assert!(!is_enabled(view, "Stop Loading"));
+        assert!(is_enabled(view, "Reload Page"));
+
+        // History: nothing to go back to, the recent pages newest first.
+        let history_menu = submenu(&entries, "History");
+        assert!(!is_enabled(history_menu, "Back"));
+        let names = labels(history_menu);
+        assert_eq!(&names[names.len() - 2..], ["New", "Old"]);
+        assert_eq!(
+            command(history_menu, "New"),
+            Command::Navigate {
+                tab: TabId(1),
+                url: new,
+            }
+        );
+
+        // Bookmarks with none, Profiles with the current one checked.
+        let bookmarks_menu = submenu(&entries, "Bookmarks");
+        assert_eq!(
+            command(bookmarks_menu, "Bookmark This Tab…"),
+            Command::PromptBookmarkTabs(vec![TabId(1)])
+        );
+        assert!(!is_enabled(bookmarks_menu, "No Bookmarks"));
+        let profiles_menu = submenu(&entries, "Profiles");
+        assert!(!is_enabled(profiles_menu, "default"));
+        assert_eq!(
+            command(profiles_menu, "work"),
+            Command::OpenProfile("work".to_string())
+        );
+
+        // Tab: two tabs, so moving one out is possible.
+        let tab = submenu(&entries, "Tab");
+        assert_eq!(
+            command(tab, "Move Tab to New Window"),
+            Command::MoveTabsToNewWindow(vec![TabId(1)])
+        );
+        assert!(is_enabled(tab, "Show Next Tab"));
+
+        // Window is the system's.
+        let window_menu = submenu(&entries, WINDOW_MENU_LABEL);
+        assert!(matches!(
+            window_menu[0],
+            MenuEntry::System {
+                item: SystemItem::Minimize,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn without_a_window_the_menu_bar_keeps_only_what_needs_none() {
+        let keymap = Keymap::defaults(Platform::MacOs);
+        let history = History::default();
+        let bookmarks = Bookmarks::default();
+        let entries = menu_bar(&menu_bar_input(None, &keymap, &history, &bookmarks, &[]));
+        let file = submenu(&entries, "File");
+        assert!(!is_enabled(file, "New Tab"));
+        assert!(is_enabled(file, "New Window"));
+        // A disabled entry still shows its shortcut.
+        assert_eq!(
+            chord(file, "New Tab"),
+            keymap.chord_for(CommandKind::NewTab)
+        );
+        assert!(!is_enabled(submenu(&entries, "Edit"), "Copy"));
+        assert!(is_enabled(submenu(&entries, "Test"), "Quit Test"));
+        assert!(!is_enabled(
+            submenu(&entries, "Profiles"),
+            "No Other Profiles"
+        ));
     }
 
     #[test]

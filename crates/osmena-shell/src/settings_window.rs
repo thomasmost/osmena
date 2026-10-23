@@ -140,6 +140,18 @@ impl<S: Surface> SettingsWindow<S> {
         self.window.request_redraw();
     }
 
+    /// The native window has keyboard focus.
+    pub fn has_focus(&self) -> bool {
+        self.window.has_focus()
+    }
+
+    /// Hand egui input events it did not get from the window (an editing
+    /// command from the menu bar, as the key presses it stands for).
+    pub fn inject_egui_events(&mut self, events: Vec<egui::Event>) {
+        self.egui.egui_winit.egui_input_mut().events.extend(events);
+        self.window.request_redraw();
+    }
+
     /// Request a redraw if egui wants one now, and return when it wants
     /// the next one otherwise, for the event loop to wait until.
     pub fn redraw_deadline(&mut self) -> Option<Instant> {
