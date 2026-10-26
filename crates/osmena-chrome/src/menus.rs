@@ -3,10 +3,11 @@
 //! turns an entry list into a native menu and maps the click back.
 
 use keyboard_types::{Code, Modifiers};
+use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
     Bookmarks, Command, CommandKind, Extension, ExtensionSource, ExtensionSupport, FolderId,
     History, HistoryEntry, KeyChord, Keymap, LoadState, MediaKind, PageCommand, PageContext,
-    PageTools, Platform, TabId, Window, WindowId,
+    PageTools, Platform, ProfileEntry, TabId, Window, WindowId,
 };
 use url::Url;
 
@@ -81,9 +82,19 @@ pub struct MenuBarInput<'a> {
     pub can_reopen: bool,
     pub bookmarks: &'a Bookmarks,
     pub history: &'a History,
+    /// The current profile: its directory name and its display name.
+    pub profile: CurrentProfile<'a>,
     /// The other profiles on this machine.
-    pub profiles: &'a [String],
-    pub current_profile: &'a str,
+    pub profiles: &'a [ProfileEntry],
+}
+
+/// The profile this browser runs, as the Profiles menu names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CurrentProfile<'a> {
+    /// The directory name (`--profile <dir>`).
+    pub dir: &'a str,
+    /// The display name.
+    pub name: &'a str,
 }
 
 impl MenuEntry {
@@ -209,8 +220,8 @@ pub fn menu_bar(input: &MenuBarInput<'_>) -> Vec<MenuEntry> {
         can_reopen,
         bookmarks,
         history,
+        profile,
         profiles,
-        current_profile,
     } = *input;
     let ids = window.map(|w| (w.id, w.active));
     let active = window.map(Window::active_tab);
@@ -331,28 +342,7 @@ pub fn menu_bar(input: &MenuBarInput<'_>) -> Vec<MenuEntry> {
         }),
     }
 
-    let mut profiles_menu = vec![
-        MenuEntry::Check {
-            label: current_profile.to_string(),
-            enabled: false,
-            checked: true,
-            command: Command::OpenProfile(current_profile.to_string()),
-        },
-        MenuEntry::Separator,
-    ];
-    if profiles.is_empty() {
-        profiles_menu.push(MenuEntry::Disabled {
-            label: "No Other Profiles".to_string(),
-            chord: None,
-        });
-    }
-    for profile in profiles {
-        profiles_menu.push(MenuEntry::item(
-            profile.clone(),
-            true,
-            Command::OpenProfile(profile.clone()),
-        ));
-    }
+    let profiles_menu = profiles_menu(ids.map(|(window, _)| window), profile, profiles);
 
     vec![
         menu(
@@ -453,6 +443,78 @@ pub fn menu_bar(input: &MenuBarInput<'_>) -> Vec<MenuEntry> {
             ],
         ),
     ]
+}
+
+/// The Profiles menu, behind the toolbar's avatar button and in the
+/// menu bar: the current profile (checked) and "Edit…" for it, the
+/// other profiles (each opens a browser for it), "Add Profile…", and a
+/// "Delete Profile" submenu of the others and, when it is not the
+/// default, the current one. The dialogs need a browser window
+/// (`window`); without one their entries are disabled.
+pub fn profiles_menu(
+    window: Option<WindowId>,
+    current: CurrentProfile<'_>,
+    others: &[ProfileEntry],
+) -> Vec<MenuEntry> {
+    let in_window = |label: &str, command: fn(WindowId) -> Command| match window {
+        Some(window) => MenuEntry::item(label, true, command(window)),
+        None => MenuEntry::Disabled {
+            label: label.to_string(),
+            chord: None,
+        },
+    };
+    let mut entries = vec![
+        MenuEntry::Check {
+            label: current.name.to_string(),
+            enabled: false,
+            checked: true,
+            command: Command::OpenProfile(current.dir.to_string()),
+        },
+        in_window("Edit…", Command::PromptEditProfile),
+        MenuEntry::Separator,
+    ];
+    if others.is_empty() {
+        entries.push(MenuEntry::Disabled {
+            label: "No Other Profiles".to_string(),
+            chord: None,
+        });
+    }
+    for other in others {
+        entries.push(MenuEntry::item(
+            other.name.clone(),
+            true,
+            Command::OpenProfile(other.dir.clone()),
+        ));
+    }
+    entries.push(MenuEntry::Separator);
+    entries.push(in_window("Add Profile…", Command::PromptAddProfile));
+    let deletable: Vec<(&str, &str)> = others
+        .iter()
+        .map(|p| (p.dir.as_str(), p.name.as_str()))
+        .chain((current.dir != DEFAULT_PROFILE_NAME).then_some((current.dir, current.name)))
+        .filter(|(dir, _)| *dir != DEFAULT_PROFILE_NAME)
+        .collect();
+    entries.push(MenuEntry::Submenu {
+        label: "Delete Profile".to_string(),
+        enabled: window.is_some() && !deletable.is_empty(),
+        entries: match window {
+            Some(window) => deletable
+                .iter()
+                .map(|(dir, name)| {
+                    MenuEntry::item(
+                        *name,
+                        true,
+                        Command::PromptDeleteProfile {
+                            window,
+                            profile: dir.to_string(),
+                        },
+                    )
+                })
+                .collect(),
+            None => Vec::new(),
+        },
+    });
+    entries
 }
 
 /// The context menu of a folder in the strip.
@@ -902,7 +964,7 @@ pub fn tab_menu(
     window: &Window,
     targets: &[TabId],
     others: &[(WindowId, String)],
-    profiles: &[String],
+    profiles: &[ProfileEntry],
 ) -> Vec<MenuEntry> {
     let count = targets.len();
     let plural = |one: &str, many: &str| {
@@ -973,13 +1035,13 @@ pub fn tab_menu(
             enabled: !profiles.is_empty(),
             entries: profiles
                 .iter()
-                .map(|name| {
+                .map(|profile| {
                     MenuEntry::item(
-                        name.clone(),
+                        profile.name.clone(),
                         true,
                         Command::OpenTabsInProfile {
                             tabs: targets.to_vec(),
-                            profile: name.clone(),
+                            profile: profile.dir.clone(),
                         },
                     )
                 })
@@ -993,6 +1055,16 @@ mod tests {
     use super::*;
     use osmena_core::{Platform, Tab};
     use url::Url;
+
+    /// Another profile, in directory `work`, called "Work Stuff".
+    fn work_profile() -> ProfileEntry {
+        ProfileEntry {
+            dir: "work".to_string(),
+            name: "Work Stuff".to_string(),
+            avatar: osmena_core::Avatar::Whale,
+            color: osmena_core::ChromeColor::Plum,
+        }
+    }
 
     fn window_with(n: u64) -> Window {
         let mut w = Window::with_tab(
@@ -1303,7 +1375,7 @@ mod tests {
             &w,
             &[TabId(2)],
             &[(WindowId(7), "Other".to_string())],
-            &["work".to_string()],
+            &[work_profile()],
         );
         assert_eq!(
             labels(&entries),
@@ -1438,6 +1510,9 @@ mod page_menu_tests {
                     label: l, enabled, ..
                 }
                 | MenuEntry::Check {
+                    label: l, enabled, ..
+                }
+                | MenuEntry::Submenu {
                     label: l, enabled, ..
                 } if l == label => Some(*enabled),
                 _ => None,
@@ -1860,12 +1935,22 @@ mod page_menu_tests {
         })
     }
 
+    /// Another profile, in directory `work`, called "Work Stuff".
+    fn work_profile() -> ProfileEntry {
+        ProfileEntry {
+            dir: "work".to_string(),
+            name: "Work Stuff".to_string(),
+            avatar: osmena_core::Avatar::Whale,
+            color: osmena_core::ChromeColor::Plum,
+        }
+    }
+
     fn menu_bar_input<'a>(
         window: Option<&'a Window>,
         keymap: &'a Keymap,
         history: &'a History,
         bookmarks: &'a Bookmarks,
-        profiles: &'a [String],
+        profiles: &'a [ProfileEntry],
     ) -> MenuBarInput<'a> {
         MenuBarInput {
             brand: "Test",
@@ -1874,8 +1959,11 @@ mod page_menu_tests {
             can_reopen: false,
             bookmarks,
             history,
+            profile: CurrentProfile {
+                dir: "default",
+                name: "Default",
+            },
             profiles,
-            current_profile: "default",
         }
     }
 
@@ -1896,7 +1984,7 @@ mod page_menu_tests {
         history.record(&old, "Old", 10);
         history.record(&new, "New", 20);
         let bookmarks = Bookmarks::default();
-        let profiles = vec!["work".to_string()];
+        let profiles = vec![work_profile()];
         let entries = menu_bar(&menu_bar_input(
             Some(&w),
             &keymap,
@@ -1996,10 +2084,14 @@ mod page_menu_tests {
         );
         assert!(!is_enabled(bookmarks_menu, "No Bookmarks"));
         let profiles_menu = submenu(&entries, "Profiles");
-        assert!(!is_enabled(profiles_menu, "default"));
+        assert!(!is_enabled(profiles_menu, "Default"));
         assert_eq!(
-            command(profiles_menu, "work"),
+            command(profiles_menu, "Work Stuff"),
             Command::OpenProfile("work".to_string())
+        );
+        assert_eq!(
+            command(profiles_menu, "Edit…"),
+            Command::PromptEditProfile(w.id)
         );
 
         // Tab: two tabs, so moving one out is possible.
@@ -2037,10 +2129,87 @@ mod page_menu_tests {
         );
         assert!(!is_enabled(submenu(&entries, "Edit"), "Copy"));
         assert!(is_enabled(submenu(&entries, "Test"), "Quit Test"));
-        assert!(!is_enabled(
-            submenu(&entries, "Profiles"),
-            "No Other Profiles"
+        let profiles = submenu(&entries, "Profiles");
+        assert!(!is_enabled(profiles, "No Other Profiles"));
+        assert!(!is_enabled(profiles, "Edit…"));
+        assert!(!is_enabled(profiles, "Add Profile…"));
+        assert!(!is_enabled(profiles, "Delete Profile"));
+    }
+
+    #[test]
+    fn the_profiles_menu_lists_the_current_the_others_and_the_actions() {
+        let window = WindowId(3);
+        let others = vec![
+            ProfileEntry {
+                dir: "default".to_string(),
+                name: "Default".to_string(),
+                avatar: osmena_core::Avatar::Initial,
+                color: osmena_core::ChromeColor::Shell,
+            },
+            work_profile(),
+        ];
+        let current = CurrentProfile {
+            dir: "play",
+            name: "Play",
+        };
+        let entries = profiles_menu(Some(window), current, &others);
+        assert_eq!(
+            labels(&entries),
+            [
+                "Play",
+                "Edit…",
+                "-",
+                "Default",
+                "Work Stuff",
+                "-",
+                "Add Profile…",
+                "Delete Profile"
+            ]
+        );
+        assert!(matches!(
+            &entries[0],
+            MenuEntry::Check {
+                enabled: false,
+                checked: true,
+                ..
+            }
         ));
+        assert_eq!(
+            command(&entries, "Edit…"),
+            Command::PromptEditProfile(window)
+        );
+        assert_eq!(
+            command(&entries, "Work Stuff"),
+            Command::OpenProfile("work".to_string())
+        );
+        assert_eq!(
+            command(&entries, "Add Profile…"),
+            Command::PromptAddProfile(window)
+        );
+        // Deletable: the others but the default profile, then the
+        // current one.
+        let delete = submenu(&entries, "Delete Profile");
+        assert_eq!(labels(delete), ["Work Stuff", "Play"]);
+        assert_eq!(
+            command(delete, "Play"),
+            Command::PromptDeleteProfile {
+                window,
+                profile: "play".to_string(),
+            }
+        );
+
+        // The default profile alone: nothing to delete, nothing to open.
+        let alone = profiles_menu(
+            Some(window),
+            CurrentProfile {
+                dir: "default",
+                name: "Default",
+            },
+            &[],
+        );
+        assert!(!is_enabled(&alone, "No Other Profiles"));
+        assert!(!is_enabled(&alone, "Delete Profile"));
+        assert!(is_enabled(&alone, "Add Profile…"));
     }
 
     #[test]

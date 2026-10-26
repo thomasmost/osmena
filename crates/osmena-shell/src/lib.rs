@@ -18,6 +18,7 @@ mod app;
 mod clipboard;
 mod page;
 pub mod process;
+mod profiles;
 mod repaint;
 mod settings_window;
 mod window;
@@ -136,16 +137,20 @@ pub fn run<E: Engine>(launch: Launch<E>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let bookmarks = match Bookmarks::load(&profile.bookmarks_path()) {
+    let mut browser = Browser::new(profile, settings);
+    // The default profile's file when this profile shares its bookmarks.
+    let bookmarks_path = browser.bookmarks_path();
+    let bookmarks = match Bookmarks::load(&bookmarks_path) {
         Ok(b) => b,
         Err(e) => {
             report_fatal(
                 brand,
-                &format!("{bin}: {e} (in {})", profile.bookmarks_path().display()),
+                &format!("{bin}: {e} (in {})", bookmarks_path.display()),
             );
             return ExitCode::FAILURE;
         }
     };
+    let profile = &browser.profile;
     // A history that cannot be read is not worth refusing to start over:
     // it is logged and starts empty (the file is replaced on the next
     // visit).
@@ -159,7 +164,6 @@ pub fn run<E: Engine>(launch: Launch<E>) -> ExitCode {
             History::default()
         }
     };
-    let mut browser = Browser::new(profile, settings);
     browser.bookmarks = bookmarks;
     browser.history = history;
     let first: Url = urls.first().cloned().unwrap_or_else(|| browser.homepage());

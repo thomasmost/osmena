@@ -12,8 +12,8 @@ use osmena_chrome::input::{self, KeyRoute};
 use osmena_chrome::keyboard_types::{Code, Modifiers};
 use osmena_chrome::{icon, keyutils, theme};
 use osmena_core::{
-    Brand, ChromeColor, Command, CommandKind, Extension, ExtensionSource, ExtensionSupport,
-    KeyChord, Keymap, Platform, Settings,
+    Brand, Command, CommandKind, Extension, ExtensionSource, ExtensionSupport, KeyChord, Keymap,
+    Platform, Settings,
 };
 use osmena_engine::{Engine, EngineError, PhysicalSize, Surface};
 use winit::dpi::LogicalSize;
@@ -588,30 +588,16 @@ fn draw_general(ui: &mut egui::Ui, settings: &mut Settings, activity: &mut FormA
             ui.end_row();
 
             ui.label("Chrome colour");
-            ui.horizontal(|ui| {
-                for color in ChromeColor::ALL {
-                    let [r, g, b] = color.rgb();
-                    let selected = settings.chrome_color == color;
-                    let stroke = if selected {
-                        egui::Stroke::new(2.0_f32, ui.visuals().strong_text_color())
-                    } else {
-                        egui::Stroke::new(1.0_f32, egui::Color32::from_black_alpha(40))
-                    };
-                    let swatch = ui
-                        .add(
-                            egui::Button::new("")
-                                .fill(egui::Color32::from_rgb(r, g, b))
-                                .stroke(stroke)
-                                .corner_radius(theme::CORNER)
-                                .min_size(egui::Vec2::splat(26.0)),
-                        )
-                        .on_hover_text(color.label());
-                    if swatch.clicked() && !selected {
-                        settings.chrome_color = color;
-                        activity.edited = true;
-                        activity.committed = true;
-                    }
+            ui.vertical(|ui| {
+                if chrome::swatch_row(ui, &mut settings.chrome_color) {
+                    activity.edited = true;
+                    activity.committed = true;
                 }
+                ui.label(
+                    egui::RichText::new("Also the profile's colour in the Profiles menu.")
+                        .small()
+                        .weak(),
+                );
             });
             ui.end_row();
 

@@ -23,11 +23,15 @@ pub mod settings;
 
 pub use bookmarks::{Bookmark, BookmarkGroup, Bookmarks, BookmarksError};
 pub use brand::{Brand, EngineInfo, ExtensionSupport, PageTools};
-pub use command::{Command, EngineAction, FolderTarget, PageCommand, Prompt, dispatch};
+pub use command::{
+    Command, EngineAction, FolderTarget, PageCommand, ProfileForm, Prompt, dispatch,
+};
 pub use event::{
     Cursor, EditState, EngineEvent, Media, MediaKind, Misspelling, PageContext, PendingTab, apply,
 };
-pub use extension::{Extension, ExtensionSource};
+pub use extension::{
+    Extension, ExtensionSource, InstalledExtension, InstalledExtensions, InstalledExtensionsError,
+};
 pub use history::{History, HistoryEntry, HistoryError};
 pub use input::{ButtonAction, EngineInput, KeyInput, MouseButton};
 pub use keymap::{ChordParseError, CommandKind, KeyChord, Keymap, KeymapError, Platform};
@@ -35,5 +39,5 @@ pub use model::{
     Browser, Favicon, Folder, FolderId, LoadState, RgbaImage, StripItem, Tab, TabId, Window,
     WindowId,
 };
-pub use profile::{Profile, ProfileError};
-pub use settings::{ChromeColor, SearchSettings, Settings, SettingsError};
+pub use profile::{Avatar, Profile, ProfileEntry, ProfileError};
+pub use settings::{ChromeColor, ProfileSettings, SearchSettings, Settings, SettingsError};

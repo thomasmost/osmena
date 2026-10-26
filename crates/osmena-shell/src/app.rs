@@ -7,9 +7,11 @@ use std::time::{Duration, Instant};
 
 use osmena_chrome::fatal::report_fatal;
 use osmena_chrome::{icon, menus, native_menu};
+use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
-    Brand, Browser, Command, CommandKind, EngineAction, EngineEvent, EngineInfo, Keymap,
-    PageCommand, TabId, WindowId, apply, dispatch,
+    Bookmarks, Brand, Browser, Command, CommandKind, EngineAction, EngineEvent, EngineInfo,
+    ExtensionSource, InstalledExtensions, Keymap, PageCommand, Profile, TabId, WindowId, apply,
+    dispatch,
 };
 use osmena_engine::{Engine, TabHost, Waker};
 use url::Url;
@@ -20,6 +22,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 
 use crate::StartEngine;
 use crate::clipboard;
+use crate::profiles;
 use crate::repaint;
 use crate::settings_window::{SettingsOutcome, SettingsWindow};
 use crate::window::BrowserWindow;
@@ -78,9 +81,9 @@ pub struct App<E: Engine> {
     /// The application's menu bar (macOS), rebuilt from the model after
     /// every event when its entries change.
     menu_bar: native_menu::MenuBar,
-    /// The other profiles on this machine, for the menu bar; read when
-    /// a window gains focus.
-    profiles: Vec<String>,
+    /// The user deleted the profile this browser runs: its directory
+    /// goes once the engine has let go of it, on the way out.
+    delete_on_exit: Option<Profile>,
 }
 
 impl<E: Engine> App<E> {
@@ -91,7 +94,7 @@ impl<E: Engine> App<E> {
     pub fn new(
         brand: &'static Brand,
         engine_info: &'static EngineInfo,
-        browser: Browser,
+        mut browser: Browser,
         keymap: Keymap,
         initial_actions: Vec<EngineAction>,
         start_engine: StartEngine<E>,
@@ -105,7 +108,8 @@ impl<E: Engine> App<E> {
                 log::warn!("failed to report a menu pick to the event loop: {e}");
             }
         });
-        let profiles = browser.profile.others();
+        browser.profiles = browser.profile.siblings(brand);
+        profiles::claim(&browser.profile.pid_path());
         App {
             brand,
             engine_info,
@@ -124,7 +128,84 @@ impl<E: Engine> App<E> {
             window_failed: false,
             history_dirty: None,
             menu_bar: native_menu::MenuBar::default(),
-            profiles,
+            delete_on_exit: None,
+        }
+    }
+
+    /// The title of a browser window: the product, and the profile's
+    /// name when it is not the default one.
+    fn window_title(&self) -> String {
+        if self.browser.profile.is_default() {
+            self.brand.name.to_string()
+        } else {
+            format!(
+                "{} \u{2013} {}",
+                self.brand.name,
+                self.browser.profile_name()
+            )
+        }
+    }
+
+    /// Something went wrong that the user should see: the status area
+    /// shows it until dismissed.
+    fn report_error(&mut self, message: String, event_loop: &ActiveEventLoop) {
+        log::error!("{message}");
+        let actions = apply(&mut self.browser, &EngineEvent::EngineError(message));
+        self.perform_all(actions, event_loop);
+    }
+
+    /// List the other profiles again (one may have been made or deleted,
+    /// here or in another browser).
+    fn refresh_profiles(&mut self) {
+        self.browser.profiles = self.browser.profile.siblings(self.brand);
+    }
+
+    /// Whether the bookmarks are the default profile's file.
+    fn bookmarks_shared(&self) -> bool {
+        self.browser.settings.profile.share_bookmarks && !self.browser.profile.is_default()
+    }
+
+    /// Read the bookmarks from their file again (the default profile's,
+    /// when shared: another browser may have changed it).
+    fn reload_bookmarks(&mut self, event_loop: &ActiveEventLoop) {
+        let path = self.browser.bookmarks_path();
+        match Bookmarks::load(&path) {
+            Ok(bookmarks) => self.browser.bookmarks = bookmarks,
+            Err(e) => self.report_error(
+                format!("cannot read bookmarks from {}: {e}", path.display()),
+                event_loop,
+            ),
+        }
+    }
+
+    /// Install the default profile's extensions that this profile lacks,
+    /// from the snapshot the default profile's browser wrote.
+    fn copy_extensions_from_default(&mut self, event_loop: &ActiveEventLoop) {
+        let Ok(default) = self.browser.profile.sibling(DEFAULT_PROFILE_NAME) else {
+            return;
+        };
+        let snapshot = match InstalledExtensions::load(&default.extensions_path()) {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                self.report_error(
+                    format!("cannot read the default profile's extensions: {e}"),
+                    event_loop,
+                );
+                return;
+            }
+        };
+        let Some(engine) = self.engine.as_ref() else {
+            return;
+        };
+        let missing = snapshot.missing_from(&self.browser.extensions);
+        log::info!(
+            "copying {} extension(s) from the default profile",
+            missing.len()
+        );
+        for extension in missing {
+            engine.install_extension(ExtensionSource::Store {
+                id: extension.id.clone(),
+            });
         }
     }
 
@@ -176,6 +257,11 @@ impl<E: Engine> App<E> {
 
     fn run_commands(&mut self, commands: Vec<Command>, event_loop: &ActiveEventLoop) {
         for command in commands {
+            // Shared bookmarks are another browser's too: start from what
+            // is on disk, so its additions survive ours.
+            if matches!(command, Command::BookmarkTabs { .. }) && self.bookmarks_shared() {
+                self.reload_bookmarks(event_loop);
+            }
             let actions = dispatch(&mut self.browser, &command);
             self.perform_all(actions, event_loop);
         }
@@ -194,6 +280,7 @@ impl<E: Engine> App<E> {
     /// Rebuild the menu bar if the model it shows changed.
     fn sync_menu_bar(&mut self) {
         let window = self.menu_window().and_then(|id| self.browser.window(id));
+        let profile_name = self.browser.profile_name();
         let entries = menus::menu_bar(&menus::MenuBarInput {
             brand: self.brand.name,
             window,
@@ -201,8 +288,11 @@ impl<E: Engine> App<E> {
             can_reopen: !self.browser.closed_tabs.is_empty(),
             bookmarks: &self.browser.bookmarks,
             history: &self.browser.history,
-            profiles: &self.profiles,
-            current_profile: &self.browser.profile.name,
+            profile: menus::CurrentProfile {
+                dir: &self.browser.profile.name,
+                name: &profile_name,
+            },
+            profiles: &self.browser.profiles,
         });
         self.menu_bar.sync(entries);
     }
@@ -255,12 +345,14 @@ impl<E: Engine> App<E> {
         match action {
             EngineAction::OpenWindow { window, tab, url } => {
                 let frameless = !self.browser.settings.system_title_bar;
+                let title = self.window_title();
                 match BrowserWindow::open(
                     event_loop,
                     engine,
                     self.brand,
                     self.engine_info,
                     window,
+                    &title,
                     frameless,
                 ) {
                     Ok(mut bw) => {
@@ -399,13 +491,99 @@ impl<E: Engine> App<E> {
             }
             EngineAction::SaveSettings => {
                 self.save_settings();
+                // The profile's name may have changed, and the title shows it.
+                let title = self.window_title();
+                for w in self.windows.values() {
+                    w.set_title(&title);
+                }
                 self.redraw_all();
             }
             EngineAction::SaveBookmarks => {
-                let path = self.browser.profile.bookmarks_path();
+                let path = self.browser.bookmarks_path();
                 if let Err(e) = self.browser.bookmarks.save(&path) {
                     log::error!("cannot save bookmarks to {}: {e}", path.display());
                 }
+            }
+            EngineAction::SwitchBookmarks { shared } => {
+                if shared {
+                    self.reload_bookmarks(event_loop);
+                } else {
+                    // What was shared stays, as this profile's own copy.
+                    let path = self.browser.profile.bookmarks_path();
+                    if let Err(e) = self.browser.bookmarks.save(&path) {
+                        log::error!("cannot save bookmarks to {}: {e}", path.display());
+                    }
+                }
+                self.redraw_all();
+            }
+            EngineAction::CopyExtensionsFromDefault => {
+                self.copy_extensions_from_default(event_loop);
+            }
+            EngineAction::CreateProfile(form) => {
+                match profiles::create(&self.browser.profile, self.brand, &form) {
+                    Ok(profile) => {
+                        log::info!(
+                            "created profile {:?} at {}",
+                            profile.name,
+                            profile.dir.display()
+                        );
+                        if let Err(e) = crate::process::open_in_profile(&profile.name, &[]) {
+                            self.report_error(
+                                format!("cannot start a browser for the new profile: {e}"),
+                                event_loop,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        self.report_error(format!("cannot create the profile: {e}"), event_loop)
+                    }
+                }
+                self.refresh_profiles();
+                self.redraw_all();
+            }
+            EngineAction::DeleteProfile(profile) => {
+                if profile == self.browser.profile.name {
+                    // This browser's own: hand over to the default profile
+                    // and take the directory away once the engine is gone.
+                    if let Err(e) = crate::process::open_in_profile(DEFAULT_PROFILE_NAME, &[]) {
+                        log::error!("cannot start a browser for the default profile: {e}");
+                    }
+                    self.delete_on_exit = Some(self.browser.profile.clone());
+                    self.perform(EngineAction::Quit, event_loop);
+                    return;
+                }
+                let name = self
+                    .browser
+                    .profiles
+                    .iter()
+                    .find(|p| p.dir == profile)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| profile.clone());
+                match self.browser.profile.sibling(&profile) {
+                    Ok(other) if profiles::in_use(&other.pid_path()) => self.report_error(
+                        format!("\u{201c}{name}\u{201d} is open in another window; close it first"),
+                        event_loop,
+                    ),
+                    Ok(other) => {
+                        if let Err(e) = profiles::delete(&other) {
+                            self.report_error(
+                                format!("cannot delete \u{201c}{name}\u{201d}: {e}"),
+                                event_loop,
+                            );
+                        } else {
+                            log::info!(
+                                "deleted profile {:?} at {}",
+                                other.name,
+                                other.dir.display()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        self.report_error(format!("cannot delete the profile: {e}"), event_loop)
+                    }
+                }
+                self.refresh_profiles();
+                self.redraw_all();
             }
             EngineAction::SaveHistory => {
                 self.history_dirty.get_or_insert_with(Instant::now);
@@ -490,7 +668,14 @@ impl<E: Engine> App<E> {
                     log::error!("engine error: {message}");
                     self.redraw_all();
                 }
-                EngineEvent::ExtensionsChanged(_) => self.redraw_all(),
+                EngineEvent::ExtensionsChanged(extensions) => {
+                    // The snapshot another profile copies from.
+                    let path = self.browser.profile.extensions_path();
+                    if let Err(e) = InstalledExtensions::of(extensions).save(&path) {
+                        log::warn!("cannot write {}: {e}", path.display());
+                    }
+                    self.redraw_all();
+                }
                 EngineEvent::CursorChanged { tab, cursor } => {
                     let browser = &self.browser;
                     if let Some(w) = self.windows.values_mut().find(|w| w.hosts_tab(*tab)) {
@@ -511,6 +696,15 @@ impl<E: Engine> App<E> {
                 _ => {}
             }
             let actions = apply(&mut self.browser, &event);
+            if matches!(event, EngineEvent::ExtensionsChanged(_))
+                && self.browser.settings.profile.copy_extensions
+            {
+                // A profile made with "copy extensions": the engine is up
+                // and has said what is installed, so the rest can be.
+                self.browser.settings.profile.copy_extensions = false;
+                self.save_settings();
+                self.copy_extensions_from_default(event_loop);
+            }
             if let EngineEvent::NewTabRequested { pending, .. } = &event
                 && actions.is_empty()
                 && let Some(engine) = self.engine.as_ref()
@@ -747,11 +941,19 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
                 SettingsOutcome::Shortcut(kind) => self.settings_shortcut(kind, event_loop),
             }
             self.run_commands(commands, event_loop);
-        } else if let Some(window) = self.windows.get_mut(&window_id) {
+        } else if self.windows.contains_key(&window_id) {
             if matches!(event, WindowEvent::Focused(true)) {
-                // Another profile may have been created meanwhile.
-                self.profiles = self.browser.profile.others();
+                // Another browser may have made or deleted a profile, or
+                // changed the shared bookmarks, meanwhile.
+                self.refresh_profiles();
+                if self.bookmarks_shared() {
+                    self.reload_bookmarks(event_loop);
+                }
             }
+            let window = self
+                .windows
+                .get_mut(&window_id)
+                .expect("checked by contains_key");
             let commands = window.handle_event(&self.browser, &self.keymap, &event);
             let drop = window.take_tab_drop();
             self.run_commands(commands, event_loop);
@@ -833,5 +1035,16 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
         self.close_settings_window();
         self.windows.clear();
         self.engine = None;
+        profiles::release(&self.browser.profile.pid_path());
+        if let Some(profile) = self.delete_on_exit.take() {
+            match profiles::delete(&profile) {
+                Ok(()) => log::info!("deleted profile {:?}", profile.name),
+                Err(e) => log::error!(
+                    "cannot delete profile {:?} at {}: {e}",
+                    profile.name,
+                    profile.dir.display()
+                ),
+            }
+        }
     }
 }

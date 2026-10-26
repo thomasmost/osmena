@@ -39,6 +39,7 @@ const RESIZE_BORDER_PX: f32 = 6.0;
 
 pub struct BrowserWindow<E: Engine> {
     id: WindowId,
+    brand: &'static Brand,
     engine_info: &'static EngineInfo,
     chrome: ChromeState,
     modifiers: ModifiersState,
@@ -82,13 +83,14 @@ impl<E: Engine> BrowserWindow<E> {
     pub fn open(
         event_loop: &ActiveEventLoop,
         engine: &E,
-        brand: &Brand,
+        brand: &'static Brand,
         engine_info: &'static EngineInfo,
         id: WindowId,
+        title: &str,
         frameless: bool,
     ) -> Result<BrowserWindow<E>, EngineError> {
         let attributes = Window::default_attributes()
-            .with_title(brand.name)
+            .with_title(title)
             .with_inner_size(LogicalSize::new(1024.0, 768.0))
             .with_min_inner_size(LogicalSize::new(400.0, 300.0))
             .with_window_icon(icon::window_icon(brand));
@@ -116,6 +118,7 @@ impl<E: Engine> BrowserWindow<E> {
 
         Ok(BrowserWindow {
             id,
+            brand,
             engine_info,
             chrome: ChromeState::default(),
             modifiers: ModifiersState::default(),
@@ -194,6 +197,12 @@ impl<E: Engine> BrowserWindow<E> {
             texture.destroy(&self.surface.gl(), &mut self.egui.painter);
         }
         self.window.request_redraw();
+    }
+
+    /// The native window's title (the product, and the profile when it
+    /// is not the default one; see `window_title`).
+    pub fn set_title(&self, title: &str) {
+        self.window.set_title(title);
     }
 
     pub fn request_redraw(&self) {
@@ -767,6 +776,9 @@ impl<E: Engine> BrowserWindow<E> {
         let crashed = model.active_tab().crashed.clone();
         let engine_error = browser.engine_error.as_deref();
         let chrome_color = browser.settings.chrome_color;
+        let profile_name = browser.profile_name();
+        let avatar = browser.settings.profile.avatar;
+        let brand = self.brand;
         let engine_info = self.engine_info;
         let frameless = self.frameless;
         let maximized = self.window.is_maximized();
@@ -792,6 +804,10 @@ impl<E: Engine> BrowserWindow<E> {
         egui.run(window, |ui| {
             let context = chrome::ChromeContext {
                 color: chrome_color,
+                brand,
+                profile_dir: &browser.profile.name,
+                profile_name: &profile_name,
+                avatar,
                 engine: engine_info,
                 engine_error,
                 frameless,
@@ -979,9 +995,22 @@ impl<E: Engine> BrowserWindow<E> {
                     .filter(|w| w.id != self.id)
                     .map(|w| (w.id, w.active_tab().display_title().to_string()))
                     .collect();
-                let profiles = browser.profile.others();
                 (
-                    menus::tab_menu(model, &targets, &others, &profiles),
+                    menus::tab_menu(model, &targets, &others, &browser.profiles),
+                    position,
+                )
+            }
+            chrome::MenuRequest::Profiles { position } => {
+                let name = browser.profile_name();
+                (
+                    menus::profiles_menu(
+                        Some(self.id),
+                        menus::CurrentProfile {
+                            dir: &browser.profile.name,
+                            name: &name,
+                        },
+                        &browser.profiles,
+                    ),
                     position,
                 )
             }

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::brand::Brand;
+use crate::profile::{Avatar, DEFAULT_PROFILE_NAME};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -35,6 +36,9 @@ pub struct Settings {
     pub pinned_extensions: Vec<String>,
     /// Where address-bar text that is not a URL goes.
     pub search: SearchSettings,
+    /// How the profile presents itself and what it takes from the
+    /// default profile.
+    pub profile: ProfileSettings,
 }
 
 impl Default for Settings {
@@ -47,6 +51,46 @@ impl Default for Settings {
             system_title_bar: false,
             pinned_extensions: Vec::new(),
             search: SearchSettings::default(),
+            profile: ProfileSettings::default(),
+        }
+    }
+}
+
+/// The profile as the user sees it (`[profile]` in `settings.toml`): its
+/// display name and avatar (its colour is [`Settings::chrome_color`]),
+/// and what it shares with or took from the default profile. The
+/// history is never shared.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProfileSettings {
+    /// The display name; empty, the directory name stands in
+    /// ([`ProfileSettings::display_name`]).
+    pub name: String,
+    pub avatar: Avatar,
+    /// The profile's bookmarks are the default profile's: it reads and
+    /// writes the default profile's `bookmarks.toml` instead of its own.
+    /// Meaningless for the default profile.
+    pub share_bookmarks: bool,
+    /// Install the default profile's extensions in this profile at its
+    /// next start, then clear the flag. A new profile made with "copy
+    /// extensions" starts with it set, since it has no engine yet to
+    /// install them with.
+    pub copy_extensions: bool,
+}
+
+impl ProfileSettings {
+    /// The name shown for the profile whose directory is `dir`: the
+    /// display name, or the directory name with its first letter in
+    /// upper case ("default" is "Default").
+    pub fn display_name(&self, dir: &str) -> String {
+        let name = self.name.trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+        let mut chars = dir.chars();
+        match chars.next() {
+            Some(first) => first.to_uppercase().chain(chars).collect(),
+            None => DEFAULT_PROFILE_NAME.to_string(),
         }
     }
 }
@@ -277,10 +321,18 @@ mod tests {
                 name: "Duck".to_string(),
                 url: "https://d.example/?q={query}".to_string(),
             },
+            profile: ProfileSettings {
+                name: "Alice".to_string(),
+                avatar: Avatar::Whale,
+                share_bookmarks: true,
+                copy_extensions: false,
+            },
         };
         let text = s.to_toml().unwrap();
         assert!(text.contains("chrome_color = \"plum\""), "{text}");
         assert!(text.contains("[search]"), "{text}");
+        assert!(text.contains("[profile]"), "{text}");
+        assert!(text.contains("avatar = \"whale\""), "{text}");
         assert!(text.contains("system_title_bar = true"), "{text}");
         assert!(text.contains("pinned_extensions = ["), "{text}");
         assert_eq!(Settings::parse(&text).unwrap(), s);
@@ -346,6 +398,19 @@ mod tests {
             url: "not a url {query}".to_string(),
         };
         assert_eq!(bad.url_for("a"), None);
+    }
+
+    #[test]
+    fn a_profile_without_a_name_is_shown_by_its_directory() {
+        let s = Settings::parse("").unwrap();
+        assert_eq!(s.profile, ProfileSettings::default());
+        assert_eq!(s.profile.display_name("default"), "Default");
+        assert_eq!(s.profile.display_name("work-2"), "Work-2");
+        let named = Settings::parse("[profile]\nname = \"  Alice \"\n").unwrap();
+        assert_eq!(named.profile.display_name("whatever"), "Alice");
+        let s = Settings::parse("[profile]\nshare_bookmarks = true\n").unwrap();
+        assert!(s.profile.share_bookmarks);
+        assert!(!s.profile.copy_extensions);
     }
 
     #[test]

@@ -192,9 +192,26 @@ The engine contract, in `osmena-engine`:
   window) names the provider and its URL, where `{query}` stands for the
   text, so another engine, or something other than a search engine, can
   take its place.
+- **Profiles.** A profile is a directory of its own (settings,
+  bookmarks, history, the engine's cookies and storage; `--profile
+  <dir>` picks one, `default` otherwise) with a name, a colour and an
+  avatar. The toolbar ends in the avatar; its menu, the same Profiles
+  menu the macOS menu bar has, shows the current profile and "Edit…",
+  the other profiles (each starts a browser for it: a profile is a
+  process), "Add Profile…" and "Delete Profile". The dialog asks for
+  the name, the theme colour and the avatar (the name's initial, or a
+  glyph) and, for any profile but the default one, whether to share
+  the default profile's bookmarks (one list both keep) and whether to
+  copy its extensions (installed here, then independent; only when
+  the engine runs extensions). History is never shared. A new
+  profile's directory is the slug of its name (`work-stuff`, then
+  `work-stuff-2`); deleting one asks first, refuses a profile open in
+  another browser, and for the current profile hands over to the
+  default one and removes the directory on the way out.
 - **Settings** (`settings.toml`): homepage, new-tab URL, the search
   provider, a chrome colour per profile, the title bar switch, the
-  pinned extensions, and the restore flag.
+  pinned extensions, the restore flag, and `[profile]` (name, avatar,
+  shared bookmarks, extensions to copy at the next start).
 
 ## Depending on osmena
 

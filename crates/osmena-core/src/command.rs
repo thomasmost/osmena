@@ -6,6 +6,8 @@ use crate::bookmarks::Bookmark;
 use crate::event::PendingTab;
 use crate::extension::ExtensionSource;
 use crate::model::{Browser, Folder, FolderId, LoadState, Tab, TabId, Window, WindowId};
+use crate::profile::{Avatar, DEFAULT_PROFILE_NAME};
+use crate::settings::ChromeColor;
 
 /// Every user action in the browser is one of these. The chrome, the keymap,
 /// and (in Phase 2) remappable hotkeys all produce `Command`s; nothing else
@@ -57,6 +59,28 @@ pub enum Command {
     /// Start a browser for `profile` (another process) on its new-window
     /// page; nothing for the current profile.
     OpenProfile(String),
+    /// Ask the user to configure the current profile (its name, colour
+    /// and avatar, and what it shares with the default profile) in
+    /// `window`.
+    PromptEditProfile(WindowId),
+    /// Ask the user for a new profile's name, colour and avatar in
+    /// `window`.
+    PromptAddProfile(WindowId),
+    /// Ask the user to confirm deleting `profile` (a directory name:
+    /// the current profile's or another's) in `window`. The default
+    /// profile cannot be deleted.
+    PromptDeleteProfile {
+        window: WindowId,
+        profile: String,
+    },
+    /// The current profile, as configured in the profile dialog.
+    SaveProfile(ProfileForm),
+    /// Make a profile from the form and start a browser for it.
+    CreateProfile(ProfileForm),
+    /// Delete the profile in directory `profile` with everything it
+    /// holds. For the current profile the browser starts the default
+    /// profile and quits, deleting its directory on the way out.
+    DeleteProfile(String),
     /// Put these tabs in a folder of their window (a new one, or one
     /// of its existing ones), together where the first of them is.
     MoveTabsToFolder {
@@ -207,6 +231,21 @@ pub enum PageCommand {
     Inspect,
 }
 
+/// What the profile dialog edits: the profile's name, colour and
+/// avatar, and what it takes from the default profile. `share_bookmarks`
+/// is a lasting setting (the profile reads and writes the default
+/// profile's bookmarks); `copy_extensions` is a one-time action (the
+/// default profile's extensions are installed here, and stay
+/// independent after). Neither means anything for the default profile.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProfileForm {
+    pub name: String,
+    pub color: ChromeColor,
+    pub avatar: Avatar,
+    pub share_bookmarks: bool,
+    pub copy_extensions: bool,
+}
+
 /// The folder `Command::MoveTabsToFolder` puts tabs in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FolderTarget {
@@ -237,6 +276,21 @@ pub enum Prompt {
     RenameFolder {
         folder: FolderId,
         name: String,
+    },
+    /// Configure a profile: `form` is prefilled (the current profile's
+    /// values, or a new profile's defaults when `new`); `deletable`
+    /// says the dialog may offer to delete the current profile.
+    Profile {
+        form: ProfileForm,
+        new: bool,
+        deletable: bool,
+    },
+    /// Confirm deleting the profile in directory `profile`, shown as
+    /// `name`; `current` when it is the one this browser runs.
+    DeleteProfile {
+        profile: String,
+        name: String,
+        current: bool,
     },
 }
 
@@ -301,6 +355,22 @@ pub enum EngineAction {
         profile: String,
         urls: Vec<Url>,
     },
+    /// Make a profile directory for `form` (the brand's defaults with
+    /// the form's name, colour, avatar and flags) and start a browser
+    /// for it.
+    CreateProfile(ProfileForm),
+    /// Delete the profile in directory `profile`: another profile's
+    /// directory now, or, for the current profile, start the default
+    /// profile, quit, and delete the directory on the way out.
+    DeleteProfile(String),
+    /// The profile's bookmarks now come from the default profile
+    /// (`shared`) or from its own file again: reload them from there,
+    /// or keep a copy of the shared ones as its own.
+    SwitchBookmarks {
+        shared: bool,
+    },
+    /// Install the default profile's extensions that this profile lacks.
+    CopyExtensionsFromDefault,
     /// The settings changed (pinned extensions): persist them and redraw.
     SaveSettings,
     /// The bookmarks changed: persist them.
@@ -385,6 +455,83 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             profile: profile.clone(),
             urls: Vec::new(),
         }],
+        Command::PromptEditProfile(window) => {
+            if browser.window(*window).is_none() {
+                return Vec::new();
+            }
+            let settings = &browser.settings;
+            vec![EngineAction::ShowPrompt {
+                window: *window,
+                prompt: Prompt::Profile {
+                    form: ProfileForm {
+                        name: browser.profile_name(),
+                        color: settings.chrome_color,
+                        avatar: settings.profile.avatar,
+                        share_bookmarks: settings.profile.share_bookmarks,
+                        copy_extensions: false,
+                    },
+                    new: false,
+                    deletable: !browser.profile.is_default(),
+                },
+            }]
+        }
+        Command::PromptAddProfile(window) => {
+            if browser.window(*window).is_none() {
+                return Vec::new();
+            }
+            vec![EngineAction::ShowPrompt {
+                window: *window,
+                prompt: Prompt::Profile {
+                    form: ProfileForm {
+                        // A different colour from the current profile's,
+                        // so the two tell apart from the start.
+                        color: next_color(browser.settings.chrome_color),
+                        ..ProfileForm::default()
+                    },
+                    new: true,
+                    deletable: false,
+                },
+            }]
+        }
+        Command::PromptDeleteProfile { window, profile } => {
+            if browser.window(*window).is_none() || profile == DEFAULT_PROFILE_NAME {
+                return Vec::new();
+            }
+            let current = *profile == browser.profile.name;
+            let name = if current {
+                browser.profile_name()
+            } else {
+                match browser.profiles.iter().find(|p| p.dir == *profile) {
+                    Some(entry) => entry.name.clone(),
+                    None => return Vec::new(),
+                }
+            };
+            vec![EngineAction::ShowPrompt {
+                window: *window,
+                prompt: Prompt::DeleteProfile {
+                    profile: profile.clone(),
+                    name,
+                    current,
+                },
+            }]
+        }
+        Command::SaveProfile(form) => save_profile(browser, form),
+        Command::CreateProfile(form) => {
+            if form.name.trim().is_empty() {
+                return Vec::new();
+            }
+            let mut form = form.clone();
+            form.name = form.name.trim().to_string();
+            vec![EngineAction::CreateProfile(form)]
+        }
+        Command::DeleteProfile(profile) => {
+            let known = *profile == browser.profile.name
+                || browser.profiles.iter().any(|p| p.dir == *profile);
+            if profile == DEFAULT_PROFILE_NAME || !known {
+                return Vec::new();
+            }
+            vec![EngineAction::DeleteProfile(profile.clone())]
+        }
         Command::MoveTabsToFolder { tabs, folder } => {
             move_tabs_to_folder(browser, tabs, folder);
             Vec::new()
@@ -644,6 +791,37 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
 
 /// Pin or unpin `extension` in the settings. Returns true if the settings
 /// changed.
+/// Apply the profile dialog to the current profile's settings. The name,
+/// colour and avatar are saved; sharing the bookmarks, when it changed,
+/// has the shell switch the bookmarks' file; copying the extensions is
+/// an action, not a setting. The default profile has nothing to share
+/// or copy.
+fn save_profile(browser: &mut Browser, form: &ProfileForm) -> Vec<EngineAction> {
+    let is_default = browser.profile.is_default();
+    let settings = &mut browser.settings;
+    settings.profile.name = form.name.trim().to_string();
+    settings.profile.avatar = form.avatar;
+    settings.chrome_color = form.color;
+    let share = form.share_bookmarks && !is_default;
+    let share_changed = settings.profile.share_bookmarks != share;
+    settings.profile.share_bookmarks = share;
+    let mut actions = vec![EngineAction::SaveSettings];
+    if share_changed {
+        actions.push(EngineAction::SwitchBookmarks { shared: share });
+    }
+    if form.copy_extensions && !is_default {
+        actions.push(EngineAction::CopyExtensionsFromDefault);
+    }
+    actions
+}
+
+/// The swatch after `color` in the settings window's order, wrapping.
+fn next_color(color: ChromeColor) -> ChromeColor {
+    let all = ChromeColor::ALL;
+    let at = all.iter().position(|c| *c == color).unwrap_or(0);
+    all[(at + 1) % all.len()]
+}
+
 fn set_pinned(browser: &mut Browser, extension: &str, pinned: bool) -> bool {
     let list = &mut browser.settings.pinned_extensions;
     let was = list.iter().any(|p| p == extension);
@@ -2458,5 +2636,188 @@ mod tests {
         );
         assert!(dispatch(&mut b, &Command::PromptMoveToFolder(vec![TabId(99)])).is_empty());
         assert!(dispatch(&mut b, &Command::PromptRenameFolder(FolderId(99))).is_empty());
+    }
+
+    #[test]
+    fn the_profile_dialog_is_prefilled_from_the_settings_and_saves_back() {
+        use crate::profile::ProfileEntry;
+
+        let (mut b, window, _) = window_with_tabs(1);
+        b.settings.chrome_color = ChromeColor::Ocean;
+        b.settings.profile.avatar = Avatar::Whale;
+        // The test browser's profile is "test", not the default one.
+        assert_eq!(
+            dispatch(&mut b, &Command::PromptEditProfile(window)),
+            vec![EngineAction::ShowPrompt {
+                window,
+                prompt: Prompt::Profile {
+                    form: ProfileForm {
+                        name: "Test".to_string(),
+                        color: ChromeColor::Ocean,
+                        avatar: Avatar::Whale,
+                        share_bookmarks: false,
+                        copy_extensions: false,
+                    },
+                    new: false,
+                    deletable: true,
+                },
+            }]
+        );
+        // A new profile starts on the next swatch, nameless.
+        assert_eq!(
+            dispatch(&mut b, &Command::PromptAddProfile(window)),
+            vec![EngineAction::ShowPrompt {
+                window,
+                prompt: Prompt::Profile {
+                    form: ProfileForm {
+                        color: ChromeColor::Forest,
+                        ..ProfileForm::default()
+                    },
+                    new: true,
+                    deletable: false,
+                },
+            }]
+        );
+        assert!(dispatch(&mut b, &Command::PromptEditProfile(WindowId(99))).is_empty());
+
+        // Saving: the name is trimmed, the colour applied, sharing the
+        // bookmarks switches their file, copying the extensions is an
+        // action.
+        let form = ProfileForm {
+            name: "  Alice ".to_string(),
+            color: ChromeColor::Plum,
+            avatar: Avatar::Cat,
+            share_bookmarks: true,
+            copy_extensions: true,
+        };
+        assert_eq!(
+            dispatch(&mut b, &Command::SaveProfile(form.clone())),
+            vec![
+                EngineAction::SaveSettings,
+                EngineAction::SwitchBookmarks { shared: true },
+                EngineAction::CopyExtensionsFromDefault,
+            ]
+        );
+        assert_eq!(b.settings.profile.name, "Alice");
+        assert_eq!(b.profile_name(), "Alice");
+        assert_eq!(b.settings.chrome_color, ChromeColor::Plum);
+        assert_eq!(b.settings.profile.avatar, Avatar::Cat);
+        assert!(b.settings.profile.share_bookmarks);
+        // Saved again unchanged: nothing switches.
+        assert_eq!(
+            dispatch(
+                &mut b,
+                &Command::SaveProfile(ProfileForm {
+                    copy_extensions: false,
+                    ..form
+                })
+            ),
+            vec![EngineAction::SaveSettings]
+        );
+
+        // Creating needs a name.
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::CreateProfile(ProfileForm {
+                    name: "  ".to_string(),
+                    ..ProfileForm::default()
+                })
+            )
+            .is_empty()
+        );
+        let new = ProfileForm {
+            name: " Work ".to_string(),
+            ..ProfileForm::default()
+        };
+        assert_eq!(
+            dispatch(&mut b, &Command::CreateProfile(new)),
+            vec![EngineAction::CreateProfile(ProfileForm {
+                name: "Work".to_string(),
+                ..ProfileForm::default()
+            })]
+        );
+
+        // Deleting: the current profile, or a listed one; never the
+        // default, never an unknown directory.
+        b.profiles = vec![ProfileEntry {
+            dir: "work".to_string(),
+            name: "Work".to_string(),
+            avatar: Avatar::Initial,
+            color: ChromeColor::Slate,
+        }];
+        assert_eq!(
+            dispatch(
+                &mut b,
+                &Command::PromptDeleteProfile {
+                    window,
+                    profile: "work".to_string(),
+                }
+            ),
+            vec![EngineAction::ShowPrompt {
+                window,
+                prompt: Prompt::DeleteProfile {
+                    profile: "work".to_string(),
+                    name: "Work".to_string(),
+                    current: false,
+                },
+            }]
+        );
+        assert_eq!(
+            dispatch(
+                &mut b,
+                &Command::PromptDeleteProfile {
+                    window,
+                    profile: "test".to_string(),
+                }
+            ),
+            vec![EngineAction::ShowPrompt {
+                window,
+                prompt: Prompt::DeleteProfile {
+                    profile: "test".to_string(),
+                    name: "Alice".to_string(),
+                    current: true,
+                },
+            }]
+        );
+        for profile in ["default", "nope"] {
+            assert!(
+                dispatch(
+                    &mut b,
+                    &Command::PromptDeleteProfile {
+                        window,
+                        profile: profile.to_string(),
+                    }
+                )
+                .is_empty()
+            );
+            assert!(dispatch(&mut b, &Command::DeleteProfile(profile.to_string())).is_empty());
+        }
+        assert_eq!(
+            dispatch(&mut b, &Command::DeleteProfile("work".to_string())),
+            vec![EngineAction::DeleteProfile("work".to_string())]
+        );
+        assert_eq!(
+            dispatch(&mut b, &Command::DeleteProfile("test".to_string())),
+            vec![EngineAction::DeleteProfile("test".to_string())]
+        );
+    }
+
+    #[test]
+    fn the_default_profile_neither_shares_nor_copies() {
+        let (mut b, _, _) = window_with_tabs(1);
+        b.profile.name = DEFAULT_PROFILE_NAME.to_string();
+        let form = ProfileForm {
+            name: "Me".to_string(),
+            share_bookmarks: true,
+            copy_extensions: true,
+            ..ProfileForm::default()
+        };
+        assert_eq!(
+            dispatch(&mut b, &Command::SaveProfile(form)),
+            vec![EngineAction::SaveSettings]
+        );
+        assert!(!b.settings.profile.share_bookmarks);
+        assert_eq!(next_color(ChromeColor::Graphite), ChromeColor::Shell);
     }
 }

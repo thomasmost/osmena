@@ -5,9 +5,10 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-10-23 (the theme: Inter, pill inputs, the Shell
-swatch and a brand's default chrome colour; the macOS menu bar; the
-day before, the new-tab launcher, history and its suggestions)._
+_Last updated: 2026-10-26 (profiles: name, colour, avatar, the Profiles
+menu behind the toolbar's avatar and in the menu bar, the profile
+dialog, adding and deleting profiles, shared bookmarks and copied
+extensions; before that the theme and the macOS menu bar)._
 
 ## Architecture
 
@@ -118,6 +119,19 @@ No engine is needed; the workspace builds in under a minute.
   launcher (`draw_launcher`, `ChromeState::open_launcher`) answers with
   `NewTab { url: Some(..) }` or `SearchInNewTab`, or with nothing. The
   `new_tab_url` setting is what a new *window* opens on.
+- **A profile is a directory; its face is in its settings.** The
+  directory name is the identity (`--profile <dir>`, `Profile::name`);
+  the display name, avatar and colour live in that profile's
+  `settings.toml` (`ProfileSettings`, `chrome_color`), which is what
+  `Profile::siblings` reads to list the others (`Browser::profiles`,
+  refreshed by the shell when a window gains focus and after a profile
+  is made or deleted). The menus and `dispatch` work from that list;
+  only `osmena-shell::profiles` touches the directories (make, delete,
+  the `running.pid` claim). A new profile's directory is
+  `directory_name_for(name)`. Sharing bookmarks is a path switch
+  (`Browser::bookmarks_path`); copying extensions goes through the
+  `extensions.toml` snapshot the shell writes on every
+  `ExtensionsChanged` and `Engine::install_extension` by store id.
 - **The history is the model's, written by the shell.** `apply` records
   a visit when a load completes and a title when one arrives, answering
   `EngineAction::SaveHistory`; the shell writes `history.toml` a few
@@ -292,6 +306,23 @@ gated on the window's. Verified: `cargo test`, clippy, formatting, and
 both browsers built against the revision. Not verified by hand: any of
 it in a running browser; the Alt+Tab download path is the one to try
 first (hold Alt, switch away, release, click a link).
+
+Added 2026-10-26: profiles as the user sees them. The toolbar's avatar
+button and the menu bar's Profiles menu share `menus::profiles_menu`;
+the profile dialog (`chrome::draw_profile_prompt`) and the delete
+confirmation are prompts like the folder and bookmark ones;
+`osmena-shell::profiles` makes and deletes directories and keeps the
+`running.pid` claim. Verified: `cargo test` (the slug, the siblings
+listing, the dialog's prefill and answers, the menu), clippy, fmt, the
+macOS type-check, and a scripted run in Nautilus on Windows (see its
+handoff). Not verified by hand: the macOS menu bar's Profiles menu
+(never run on a Mac), the delete-current-profile handover on macOS
+(the directory is removed after `cef::shutdown`, which on macOS has not
+been watched), and copying extensions from a profile whose snapshot
+lists an unpacked extension (the store install fails and the engine
+reports it). Known: two browsers sharing the default profile's
+bookmarks each keep their own copy in memory and reload it on focus and
+before adding; a change made in both within the same moment loses one.
 
 Known and left alone: a native menu (`native_menu`, `TrackPopupMenu` on
 Windows) blocks inside the event loop, so pages freeze under any

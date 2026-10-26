@@ -6,6 +6,40 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- Profiles have a name, a colour and an avatar, and can be made and
+  deleted from the browser. The toolbar ends in the profile's avatar
+  (its glyph, or the name's first letter, on the profile's colour),
+  whose menu is the Profiles menu, the same one the macOS menu bar
+  shows: the current profile (checked) and "Edit…", the other profiles
+  by name (each starts a browser for it), "Add Profile…", and a "Delete
+  Profile" submenu. "Edit…" and "Add Profile…" open the profile dialog
+  over the page: the name ("Name your <brand> profile"), the theme
+  colour (the chrome colour swatches), the avatar (the initial or one
+  of 24 glyphs from the chrome's emoji fallback font) and, for a
+  profile other than the default one, "Share bookmarks with the Default
+  profile" (the profile reads and writes the default profile's
+  `bookmarks.toml`; turning it off keeps a copy) and, when the engine
+  runs extensions, "Copy extensions from the Default profile" (the
+  default profile's extensions this one lacks are installed from the
+  store; a new profile does it at its first start). The history is
+  never shared. Deleting asks first; deleting the current profile
+  starts the default profile, quits, and removes the directory on the
+  way out; a profile open in another browser (`running.pid` in its
+  directory names a live process) is refused. The model: `[profile]` in
+  `settings.toml` (`ProfileSettings`: `name`, `avatar`,
+  `share_bookmarks`, `copy_extensions`), `Avatar`, `ProfileEntry` and
+  `Profile::siblings` (the other profiles with their names), `Browser::
+  profiles` and `Browser::bookmarks_path`, `profile::directory_name_for`
+  (a new profile's directory is the slug of its name), `ProfileForm`,
+  `Command::{PromptEditProfile, PromptAddProfile, PromptDeleteProfile,
+  SaveProfile, CreateProfile, DeleteProfile}`, `Prompt::{Profile,
+  DeleteProfile}`, `EngineAction::{CreateProfile, DeleteProfile,
+  SwitchBookmarks, CopyExtensionsFromDefault}`, `menus::profiles_menu`,
+  `MenuRequest::Profiles`, `chrome::{paint_avatar, swatch_row}`, and
+  `extensions.toml` in the profile, the installed extensions as the
+  engine last reported them, which is what another profile copies.
+- A browser window's title names the profile when it is not the
+  default one ("<brand> – Work").
 - The chrome's typeface is Inter (SIL Open Font License, bundled in
   `osmena-chrome/assets/fonts`), with its medium weight for headings;
   egui's fonts stay behind it for the glyphs it lacks. `theme::install`
@@ -36,6 +70,11 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- `menus::tab_menu` and `MenuBarInput` take the other profiles as
+  `ProfileEntry`s (the "Open tab in profile" submenu shows their
+  names), and `MenuBarInput::profile` names the current one;
+  `BrowserWindow::open` takes the window's title; `ChromeContext`
+  carries the brand and the profile's directory, name and avatar.
 - Inputs share one padding (10 px by 5 px, `theme::INPUT_MARGIN`); the
   address bar and the launcher's field are pills; widgets, menus and
   windows round at 8, 10 and 12 px, matching the tabs; buttons have

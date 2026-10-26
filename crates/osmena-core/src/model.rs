@@ -1,5 +1,6 @@
 //! Windows, tabs, and the identifiers that cross crate boundaries.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,7 @@ use url::Url;
 use crate::bookmarks::Bookmarks;
 use crate::extension::Extension;
 use crate::history::History;
-use crate::profile::Profile;
+use crate::profile::{DEFAULT_PROFILE_NAME, Profile, ProfileEntry};
 use crate::settings::Settings;
 
 /// Identifies a browser window. Allocated by [`Browser`]; engine ids never
@@ -316,6 +317,10 @@ pub struct Browser {
     pub bookmarks: Bookmarks,
     /// Where the user has been; see [`History`].
     pub history: History,
+    /// The other profiles on this machine, as the shell last listed them
+    /// (when a window gained focus, or a profile was made or deleted):
+    /// what the Profiles menu offers.
+    pub profiles: Vec<ProfileEntry>,
     next_window_id: u64,
     next_tab_id: u64,
     next_folder_id: u64,
@@ -335,10 +340,29 @@ impl Browser {
             extensions: Vec::new(),
             bookmarks: Bookmarks::default(),
             history: History::default(),
+            profiles: Vec::new(),
             next_window_id: 1,
             next_tab_id: 1,
             next_folder_id: 1,
         }
+    }
+
+    /// The profile's display name (`[profile] name` in the settings, or
+    /// the directory name).
+    pub fn profile_name(&self) -> String {
+        self.settings.profile.display_name(&self.profile.name)
+    }
+
+    /// The file the bookmarks are read from and written to: the default
+    /// profile's when this profile shares them, else its own.
+    pub fn bookmarks_path(&self) -> PathBuf {
+        if self.settings.profile.share_bookmarks
+            && !self.profile.is_default()
+            && let Ok(default) = self.profile.sibling(DEFAULT_PROFILE_NAME)
+        {
+            return default.bookmarks_path();
+        }
+        self.profile.bookmarks_path()
     }
 
     pub fn window_of_folder(&self, folder: FolderId) -> Option<WindowId> {

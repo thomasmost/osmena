@@ -10,10 +10,11 @@ use egui::{
     RichText, Sense, Stroke, StrokeKind, TextStyle, TextureHandle, TextureOptions, Ui, Vec2,
 };
 use keyboard_types::Code;
+use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
-    ChromeColor, Command, CommandKind, EngineInfo, Extension, Favicon, Folder, FolderId,
-    FolderTarget, History, HistoryEntry, KeyChord, Keymap, LoadState, Prompt, StripItem, Tab,
-    TabId, Window,
+    Avatar, Brand, ChromeColor, Command, CommandKind, EngineInfo, Extension, Favicon, Folder,
+    FolderId, FolderTarget, History, HistoryEntry, KeyChord, Keymap, LoadState, ProfileForm,
+    Prompt, StripItem, Tab, TabId, Window,
 };
 use url::{ParseError, Url};
 
@@ -56,6 +57,13 @@ const SUGGESTION_TITLE_MAX_CHARS: usize = 64;
 const SUGGESTION_URL_MAX_CHARS: usize = 90;
 /// Inside a suggestion row, around its text.
 const SUGGESTION_PADDING: f32 = 4.0;
+/// The toolbar's avatar button: the disc inside it, and the discs the
+/// profile dialog offers.
+const AVATAR_RADIUS: f32 = 10.0;
+const AVATAR_CHOICE_RADIUS: f32 = 16.0;
+const AVATAR_PREVIEW_RADIUS: f32 = 28.0;
+/// How many avatars per row in the profile dialog.
+const AVATAR_COLUMNS: usize = 5;
 
 /// The shades the chrome paints with, all derived from the profile's
 /// [`ChromeColor`]: the tab strip is the swatch at its top and fades to
@@ -219,11 +227,13 @@ struct Launcher {
 }
 
 /// A [`Prompt`] being answered: the typed text, and which existing
-/// folder or group was picked instead (`None` for a new one).
+/// folder or group was picked instead (`None` for a new one); for the
+/// profile dialog, the form as edited so far (its name is `text`).
 struct PromptState {
     prompt: Prompt,
     text: String,
     existing: Option<usize>,
+    form: ProfileForm,
     /// The text field takes focus on the first frame.
     focus: bool,
 }
@@ -261,13 +271,19 @@ impl ChromeState {
     pub fn open_prompt(&mut self, prompt: Prompt) {
         let text = match &prompt {
             Prompt::MoveToFolder { suggested, .. } => suggested.clone(),
-            Prompt::BookmarkTabs { .. } => String::new(),
+            Prompt::BookmarkTabs { .. } | Prompt::DeleteProfile { .. } => String::new(),
             Prompt::RenameFolder { name, .. } => name.clone(),
+            Prompt::Profile { form, .. } => form.name.clone(),
+        };
+        let form = match &prompt {
+            Prompt::Profile { form, .. } => form.clone(),
+            _ => ProfileForm::default(),
         };
         self.prompt = Some(PromptState {
             prompt,
             text,
             existing: None,
+            form,
             focus: true,
         });
         self.open_folder = None;
@@ -312,6 +328,8 @@ pub enum MenuRequest {
     Window { position: Pos2 },
     /// The extensions menu, below the puzzle-piece button.
     Extensions { position: Pos2 },
+    /// The Profiles menu, below the avatar button.
+    Profiles { position: Pos2 },
     /// A tab's context menu, acting on `targets`, at the pointer.
     Tab { targets: Vec<TabId>, position: Pos2 },
     /// A folder's context menu, at the pointer.
@@ -353,6 +371,12 @@ struct CachedFavicon {
 pub struct ChromeContext<'a> {
     /// The profile's chrome colour.
     pub color: ChromeColor,
+    /// The product, for the profile dialog's wording.
+    pub brand: &'a Brand,
+    /// The current profile: its directory name, display name and avatar.
+    pub profile_dir: &'a str,
+    pub profile_name: &'a str,
+    pub avatar: Avatar,
     /// The engine, for what the chrome may promise (Stop).
     pub engine: &'a EngineInfo,
     /// The browser-wide engine error to show in the status area, if any.
@@ -397,12 +421,15 @@ pub fn draw(
 ) -> Vec<Command> {
     let ChromeContext {
         color,
+        profile_name,
+        avatar,
         engine,
         engine_error,
         frameless,
         maximized,
         pinned,
         history,
+        ..
     } = *context;
     let mut commands = Vec::new();
     let active = window.active_tab();
@@ -619,9 +646,17 @@ pub fn draw(
                     }
                 }
 
-                // From the right: the extensions menu, the pinned actions
-                // (in their order), then the address bar takes the rest.
+                // From the right: the profile's avatar, the extensions
+                // menu, the pinned actions (in their order), then the
+                // address bar takes the rest.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let profile = avatar_button(ui, &palette, window, color, avatar, profile_name)
+                        .on_hover_text(profile_name);
+                    if profile.clicked() {
+                        state.menu_request = Some(MenuRequest::Profiles {
+                            position: profile.rect.left_bottom(),
+                        });
+                    }
                     if engine.extensions.is_some() {
                         let puzzle =
                             puzzle_button(ui, &palette, window).on_hover_text("Extensions");
@@ -687,7 +722,7 @@ pub fn draw(
             });
         });
 
-    commands.extend(draw_prompt(ui, state));
+    commands.extend(draw_prompt(ui, window, context, state));
     commands.extend(draw_launcher(ui, window, history, state));
 
     // The status text floats over the bottom-left corner of the page as an
@@ -1564,8 +1599,21 @@ fn suggestion_row(ui: &mut Ui, entry: &HistoryEntry, picked: bool) -> egui::Resp
 /// The question the chrome is asking, as a small window over the page:
 /// a text field (and, when there is something to choose from, a choice
 /// of the existing folders or groups), OK and Cancel. Enter answers,
-/// Escape cancels. Returns the command the answer is.
-fn draw_prompt(ui: &mut Ui, state: &mut ChromeState) -> Vec<Command> {
+/// Escape cancels. The profile dialogs are drawn by
+/// [`draw_profile_prompt`] and [`draw_delete_profile_prompt`]. Returns
+/// the command the answer is.
+fn draw_prompt(
+    ui: &mut Ui,
+    window: &Window,
+    context: &ChromeContext<'_>,
+    state: &mut ChromeState,
+) -> Vec<Command> {
+    match state.prompt.as_ref().map(|p| &p.prompt) {
+        None => return Vec::new(),
+        Some(Prompt::Profile { .. }) => return draw_profile_prompt(ui, window, context, state),
+        Some(Prompt::DeleteProfile { .. }) => return draw_delete_profile_prompt(ui, state),
+        Some(_) => {}
+    }
     let Some(prompt) = state.prompt.as_mut() else {
         return Vec::new();
     };
@@ -1584,6 +1632,7 @@ fn draw_prompt(ui: &mut Ui, state: &mut ChromeState) -> Vec<Command> {
                 groups.clone(),
             ),
             Prompt::RenameFolder { .. } => ("Rename folder", "Name", "", Vec::new()),
+            Prompt::Profile { .. } | Prompt::DeleteProfile { .. } => return Vec::new(),
         };
     let mut answered = false;
     let mut cancelled = false;
@@ -1692,7 +1741,341 @@ fn draw_prompt(ui: &mut Ui, state: &mut ChromeState) -> Vec<Command> {
             }
             vec![Command::RenameFolder { folder, name }]
         }
+        Prompt::Profile { .. } | Prompt::DeleteProfile { .. } => Vec::new(),
     }
+}
+
+/// The profile dialog ("Customize your profile", or "Add a profile"): a
+/// preview of the avatar, the name, the theme colour, the avatar, and,
+/// for a profile other than the default one, what it takes from the
+/// default profile. Save (or Add) answers with the form; a profile that
+/// may be deleted gets a "Delete profile…" button that asks first.
+fn draw_profile_prompt(
+    ui: &mut Ui,
+    window: &Window,
+    context: &ChromeContext<'_>,
+    state: &mut ChromeState,
+) -> Vec<Command> {
+    let Some(prompt) = state.prompt.as_mut() else {
+        return Vec::new();
+    };
+    let Prompt::Profile { new, deletable, .. } = prompt.prompt else {
+        return Vec::new();
+    };
+    // The default profile is the one shared from, so it has nothing to
+    // take; a new profile is never the default one.
+    let takes_from_default = new || context.profile_dir != DEFAULT_PROFILE_NAME;
+    let offers_extensions = takes_from_default && context.engine.extensions.is_some();
+    let title = if new {
+        "Add a profile"
+    } else {
+        "Customize your profile"
+    };
+    let form = &mut prompt.form;
+    let mut answered = false;
+    let mut cancelled = false;
+    let mut delete = false;
+    egui::Window::new(title)
+        .id(Id::new("chrome-prompt"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_TOP, Vec2::new(0.0, 48.0))
+        .show(ui.ctx(), |ui| {
+            ui.set_min_width(360.0);
+            ui.vertical_centered(|ui| {
+                let (rect, _) = ui.allocate_exact_size(
+                    Vec2::splat(AVATAR_PREVIEW_RADIUS * 2.0 + 8.0),
+                    Sense::hover(),
+                );
+                paint_avatar(
+                    ui,
+                    rect.center(),
+                    AVATAR_PREVIEW_RADIUS,
+                    form.color,
+                    form.avatar,
+                    &prompt.text,
+                );
+            });
+            ui.add_space(4.0);
+            ui.label("Name");
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut prompt.text)
+                    .margin(theme::INPUT_MARGIN)
+                    .hint_text(format!("Name your {} profile", context.brand.name))
+                    .desired_width(f32::INFINITY),
+            );
+            if prompt.focus {
+                prompt.focus = false;
+                field.request_focus();
+                select_all(ui, field.id, prompt.text.chars().count());
+            }
+            if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                answered = true;
+            }
+            ui.add_space(8.0);
+            ui.label("Theme colour");
+            swatch_row(ui, &mut form.color);
+            ui.add_space(8.0);
+            ui.label("Avatar");
+            egui::Grid::new("profile-avatars")
+                .spacing([6.0, 6.0])
+                .show(ui, |ui| {
+                    for (i, avatar) in Avatar::ALL.iter().enumerate() {
+                        if avatar_choice(
+                            ui,
+                            *avatar,
+                            form.avatar == *avatar,
+                            form.color,
+                            &prompt.text,
+                        )
+                        .clicked()
+                        {
+                            form.avatar = *avatar;
+                        }
+                        if (i + 1) % AVATAR_COLUMNS == 0 {
+                            ui.end_row();
+                        }
+                    }
+                });
+            if takes_from_default {
+                ui.add_space(8.0);
+                ui.checkbox(
+                    &mut form.share_bookmarks,
+                    "Share bookmarks with the Default profile",
+                );
+                if offers_extensions {
+                    ui.checkbox(
+                        &mut form.copy_extensions,
+                        "Copy extensions from the Default profile",
+                    );
+                }
+                let note = if offers_extensions {
+                    "Shared bookmarks are one list both profiles keep. Copied extensions \
+                     are installed here and then independent. History is never shared."
+                } else {
+                    "Shared bookmarks are one list both profiles keep. History is never \
+                     shared."
+                };
+                ui.label(RichText::new(note).small().weak());
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                let can_answer = !prompt.text.trim().is_empty();
+                let verb = if new { "Add" } else { "Save" };
+                if ui.add_enabled(can_answer, Button::new(verb)).clicked() {
+                    answered = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancelled = true;
+                }
+                if deletable {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Delete profile…").clicked() {
+                            delete = true;
+                        }
+                    });
+                }
+            });
+            if ui.input(|i| i.key_pressed(Key::Escape)) {
+                cancelled = true;
+            }
+        });
+    if cancelled {
+        state.prompt = None;
+        return Vec::new();
+    }
+    if delete {
+        state.prompt = None;
+        return vec![Command::PromptDeleteProfile {
+            window: window.id,
+            profile: context.profile_dir.to_string(),
+        }];
+    }
+    if !answered || prompt.text.trim().is_empty() {
+        return Vec::new();
+    }
+    let Some(PromptState { text, mut form, .. }) = state.prompt.take() else {
+        return Vec::new();
+    };
+    form.name = text.trim().to_string();
+    if new {
+        vec![Command::CreateProfile(form)]
+    } else {
+        vec![Command::SaveProfile(form)]
+    }
+}
+
+/// "Delete this profile?": what goes with it, and Delete or Cancel.
+fn draw_delete_profile_prompt(ui: &mut Ui, state: &mut ChromeState) -> Vec<Command> {
+    let Some(prompt) = state.prompt.as_ref() else {
+        return Vec::new();
+    };
+    let Prompt::DeleteProfile {
+        profile,
+        name,
+        current,
+    } = &prompt.prompt
+    else {
+        return Vec::new();
+    };
+    let mut confirmed = false;
+    let mut cancelled = false;
+    egui::Window::new("Delete profile")
+        .id(Id::new("chrome-prompt"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_TOP, Vec2::new(0.0, 80.0))
+        .show(ui.ctx(), |ui| {
+            ui.set_min_width(360.0);
+            ui.set_max_width(420.0);
+            ui.label(format!(
+                "Delete \u{201c}{name}\u{201d} and everything it holds? Its bookmarks, \
+                 history, cookies, site data and extensions go with it. This cannot be \
+                 undone."
+            ));
+            if *current {
+                ui.add_space(4.0);
+                ui.label("Its windows will close and the Default profile will open.");
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                let danger = ui.visuals().error_fg_color;
+                if ui
+                    .add(Button::new(RichText::new("Delete").color(danger)))
+                    .clicked()
+                {
+                    confirmed = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancelled = true;
+                }
+            });
+            if ui.input(|i| i.key_pressed(Key::Escape)) {
+                cancelled = true;
+            }
+        });
+    if cancelled || confirmed {
+        let profile = profile.clone();
+        state.prompt = None;
+        if confirmed {
+            return vec![Command::DeleteProfile(profile)];
+        }
+    }
+    Vec::new()
+}
+
+/// A row of the chrome colours, the selected one outlined; a click
+/// selects. Returns true when the selection changed.
+pub fn swatch_row(ui: &mut Ui, selected: &mut ChromeColor) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        for color in ChromeColor::ALL {
+            let [r, g, b] = color.rgb();
+            let is_selected = *selected == color;
+            let stroke = if is_selected {
+                Stroke::new(2.0_f32, ui.visuals().strong_text_color())
+            } else {
+                Stroke::new(1.0_f32, Color32::from_black_alpha(40))
+            };
+            let swatch = ui
+                .add(
+                    Button::new("")
+                        .fill(Color32::from_rgb(r, g, b))
+                        .stroke(stroke)
+                        .corner_radius(theme::CORNER)
+                        .min_size(Vec2::splat(26.0)),
+                )
+                .on_hover_text(color.label());
+            if swatch.clicked() && !is_selected {
+                *selected = color;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+/// A profile's avatar: a disc of `color` with the avatar's glyph, or the
+/// first letter of `name`, in a colour that reads on it.
+pub fn paint_avatar(
+    ui: &Ui,
+    center: Pos2,
+    radius: f32,
+    color: ChromeColor,
+    avatar: Avatar,
+    name: &str,
+) {
+    let [r, g, b] = color.rgb();
+    let fill = Color32::from_rgb(r, g, b);
+    let ink = if luminance(fill) > 0.55 {
+        Color32::from_gray(24)
+    } else {
+        Color32::WHITE
+    };
+    let painter = ui.painter();
+    painter.circle_filled(center, radius, fill);
+    painter.circle_stroke(
+        center,
+        radius,
+        Stroke::new(1.0_f32, Color32::from_black_alpha(40)),
+    );
+    // The emoji font's glyphs are drawn a little smaller than their size
+    // says, so they get more of it than a letter does.
+    let font = if avatar.glyph().is_some() {
+        egui::FontId::proportional(radius * 1.3)
+    } else {
+        egui::FontId::new(radius * 1.15, egui::FontFamily::Name(theme::MEDIUM.into()))
+    };
+    painter.text(center, Align2::CENTER_CENTER, avatar.text(name), font, ink);
+}
+
+/// One avatar of the profile dialog's choice: the disc, outlined when
+/// `selected`, with its label as the tooltip.
+fn avatar_choice(
+    ui: &mut Ui,
+    avatar: Avatar,
+    selected: bool,
+    color: ChromeColor,
+    name: &str,
+) -> egui::Response {
+    let size = AVATAR_CHOICE_RADIUS * 2.0 + 6.0;
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    if ui.is_rect_visible(rect) {
+        if response.hovered() {
+            ui.painter().circle_filled(
+                rect.center(),
+                size / 2.0,
+                blend(ui.visuals().panel_fill, ui.visuals().text_color(), 0.1),
+            );
+        }
+        paint_avatar(ui, rect.center(), AVATAR_CHOICE_RADIUS, color, avatar, name);
+        if selected {
+            ui.painter().circle_stroke(
+                rect.center(),
+                AVATAR_CHOICE_RADIUS + 2.0,
+                Stroke::new(2.0_f32, ui.visuals().strong_text_color()),
+            );
+        }
+    }
+    response.on_hover_text(avatar.label())
+}
+
+/// The toolbar's profile button: the current profile's avatar; its menu
+/// is the Profiles menu.
+fn avatar_button(
+    ui: &mut Ui,
+    palette: &Palette,
+    window: &Window,
+    color: ChromeColor,
+    avatar: Avatar,
+    name: &str,
+) -> egui::Response {
+    let id = Id::new(("profile-menu", window.id));
+    let (rect, response, _) = icon_button_rect(ui, palette, id);
+    if ui.is_rect_visible(rect) {
+        paint_avatar(ui, rect.center(), AVATAR_RADIUS, color, avatar, name);
+    }
+    response
 }
 
 /// The width of each tab in a strip with `room` points for `tabs` tabs
