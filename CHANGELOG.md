@@ -14,8 +14,11 @@ All notable changes to the osmena crates. The crates version together.
   by name (each starts a browser for it), "Add Profile…", and a "Delete
   Profile" submenu. "Edit…" and "Add Profile…" open the profile dialog
   over the page: the name ("Name your <brand> profile"), the theme
-  colour (the chrome colour swatches), the avatar (the initial or one
-  of 24 glyphs from the chrome's emoji fallback font) and, for a
+  colour (the chrome colour swatches), the avatar (the initial, or a
+  glyph from the chrome's emoji fallback font, offered in two
+  palettes: "Sea creatures", ten of them, then "Assorted", 24;
+  `Avatar::PALETTES`, `AvatarPalette`, and the new `Avatar::{
+  SpoutingWhale, Dolphin, Fish, TropicalFish, Blowfish}`) and, for a
   profile other than the default one, "Share bookmarks with the Default
   profile" (the profile reads and writes the default profile's
   `bookmarks.toml`; turning it off keeps a copy) and, when the engine

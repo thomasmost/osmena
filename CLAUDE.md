@@ -324,6 +324,16 @@ reports it). Known: two browsers sharing the default profile's
 bookmarks each keep their own copy in memory and reload it on focus and
 before adding; a change made in both within the same moment loses one.
 
+Added 2026-10-28: the profile dialog's avatars come in two palettes,
+`Avatar::PALETTES` ("Sea creatures", ten glyphs, then "Assorted", the
+first round's 24), drawn as one labelled six-column grid each under the
+initial; five sea glyphs were added (`SpoutingWhale`, `Dolphin`, `Fish`,
+`TropicalFish`, `Blowfish`), chosen from what egui's NotoEmoji fallback
+font covers (crab, shark, squid, jellyfish, seal, and the other newer
+sea emoji are not in it; check the font's cmap before adding a glyph).
+Verified: `cargo test`, clippy, fmt, and a scripted run in Nautilus on
+Windows (the dialog with both palettes, a pick). Not verified: macOS.
+
 Known and left alone: a native menu (`native_menu`, `TrackPopupMenu` on
 Windows) blocks inside the event loop, so pages freeze under any
 context menu and the engine's wake requests queue up until it closes.

@@ -56,7 +56,8 @@ pub struct ProfileEntry {
 
 /// A profile's picture: a letter (the display name's first) or one of a
 /// few glyphs, drawn on the profile's colour. Stored by name
-/// (`avatar = "whale"`).
+/// (`avatar = "whale"`, `avatar = "tropical-fish"`). The dialog offers
+/// the glyphs in [`Avatar::PALETTES`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Avatar {
@@ -87,11 +88,75 @@ pub enum Avatar {
     Ghost,
     Telescope,
     Sailboat,
+    SpoutingWhale,
+    Dolphin,
+    Fish,
+    TropicalFish,
+    Blowfish,
+}
+
+/// A named group of avatars, as the profile dialog shows them: a heading
+/// and a grid of glyphs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AvatarPalette {
+    pub name: &'static str,
+    pub avatars: &'static [Avatar],
 }
 
 impl Avatar {
-    /// Every avatar, in the order the profile dialog shows them.
-    pub const ALL: [Avatar; 25] = [
+    /// The dialog's palettes, in order: the sea creatures first, then the
+    /// assorted set. [`Avatar::Initial`] belongs to neither; the dialog
+    /// offers it ahead of them. An avatar may appear in more than one
+    /// palette.
+    pub const PALETTES: [AvatarPalette; 2] = [
+        AvatarPalette {
+            name: "Sea creatures",
+            avatars: &[
+                Avatar::Whale,
+                Avatar::SpoutingWhale,
+                Avatar::Dolphin,
+                Avatar::Octopus,
+                Avatar::Shell,
+                Avatar::Fish,
+                Avatar::TropicalFish,
+                Avatar::Blowfish,
+                Avatar::Turtle,
+                Avatar::Penguin,
+            ],
+        },
+        AvatarPalette {
+            name: "Assorted",
+            avatars: &[
+                Avatar::Cat,
+                Avatar::Panda,
+                Avatar::Whale,
+                Avatar::Octopus,
+                Avatar::Shell,
+                Avatar::Turtle,
+                Avatar::Penguin,
+                Avatar::Frog,
+                Avatar::Rabbit,
+                Avatar::Bear,
+                Avatar::Koala,
+                Avatar::Dragon,
+                Avatar::Rocket,
+                Avatar::Moon,
+                Avatar::Star,
+                Avatar::Cactus,
+                Avatar::Blossom,
+                Avatar::Coffee,
+                Avatar::Guitar,
+                Avatar::Anchor,
+                Avatar::Bolt,
+                Avatar::Ghost,
+                Avatar::Telescope,
+                Avatar::Sailboat,
+            ],
+        },
+    ];
+
+    /// Every avatar once: the initial, then every glyph.
+    pub const ALL: [Avatar; 30] = [
         Avatar::Initial,
         Avatar::Cat,
         Avatar::Panda,
@@ -117,6 +182,11 @@ impl Avatar {
         Avatar::Ghost,
         Avatar::Telescope,
         Avatar::Sailboat,
+        Avatar::SpoutingWhale,
+        Avatar::Dolphin,
+        Avatar::Fish,
+        Avatar::TropicalFish,
+        Avatar::Blowfish,
     ];
 
     pub fn label(self) -> &'static str {
@@ -146,6 +216,11 @@ impl Avatar {
             Avatar::Ghost => "Ghost",
             Avatar::Telescope => "Telescope",
             Avatar::Sailboat => "Sailboat",
+            Avatar::SpoutingWhale => "Spouting whale",
+            Avatar::Dolphin => "Dolphin",
+            Avatar::Fish => "Fish",
+            Avatar::TropicalFish => "Tropical fish",
+            Avatar::Blowfish => "Blowfish",
         }
     }
 
@@ -180,6 +255,11 @@ impl Avatar {
             Avatar::Ghost => "\u{1F47B}",
             Avatar::Telescope => "\u{1F52D}",
             Avatar::Sailboat => "\u{26F5}",
+            Avatar::SpoutingWhale => "\u{1F40B}",
+            Avatar::Dolphin => "\u{1F42C}",
+            Avatar::Fish => "\u{1F41F}",
+            Avatar::TropicalFish => "\u{1F420}",
+            Avatar::Blowfish => "\u{1F421}",
         })
     }
 
@@ -591,15 +671,55 @@ mod tests {
 
     #[test]
     fn every_avatar_has_a_label_and_the_initial_draws_the_first_letter() {
-        assert_eq!(Avatar::ALL.len(), 25);
-        for avatar in Avatar::ALL {
+        assert_eq!(Avatar::ALL.len(), 30);
+        for (i, avatar) in Avatar::ALL.iter().enumerate() {
             assert!(!avatar.label().is_empty());
             if let Some(glyph) = avatar.glyph() {
                 assert_eq!(glyph.chars().count(), 1, "{avatar:?}");
             }
+            assert!(!Avatar::ALL[..i].contains(avatar), "{avatar:?} twice");
         }
         assert_eq!(Avatar::Initial.text(" élodie"), "É");
         assert_eq!(Avatar::Initial.text(""), "?");
         assert_eq!(Avatar::Whale.text("Alice"), "\u{1F433}");
+        assert_eq!(Avatar::TropicalFish.text("Alice"), "\u{1F420}");
+    }
+
+    #[test]
+    fn the_palettes_hold_every_glyph_and_the_sea_creatures_come_first() {
+        let [sea, assorted] = Avatar::PALETTES;
+        assert_eq!(sea.name, "Sea creatures");
+        assert_eq!(sea.avatars.len(), 10);
+        assert_eq!(assorted.name, "Assorted");
+        assert_eq!(assorted.avatars.len(), 24);
+        for palette in Avatar::PALETTES {
+            for (i, avatar) in palette.avatars.iter().enumerate() {
+                assert!(avatar.glyph().is_some(), "{avatar:?} in {}", palette.name);
+                assert!(
+                    !palette.avatars[..i].contains(avatar),
+                    "{avatar:?} twice in {}",
+                    palette.name
+                );
+            }
+        }
+        for avatar in Avatar::ALL {
+            let offered = Avatar::PALETTES.iter().any(|p| p.avatars.contains(&avatar));
+            assert_eq!(offered, avatar.glyph().is_some(), "{avatar:?}");
+        }
+    }
+
+    #[test]
+    fn avatars_are_stored_by_kebab_case_name() {
+        #[derive(Serialize, Deserialize)]
+        struct Holder {
+            avatar: Avatar,
+        }
+        let text = toml::to_string(&Holder {
+            avatar: Avatar::TropicalFish,
+        })
+        .unwrap();
+        assert_eq!(text.trim(), "avatar = \"tropical-fish\"");
+        let back: Holder = toml::from_str("avatar = \"spouting-whale\"").unwrap();
+        assert_eq!(back.avatar, Avatar::SpoutingWhale);
     }
 }

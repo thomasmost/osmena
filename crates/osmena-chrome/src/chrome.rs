@@ -63,7 +63,7 @@ const AVATAR_RADIUS: f32 = 10.0;
 const AVATAR_CHOICE_RADIUS: f32 = 16.0;
 const AVATAR_PREVIEW_RADIUS: f32 = 28.0;
 /// How many avatars per row in the profile dialog.
-const AVATAR_COLUMNS: usize = 5;
+const AVATAR_COLUMNS: usize = 6;
 
 /// The shades the chrome paints with, all derived from the profile's
 /// [`ChromeColor`]: the tab strip is the swatch at its top and fades to
@@ -1817,26 +1817,44 @@ fn draw_profile_prompt(
             swatch_row(ui, &mut form.color);
             ui.add_space(8.0);
             ui.label("Avatar");
-            egui::Grid::new("profile-avatars")
-                .spacing([6.0, 6.0])
-                .show(ui, |ui| {
-                    for (i, avatar) in Avatar::ALL.iter().enumerate() {
-                        if avatar_choice(
-                            ui,
-                            *avatar,
-                            form.avatar == *avatar,
-                            form.color,
-                            &prompt.text,
-                        )
-                        .clicked()
-                        {
-                            form.avatar = *avatar;
+            ui.horizontal(|ui| {
+                if avatar_choice(
+                    ui,
+                    Avatar::Initial,
+                    form.avatar == Avatar::Initial,
+                    form.color,
+                    &prompt.text,
+                )
+                .clicked()
+                {
+                    form.avatar = Avatar::Initial;
+                }
+                ui.label(RichText::new("The name's initial").weak());
+            });
+            for palette in Avatar::PALETTES {
+                ui.add_space(4.0);
+                ui.label(RichText::new(palette.name).small().weak());
+                egui::Grid::new(("profile-avatars", palette.name))
+                    .spacing([6.0, 6.0])
+                    .show(ui, |ui| {
+                        for (i, avatar) in palette.avatars.iter().enumerate() {
+                            if avatar_choice(
+                                ui,
+                                *avatar,
+                                form.avatar == *avatar,
+                                form.color,
+                                &prompt.text,
+                            )
+                            .clicked()
+                            {
+                                form.avatar = *avatar;
+                            }
+                            if (i + 1) % AVATAR_COLUMNS == 0 {
+                                ui.end_row();
+                            }
                         }
-                        if (i + 1) % AVATAR_COLUMNS == 0 {
-                            ui.end_row();
-                        }
-                    }
-                });
+                    });
+            }
             if takes_from_default {
                 ui.add_space(8.0);
                 ui.checkbox(
