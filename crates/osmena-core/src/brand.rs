@@ -146,6 +146,10 @@ pub struct EngineInfo {
     /// Whether the engine can stop a load in progress. The chrome shows a
     /// disabled Stop button, with the reason, when it cannot.
     pub supports_stop: bool,
+    /// Whether the engine searches a page for text (the find bar,
+    /// `TabHost::find`). The bar's shortcut and menu entries are disabled
+    /// when it cannot.
+    pub find: bool,
     /// Pixels one wheel notch scrolls, when the platform reports the
     /// wheel in lines. Engines scroll different distances per notch.
     pub wheel_line_px: f32,
@@ -181,6 +185,7 @@ pub(crate) mod test_support {
         version: "0.0",
         data_dir: "engine",
         supports_stop: true,
+        find: true,
         wheel_line_px: 40.0,
         extensions: None,
         page_tools: PageTools::ALL,

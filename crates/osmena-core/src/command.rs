@@ -8,7 +8,7 @@ use crate::bookmarks::{Bookmark, Bookmarks};
 use crate::bookmarks_html;
 use crate::event::PendingTab;
 use crate::extension::ExtensionSource;
-use crate::model::{Browser, Folder, FolderId, LoadState, Tab, TabId, Window, WindowId};
+use crate::model::{Browser, FindState, Folder, FolderId, LoadState, Tab, TabId, Window, WindowId};
 use crate::profile::{Avatar, DEFAULT_PROFILE_NAME};
 use crate::settings::ChromeColor;
 use crate::update::{AvailableUpdate, UpdateStatus};
@@ -172,6 +172,20 @@ pub enum Command {
     },
     /// Write every bookmark to an HTML bookmarks file at `path`.
     ExportBookmarks(PathBuf),
+    /// Open the find bar in `window` (`Ctrl+F`), or give it the focus
+    /// again; a search it still holds runs again.
+    OpenFind(WindowId),
+    /// Close the find bar; the active match stays selected in the page.
+    CloseFind(WindowId),
+    /// The bar's text or its case switch changed: search the active tab
+    /// afresh from the top (nothing is highlighted for empty text).
+    FindText {
+        window: WindowId,
+        text: String,
+        match_case: bool,
+    },
+    FindNext(WindowId),
+    FindPrevious(WindowId),
     NextTab(WindowId),
     PreviousTab(WindowId),
     /// Activate the tab at `index` in `window`'s strip; nothing if there
@@ -501,6 +515,25 @@ pub enum EngineAction {
     PickFile(BookmarksFile),
     /// Write the bookmarks as an HTML bookmarks file at `path`.
     ExportBookmarks(PathBuf),
+    /// Search `tab`'s page for `text`: afresh from the top, or on to the
+    /// next match (`find_next`) `forward` or back, wrapping at the ends.
+    /// The engine highlights the matches and answers with
+    /// `EngineEvent::FindResult`s.
+    Find {
+        tab: TabId,
+        text: String,
+        forward: bool,
+        match_case: bool,
+        find_next: bool,
+    },
+    /// End the search in `tab`: drop the highlights, and the selection of
+    /// the active match too when `clear_selection`.
+    StopFinding {
+        tab: TabId,
+        clear_selection: bool,
+    },
+    /// Put the keyboard focus in `window`'s find bar.
+    FocusFind(WindowId),
     /// The history changed: persist it (the shell may wait a moment and
     /// save once for a run of changes).
     SaveHistory,
@@ -850,6 +883,67 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             }
         }
         Command::ExportBookmarks(path) => vec![EngineAction::ExportBookmarks(path.clone())],
+        Command::OpenFind(window) => {
+            let Some(w) = browser.window_mut(*window) else {
+                return Vec::new();
+            };
+            let state = w.find.get_or_insert_with(FindState::default);
+            let mut actions = vec![EngineAction::FocusFind(*window)];
+            if !state.text.is_empty() {
+                actions.push(EngineAction::Find {
+                    tab: w.active,
+                    text: state.text.clone(),
+                    forward: true,
+                    match_case: state.match_case,
+                    find_next: false,
+                });
+            }
+            actions
+        }
+        Command::CloseFind(window) => {
+            let Some(w) = browser.window_mut(*window) else {
+                return Vec::new();
+            };
+            if w.find.take().is_none() {
+                return Vec::new();
+            }
+            vec![EngineAction::StopFinding {
+                tab: w.active,
+                clear_selection: false,
+            }]
+        }
+        Command::FindText {
+            window,
+            text,
+            match_case,
+        } => {
+            let Some(w) = browser.window_mut(*window) else {
+                return Vec::new();
+            };
+            let Some(state) = w.find.as_mut() else {
+                return Vec::new();
+            };
+            state.text = text.clone();
+            state.match_case = *match_case;
+            state.current = 0;
+            state.total = 0;
+            if text.is_empty() {
+                vec![EngineAction::StopFinding {
+                    tab: w.active,
+                    clear_selection: true,
+                }]
+            } else {
+                vec![EngineAction::Find {
+                    tab: w.active,
+                    text: text.clone(),
+                    forward: true,
+                    match_case: *match_case,
+                    find_next: false,
+                }]
+            }
+        }
+        Command::FindNext(window) => find_step(browser, *window, true),
+        Command::FindPrevious(window) => find_step(browser, *window, false),
         Command::PromptRenameFolder(folder) => {
             let Some(window) = browser.window_of_folder(*folder) else {
                 return Vec::new();
@@ -1253,6 +1347,52 @@ fn history_step(browser: &mut Browser, tab: TabId, action: EngineAction) -> Vec<
     }
 }
 
+/// Step to the next or previous match in `window`'s active tab, when
+/// the bar is open with something to search for.
+fn find_step(browser: &Browser, window: WindowId, forward: bool) -> Vec<EngineAction> {
+    let Some(w) = browser.window(window) else {
+        return Vec::new();
+    };
+    match &w.find {
+        Some(state) if !state.text.is_empty() => vec![EngineAction::Find {
+            tab: w.active,
+            text: state.text.clone(),
+            forward,
+            match_case: state.match_case,
+            find_next: true,
+        }],
+        _ => Vec::new(),
+    }
+}
+
+/// The active tab of `w` changed from `previous` (`None` when it was
+/// closed): a search the find bar holds ends in the old tab and starts
+/// over in the new one.
+fn find_follows_switch(w: &mut Window, previous: Option<TabId>) -> Vec<EngineAction> {
+    let Some(state) = w.find.as_mut() else {
+        return Vec::new();
+    };
+    state.current = 0;
+    state.total = 0;
+    let mut actions = Vec::new();
+    if let Some(previous) = previous {
+        actions.push(EngineAction::StopFinding {
+            tab: previous,
+            clear_selection: true,
+        });
+    }
+    if !state.text.is_empty() {
+        actions.push(EngineAction::Find {
+            tab: w.active,
+            text: state.text.clone(),
+            forward: true,
+            match_case: state.match_case,
+            find_next: false,
+        });
+    }
+    actions
+}
+
 /// A new tab at `url`, active, with the focus left on its page.
 fn new_tab(browser: &mut Browser, window: WindowId, url: Url) -> Vec<EngineAction> {
     if browser.window(window).is_none() {
@@ -1266,10 +1406,12 @@ fn new_tab(browser: &mut Browser, window: WindowId, url: Url) -> Vec<EngineActio
     w.tabs.push(Tab::new(tab, url.clone()));
     w.active = tab;
     w.select_only(tab);
-    vec![
+    let mut actions = vec![
         EngineAction::Hide(previous),
         EngineAction::CreateTab { window, tab, url },
-    ]
+    ];
+    actions.extend(find_follows_switch(w, Some(previous)));
+    actions
 }
 
 /// Add a tab at `url` beside `opener` that does not become active: the
@@ -1312,6 +1454,7 @@ pub(crate) fn close_tab(browser: &mut Browser, tab: TabId) -> Vec<EngineAction> 
             let next = index.min(w.tabs.len() - 1);
             w.active = w.tabs[next].id;
             w.select_only(w.active);
+            actions.extend(find_follows_switch(w, None));
             Some(w.active)
         } else {
             return actions;
@@ -1344,7 +1487,9 @@ fn activate_tab(browser: &mut Browser, tab: TabId) -> Vec<EngineAction> {
     let previous = w.active;
     w.active = tab;
     w.select_only(tab);
-    vec![EngineAction::Hide(previous), EngineAction::Show(tab)]
+    let mut actions = vec![EngineAction::Hide(previous), EngineAction::Show(tab)];
+    actions.extend(find_follows_switch(w, Some(previous)));
+    actions
 }
 
 fn toggle_tab_selection(browser: &mut Browser, tab: TabId) {
@@ -2964,6 +3109,158 @@ mod tests {
         );
         assert!(!Command::ToggleBookmarksBar.changes_bookmarks());
         assert!(!Command::PickBookmarksFile(BookmarksFile::Export).changes_bookmarks());
+    }
+
+    #[test]
+    fn the_find_bar_opens_searches_steps_and_closes() {
+        let (mut b, window, tab) = one_window();
+        assert_eq!(
+            dispatch(&mut b, &Command::OpenFind(window)),
+            vec![EngineAction::FocusFind(window)]
+        );
+        assert_eq!(b.window(window).unwrap().find, Some(FindState::default()));
+        // Nothing to step to yet.
+        assert!(dispatch(&mut b, &Command::FindNext(window)).is_empty());
+        let actions = dispatch(
+            &mut b,
+            &Command::FindText {
+                window,
+                text: "needle".to_string(),
+                match_case: false,
+            },
+        );
+        assert_eq!(
+            actions,
+            vec![EngineAction::Find {
+                tab,
+                text: "needle".to_string(),
+                forward: true,
+                match_case: false,
+                find_next: false
+            }]
+        );
+        assert_eq!(
+            dispatch(&mut b, &Command::FindPrevious(window)),
+            vec![EngineAction::Find {
+                tab,
+                text: "needle".to_string(),
+                forward: false,
+                match_case: false,
+                find_next: true
+            }]
+        );
+        // Reopening with text runs the search again and refocuses.
+        assert_eq!(
+            dispatch(&mut b, &Command::OpenFind(window)),
+            vec![
+                EngineAction::FocusFind(window),
+                EngineAction::Find {
+                    tab,
+                    text: "needle".to_string(),
+                    forward: true,
+                    match_case: false,
+                    find_next: false
+                }
+            ]
+        );
+        // Empty text clears the highlights.
+        assert_eq!(
+            dispatch(
+                &mut b,
+                &Command::FindText {
+                    window,
+                    text: String::new(),
+                    match_case: true
+                }
+            ),
+            vec![EngineAction::StopFinding {
+                tab,
+                clear_selection: true
+            }]
+        );
+        assert_eq!(
+            dispatch(&mut b, &Command::CloseFind(window)),
+            vec![EngineAction::StopFinding {
+                tab,
+                clear_selection: false
+            }]
+        );
+        assert!(b.window(window).unwrap().find.is_none());
+        assert!(dispatch(&mut b, &Command::CloseFind(window)).is_empty());
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::FindText {
+                    window,
+                    text: "x".to_string(),
+                    match_case: false
+                }
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_search_follows_the_active_tab() {
+        let (mut b, window, tabs) = window_with_tabs(2);
+        dispatch(&mut b, &Command::OpenFind(window));
+        dispatch(
+            &mut b,
+            &Command::FindText {
+                window,
+                text: "needle".to_string(),
+                match_case: false,
+            },
+        );
+        let actions = dispatch(&mut b, &Command::ActivateTab(tabs[0]));
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::Hide(tabs[1]),
+                EngineAction::Show(tabs[0]),
+                EngineAction::StopFinding {
+                    tab: tabs[1],
+                    clear_selection: true
+                },
+                EngineAction::Find {
+                    tab: tabs[0],
+                    text: "needle".to_string(),
+                    forward: true,
+                    match_case: false,
+                    find_next: false
+                }
+            ]
+        );
+        // Closing the active tab moves the search without stopping it in
+        // the tab that is gone.
+        let actions = dispatch(&mut b, &Command::CloseTab(tabs[0]));
+        assert!(actions.contains(&EngineAction::Find {
+            tab: tabs[1],
+            text: "needle".to_string(),
+            forward: true,
+            match_case: false,
+            find_next: false
+        }));
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, EngineAction::StopFinding { .. }))
+        );
+        // A new tab: the search starts over there.
+        let actions = dispatch(
+            &mut b,
+            &Command::NewTab {
+                window,
+                url: Some(url("https://c.example/")),
+            },
+        );
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            EngineAction::Find {
+                find_next: false,
+                ..
+            }
+        )));
     }
 
     fn window_with_tabs(n: usize) -> (Browser, WindowId, Vec<TabId>) {

@@ -81,6 +81,9 @@ pub struct MenuBarInput<'a> {
     pub keymap: &'a Keymap,
     /// Whether a closed tab is there to reopen.
     pub can_reopen: bool,
+    /// Whether the engine searches pages (`EngineInfo::find`): the Edit
+    /// menu's Find entries are disabled otherwise.
+    pub can_find: bool,
     pub bookmarks: BookmarksMenu<'a>,
     pub history: &'a History,
     /// The current profile: its directory name and its display name.
@@ -174,13 +177,15 @@ impl MenuEntry {
 }
 
 /// The window menu behind the "☰" button. `can_reopen` says whether a
-/// closed tab is there to reopen; the Bookmarks submenu holds the
+/// closed tab is there to reopen; `can_find` whether the engine
+/// searches pages (`EngineInfo::find`); the Bookmarks submenu holds the
 /// actions and a submenu per group ([`bookmarks_entries`]); `updates`
 /// is the entry about updates, above Settings.
 pub fn window_menu(
     window: &Window,
     keymap: &Keymap,
     can_reopen: bool,
+    can_find: bool,
     bookmarks: BookmarksMenu<'_>,
     updates: UpdateMenu<'_>,
 ) -> Vec<MenuEntry> {
@@ -190,11 +195,17 @@ pub fn window_menu(
     if let MenuEntry::Item { enabled, .. } = &mut reopen {
         *enabled = can_reopen;
     }
+    let mut find = bound(CommandKind::Find);
+    if let MenuEntry::Item { enabled, label, .. } = &mut find {
+        *enabled = can_find;
+        label.push('…');
+    }
     vec![
         bound(CommandKind::NewTab),
         bound(CommandKind::NewWindow),
         reopen,
         MenuEntry::Separator,
+        find,
         bound(CommandKind::Home),
         MenuEntry::Submenu {
             label: "Bookmarks".to_string(),
@@ -432,6 +443,7 @@ pub fn menu_bar(input: &MenuBarInput<'_>) -> Vec<MenuEntry> {
         window,
         keymap,
         can_reopen,
+        can_find,
         bookmarks,
         history,
         profile,
@@ -602,6 +614,10 @@ pub fn menu_bar(input: &MenuBarInput<'_>) -> Vec<MenuEntry> {
                     command: PageCommand::Delete,
                 }),
                 edit("Select All", cmd, Code::KeyA, PageCommand::SelectAll),
+                MenuEntry::Separator,
+                bound(CommandKind::Find, "Find…", can_find),
+                bound(CommandKind::FindNext, "Find Next", can_find),
+                bound(CommandKind::FindPrevious, "Find Previous", can_find),
             ],
         ),
         menu(
@@ -1435,7 +1451,7 @@ mod tests {
     fn window_menu_carries_the_keymap_chords_and_commands() {
         let w = window_with(1);
         let keymap = Keymap::defaults(Platform::Windows);
-        let entries = window_menu(&w, &keymap, true, no_bookmarks(), idle_updates());
+        let entries = window_menu(&w, &keymap, true, true, no_bookmarks(), idle_updates());
         assert_eq!(
             labels(&entries),
             vec![
@@ -1443,6 +1459,7 @@ mod tests {
                 "New window",
                 "Reopen closed tab",
                 "-",
+                "Find in page…",
                 "Open homepage",
                 "Bookmarks",
                 "Full screen",
@@ -1457,11 +1474,22 @@ mod tests {
         assert_eq!(
             enabled(&entries),
             vec![
-                true, true, true, true, true, true, true, true, true, true, true, true
+                true, true, true, true, true, true, true, true, true, true, true, true, true
             ]
         );
         assert!(matches!(
-            &entries[8],
+            &entries[4],
+            MenuEntry::Item {
+                command: Command::OpenFind(WindowId(1)),
+                chord: Some(_),
+                ..
+            }
+        ));
+        // An engine that cannot search: the entry stays, disabled.
+        let without = window_menu(&w, &keymap, true, false, no_bookmarks(), idle_updates());
+        assert!(!enabled(&without)[4]);
+        assert!(matches!(
+            &entries[9],
             MenuEntry::Item {
                 command: Command::CheckForUpdates,
                 ..
@@ -1480,14 +1508,14 @@ mod tests {
             }
         ));
         assert!(matches!(
-            &entries[6],
+            &entries[7],
             MenuEntry::Item {
                 command: Command::ToggleFullscreen(WindowId(1)),
                 ..
             }
         ));
         assert!(matches!(
-            &entries[11],
+            &entries[12],
             MenuEntry::Item {
                 command: Command::Quit,
                 ..
@@ -1502,6 +1530,7 @@ mod tests {
             &w,
             &Keymap::defaults(Platform::Windows),
             false,
+            true,
             no_bookmarks(),
             idle_updates(),
         );
@@ -1539,8 +1568,8 @@ mod tests {
     fn the_bookmarks_submenu_holds_the_actions_and_the_bar_switch() {
         let w = window_with(2);
         let keymap = Keymap::defaults(Platform::Windows);
-        let entries = window_menu(&w, &keymap, true, no_bookmarks(), idle_updates());
-        let MenuEntry::Submenu { entries: menu, .. } = &entries[5] else {
+        let entries = window_menu(&w, &keymap, true, true, no_bookmarks(), idle_updates());
+        let MenuEntry::Submenu { entries: menu, .. } = &entries[6] else {
             panic!("bookmarks is a submenu");
         };
         assert_eq!(
@@ -1591,8 +1620,8 @@ mod tests {
         // A blank page cannot be bookmarked.
         let mut blank = window_with(1);
         blank.tabs[0].url = Url::parse("about:blank").unwrap();
-        let entries = window_menu(&blank, &keymap, true, no_bookmarks(), idle_updates());
-        let MenuEntry::Submenu { entries: menu, .. } = &entries[5] else {
+        let entries = window_menu(&blank, &keymap, true, true, no_bookmarks(), idle_updates());
+        let MenuEntry::Submenu { entries: menu, .. } = &entries[6] else {
             panic!("bookmarks is a submenu");
         };
         assert_eq!(&enabled(menu)[..2], &[false, false]);
@@ -1754,6 +1783,7 @@ mod tests {
             &w,
             &Keymap::defaults(Platform::Windows),
             true,
+            true,
             BookmarksMenu {
                 bookmarks: &bookmarks,
                 bar_shown: true,
@@ -1764,7 +1794,7 @@ mod tests {
             entries: menu,
             enabled: true,
             ..
-        } = &entries[5]
+        } = &entries[6]
         else {
             panic!("bookmarks is an enabled submenu");
         };
@@ -2434,6 +2464,7 @@ mod page_menu_tests {
             window,
             keymap,
             can_reopen: false,
+            can_find: true,
             bookmarks: BookmarksMenu {
                 bookmarks,
                 bar_shown: false,

@@ -122,6 +122,7 @@ mod tests {
         version: "0",
         data_dir: "engine",
         supports_stop: true,
+        find: false,
         wheel_line_px: 40.0,
         extensions: None,
         page_tools: PageTools::NONE,

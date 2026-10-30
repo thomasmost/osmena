@@ -378,6 +378,19 @@ impl<E: Engine> App<E> {
 
     fn run_commands(&mut self, commands: Vec<Command>, event_loop: &ActiveEventLoop) {
         for command in commands {
+            // The find bar is the engine's to fill; an engine that cannot
+            // search never gets a bar (its entries are disabled, but the
+            // chord is still bound).
+            if matches!(
+                command,
+                Command::OpenFind(_)
+                    | Command::FindText { .. }
+                    | Command::FindNext(_)
+                    | Command::FindPrevious(_)
+            ) && !self.engine_info.find
+            {
+                continue;
+            }
             // Shared bookmarks are another browser's too: start from what
             // is on disk, so its additions survive ours.
             if command.changes_bookmarks() && self.bookmarks_shared() {
@@ -417,6 +430,7 @@ impl<E: Engine> App<E> {
             window,
             keymap: &self.keymap,
             can_reopen: !self.browser.closed_tabs.is_empty(),
+            can_find: self.engine_info.find,
             bookmarks: menus::BookmarksMenu {
                 bookmarks: &self.browser.bookmarks,
                 bar_shown: self.browser.settings.show_bookmarks_bar,
@@ -617,6 +631,30 @@ impl<E: Engine> App<E> {
             EngineAction::FocusAddressBar(window) => {
                 if let Some(w) = self.window_for_core_id(window) {
                     w.focus_address_bar();
+                }
+            }
+            EngineAction::FocusFind(window) => {
+                if let Some(w) = self.window_for_core_id(window) {
+                    w.focus_find();
+                }
+            }
+            EngineAction::Find {
+                tab,
+                text,
+                forward,
+                match_case,
+                find_next,
+            } => {
+                if let Some(w) = self.window_for_tab(tab) {
+                    w.find(tab, &text, forward, match_case, find_next);
+                }
+            }
+            EngineAction::StopFinding {
+                tab,
+                clear_selection,
+            } => {
+                if let Some(w) = self.window_for_tab(tab) {
+                    w.stop_finding(tab, clear_selection);
                 }
             }
             EngineAction::SetFullscreen { window, fullscreen } => {
@@ -1029,6 +1067,7 @@ fn tab_of(event: &EngineEvent) -> Option<TabId> {
         | EngineEvent::HistoryChanged { tab, .. }
         | EngineEvent::StatusChanged { tab, .. }
         | EngineEvent::FaviconChanged { tab, .. }
+        | EngineEvent::FindResult { tab, .. }
         | EngineEvent::TabCrashed { tab, .. }
         | EngineEvent::FrameReady(tab)
         | EngineEvent::TabClosed(tab) => Some(*tab),

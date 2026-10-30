@@ -39,8 +39,8 @@ pub use history::{History, HistoryEntry, HistoryError};
 pub use input::{ButtonAction, EngineInput, KeyInput, MouseButton};
 pub use keymap::{ChordParseError, CommandKind, KeyChord, Keymap, KeymapError, Platform};
 pub use model::{
-    Browser, Favicon, Folder, FolderId, LoadState, RgbaImage, StripItem, Tab, TabId, Window,
-    WindowId,
+    Browser, Favicon, FindState, Folder, FolderId, LoadState, RgbaImage, StripItem, Tab, TabId,
+    Window, WindowId,
 };
 pub use profile::{Avatar, Profile, ProfileEntry, ProfileError};
 pub use settings::{ChromeColor, ProfileSettings, SearchSettings, Settings, SettingsError};

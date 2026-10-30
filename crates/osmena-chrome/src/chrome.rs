@@ -73,6 +73,10 @@ const BAR_TITLE_MAX_CHARS: usize = 24;
 const BAR_OVERFLOW_WIDTH: f32 = 28.0;
 /// The bookmark popover's width.
 const BOOKMARK_POPOVER_WIDTH: f32 = 340.0;
+/// The find bar's field width, and its inset from the page's top-right
+/// corner.
+const FIND_FIELD_WIDTH: f32 = 220.0;
+const FIND_BAR_INSET: f32 = 12.0;
 /// The toolbar's avatar button: the disc inside it, and the discs the
 /// profile dialog offers.
 const AVATAR_RADIUS: f32 = 10.0;
@@ -235,6 +239,14 @@ pub struct ChromeState {
     site_icons: HashMap<String, CachedFavicon>,
     /// A chip of the bookmarks bar being dragged along it: its index.
     bar_drag: Option<usize>,
+    /// The find bar's field text, synced from the model when the bar
+    /// opens and sent back as `Command::FindText` as it is edited.
+    find_text: String,
+    /// Set by `EngineAction::FocusFind`; consumed by the next frame.
+    pub focus_find: bool,
+    /// Whether the find bar was drawn last frame, so opening it syncs the
+    /// field from the model.
+    find_shown: bool,
 }
 
 /// The address bar's suggestions: what the user typed (the field shows
@@ -824,6 +836,8 @@ pub fn draw(
                 });
             });
         });
+
+    commands.extend(find_bar(ui, window, state, keymap));
 
     if show_bookmarks_bar {
         let bar_frame = Frame::new().fill(palette.toolbar).inner_margin(Margin {
@@ -1903,6 +1917,152 @@ fn draw_prompt(
         | Prompt::Bookmark { .. }
         | Prompt::DeleteBookmarkGroup { .. } => Vec::new(),
     }
+}
+
+/// The find bar, a pill at the top right of the page while
+/// `Window::find` is open: the text, the count ("3 of 41", "No
+/// matches"), previous and next, a match-case switch, and ×. Enter
+/// steps forward (Shift+Enter back), Escape closes; the field has the
+/// keyboard, so F3 is handled here too.
+fn find_bar(
+    ui: &mut Ui,
+    window: &Window,
+    state: &mut ChromeState,
+    keymap: &Keymap,
+) -> Vec<Command> {
+    let Some(find) = &window.find else {
+        state.find_shown = false;
+        return Vec::new();
+    };
+    let mut commands = Vec::new();
+    if !state.find_shown || state.focus_find {
+        state.find_text = find.text.clone();
+    }
+    state.find_shown = true;
+    let ctx = ui.ctx().clone();
+    // The page area left after the panels above it.
+    let page = ui.available_rect_before_wrap();
+    let id = Id::new(("find-bar", window.id));
+    let field_id = Id::new(("find-field", window.id));
+    egui::Area::new(id)
+        .order(egui::Order::Foreground)
+        .fixed_pos(Pos2::new(page.right(), page.top() + FIND_BAR_INSET / 2.0))
+        .pivot(Align2::RIGHT_TOP)
+        .show(&ctx, |ui| {
+            // Pivoted on its right edge, inset from the page's.
+            ui.add_space(0.0);
+            Frame::popup(ui.style())
+                .corner_radius(theme::PILL)
+                .inner_margin(Margin::symmetric(8, 5))
+                .outer_margin(Margin {
+                    left: 0,
+                    right: FIND_BAR_INSET as i8,
+                    top: 0,
+                    bottom: 0,
+                })
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        theme::pill_fields(ui);
+                        let field = ui.add(
+                            egui::TextEdit::singleline(&mut state.find_text)
+                                .id(field_id)
+                                .margin(theme::INPUT_MARGIN)
+                                .hint_text("Find in page")
+                                .desired_width(FIND_FIELD_WIDTH),
+                        );
+                        if state.focus_find {
+                            state.focus_find = false;
+                            field.request_focus();
+                            select_all(ui, field_id, state.find_text.chars().count());
+                        }
+                        if field.changed() {
+                            commands.push(Command::FindText {
+                                window: window.id,
+                                text: state.find_text.clone(),
+                                match_case: find.match_case,
+                            });
+                        }
+                        let count = if find.text.is_empty() {
+                            String::new()
+                        } else if find.total == 0 {
+                            "No matches".to_string()
+                        } else {
+                            format!("{} of {}", find.current.max(1), find.total)
+                        };
+                        let weak = ui.visuals().weak_text_color();
+                        let count_width = ui
+                            .painter()
+                            .layout_no_wrap(
+                                "No matches".to_string(),
+                                TextStyle::Small.resolve(ui.style()),
+                                weak,
+                            )
+                            .size()
+                            .x;
+                        ui.add_sized(
+                            Vec2::new(count_width, ACTION_SIZE),
+                            egui::Label::new(RichText::new(count).small().color(weak)),
+                        );
+                        let stepping = !find.text.is_empty() && find.total > 0;
+                        if ui
+                            .add_enabled(stepping, Button::new("▲"))
+                            .on_hover_text(hint(keymap, CommandKind::FindPrevious, "Previous"))
+                            .clicked()
+                        {
+                            commands.push(Command::FindPrevious(window.id));
+                        }
+                        if ui
+                            .add_enabled(stepping, Button::new("▼"))
+                            .on_hover_text(hint(keymap, CommandKind::FindNext, "Next"))
+                            .clicked()
+                        {
+                            commands.push(Command::FindNext(window.id));
+                        }
+                        if ui
+                            .selectable_label(find.match_case, "Aa")
+                            .on_hover_text("Match case")
+                            .clicked()
+                        {
+                            commands.push(Command::FindText {
+                                window: window.id,
+                                text: state.find_text.clone(),
+                                match_case: !find.match_case,
+                            });
+                        }
+                        if ui
+                            .add(Button::new("×"))
+                            .on_hover_text("Close (Esc)")
+                            .clicked()
+                        {
+                            commands.push(Command::CloseFind(window.id));
+                        }
+                        // Keys while the field has them.
+                        if field.has_focus() || field.lost_focus() {
+                            let (enter, shift, escape, f3) = ui.input(|i| {
+                                (
+                                    i.key_pressed(Key::Enter),
+                                    i.modifiers.shift,
+                                    i.key_pressed(Key::Escape),
+                                    i.key_pressed(Key::F3),
+                                )
+                            });
+                            if escape {
+                                commands.push(Command::CloseFind(window.id));
+                            } else if (enter || f3) && stepping {
+                                commands.push(if shift {
+                                    Command::FindPrevious(window.id)
+                                } else {
+                                    Command::FindNext(window.id)
+                                });
+                                // Enter blurs an egui field; the bar keeps
+                                // the keyboard.
+                                field.request_focus();
+                            }
+                        }
+                    });
+                });
+        });
+    commands
 }
 
 /// The bookmark popover, under the toolbar's star (or the chip whose

@@ -134,6 +134,9 @@ pub enum CommandKind {
     Stop,
     Home,
     FocusAddressBar,
+    Find,
+    FindNext,
+    FindPrevious,
     BookmarkPage,
     ToggleBookmarksBar,
     NewWindow,
@@ -146,7 +149,7 @@ pub enum CommandKind {
 impl CommandKind {
     /// Every kind, in the order the settings window lists them. Used to
     /// check that the defaults bind each one and to write the keymap file.
-    pub const ALL: [CommandKind; 27] = [
+    pub const ALL: [CommandKind; 30] = [
         CommandKind::NewTab,
         CommandKind::CloseTab,
         CommandKind::ReopenClosedTab,
@@ -167,6 +170,9 @@ impl CommandKind {
         CommandKind::Stop,
         CommandKind::Home,
         CommandKind::FocusAddressBar,
+        CommandKind::Find,
+        CommandKind::FindNext,
+        CommandKind::FindPrevious,
         CommandKind::BookmarkPage,
         CommandKind::ToggleBookmarksBar,
         CommandKind::NewWindow,
@@ -192,6 +198,9 @@ impl CommandKind {
             CommandKind::Stop => "stop".to_string(),
             CommandKind::Home => "home".to_string(),
             CommandKind::FocusAddressBar => "focus-address-bar".to_string(),
+            CommandKind::Find => "find".to_string(),
+            CommandKind::FindNext => "find-next".to_string(),
+            CommandKind::FindPrevious => "find-previous".to_string(),
             CommandKind::BookmarkPage => "bookmark-page".to_string(),
             CommandKind::ToggleBookmarksBar => "toggle-bookmarks-bar".to_string(),
             CommandKind::NewWindow => "new-window".to_string(),
@@ -223,6 +232,9 @@ impl CommandKind {
             CommandKind::Stop => "Stop loading".to_string(),
             CommandKind::Home => "Open homepage".to_string(),
             CommandKind::FocusAddressBar => "Focus address bar".to_string(),
+            CommandKind::Find => "Find in page".to_string(),
+            CommandKind::FindNext => "Find next".to_string(),
+            CommandKind::FindPrevious => "Find previous".to_string(),
             CommandKind::BookmarkPage => "Bookmark this page".to_string(),
             CommandKind::ToggleBookmarksBar => "Show bookmarks bar".to_string(),
             CommandKind::NewWindow => "New window".to_string(),
@@ -251,6 +263,9 @@ impl CommandKind {
             CommandKind::Stop => Command::Stop(tab),
             CommandKind::Home => Command::Home(tab),
             CommandKind::FocusAddressBar => Command::FocusAddressBar(window),
+            CommandKind::Find => Command::OpenFind(window),
+            CommandKind::FindNext => Command::FindNext(window),
+            CommandKind::FindPrevious => Command::FindPrevious(window),
             CommandKind::BookmarkPage => Command::ToggleBookmark(tab),
             CommandKind::ToggleBookmarksBar => Command::ToggleBookmarksBar,
             CommandKind::NewWindow => Command::NewWindow,
@@ -358,6 +373,9 @@ impl Keymap {
         // Not bare Escape: pages need it to close menus and dialogs.
         bind(primary, Code::Period, CommandKind::Stop);
         bind(primary, Code::KeyL, CommandKind::FocusAddressBar);
+        bind(primary, Code::KeyF, CommandKind::Find);
+        bind(primary, Code::KeyG, CommandKind::FindNext);
+        bind(shift, Code::KeyG, CommandKind::FindPrevious);
         bind(primary, Code::KeyD, CommandKind::BookmarkPage);
         bind(shift, Code::KeyB, CommandKind::ToggleBookmarksBar);
         bind(primary, Code::KeyN, CommandKind::NewWindow);
@@ -388,6 +406,8 @@ impl Keymap {
                 bind(Modifiers::empty(), Code::F5, CommandKind::Reload);
                 bind(Modifiers::ALT, Code::Home, CommandKind::Home);
                 bind(Modifiers::ALT, Code::KeyD, CommandKind::FocusAddressBar);
+                bind(Modifiers::empty(), Code::F3, CommandKind::FindNext);
+                bind(Modifiers::SHIFT, Code::F3, CommandKind::FindPrevious);
                 bind(Modifiers::empty(), Code::F11, CommandKind::ToggleFullscreen);
             }
         }

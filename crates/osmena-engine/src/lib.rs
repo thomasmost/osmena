@@ -175,6 +175,15 @@ pub trait TabHost {
     /// The context menu of `tab`'s page closed, after any command it
     /// produced: let go of what was held for it. Default: nothing.
     fn context_menu_closed(&self, _tab: TabId) {}
+    /// Search `tab`'s page for `text`: afresh from the top, or on to the
+    /// next match (`find_next`) `forward` or back, wrapping. The engine
+    /// highlights the matches, scrolls the active one into view, and
+    /// reports `EngineEvent::FindResult`s. Only engines whose
+    /// `EngineInfo::find` is true receive it. Default: nothing.
+    fn find(&self, _tab: TabId, _text: &str, _forward: bool, _match_case: bool, _find_next: bool) {}
+    /// End the search in `tab`: drop the highlights, and the selection of
+    /// the active match too when `clear_selection`. Default: nothing.
+    fn stop_finding(&self, _tab: TabId, _clear_selection: bool) {}
 }
 
 /// One engine instance, one per process. The shell builds it through a

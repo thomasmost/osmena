@@ -5,7 +5,8 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-10-30 (bookmarks: the star and its popover, the
+_Last updated: 2026-10-30 (find in page: the bar, the engine contract
+and the result event; bookmarks: the star and its popover, the
 bookmarks bar, the Bookmarks menu with import and export, merged
 suggestions, the favicon cache; before that updates over the air)._
 
@@ -96,6 +97,17 @@ No engine is needed; the workspace builds in under a minute.
   directly, so bookmarks and history rank together. Site favicons are
   the shell's (`favicons.rs`, `Profile::favicons_dir`), handed to the
   chrome as `ChromeContext::site_icons` by host (`Bookmarks::site_key`).
+- **The find bar is the window's state; the engine does the finding.**
+  `Window::find` (`FindState`) is open or not; the chrome draws the bar
+  from it and edits a copy of the text, sending `Command::FindText` as
+  it changes. `dispatch` turns the commands into `EngineAction::Find`
+  and `StopFinding` for the active tab and moves the search when the
+  active tab changes (`find_follows_switch`); `apply` folds
+  `EngineEvent::FindResult` into the state for the active tab only,
+  letting interim counts only grow. An engine says whether it can with
+  `EngineInfo::find`; the shell drops the find commands otherwise and
+  the menus disable the entries, so a chord on such an engine does
+  nothing.
 - **A question to the user is a `Prompt`.** A menu entry that needs
   input (a folder or group name) issues a `Command::Prompt…`, `dispatch`
   answers with `EngineAction::ShowPrompt` carrying what the question
@@ -246,6 +258,15 @@ No engine is needed; the workspace builds in under a minute.
   adds; the shared behaviour is documented here only.
 
 ## Status and handoff (2026-10-19)
+
+Added 2026-10-30 (later): find in page (see Conventions). Verified:
+`cargo test` (the commands, the tab switch, the result folding, the
+menus), clippy, fmt, and a scripted run of Nautilus on Windows: Ctrl+F
+opens the bar, typing highlights the matches with the count, Enter and
+Shift+Enter step with the active match turning orange, a miss reads
+"No matches", Escape closes. Not verified: F3 while the field has the
+keyboard, the macOS Edit menu entries, Paladin (whose engine reports
+`find: false`, so the entries are disabled).
 
 Added 2026-10-30: bookmarks (see Conventions): the star in the toolbar
 and its popover, the bookmarks bar with favicon chips, overflow and

@@ -201,6 +201,15 @@ pub enum EngineEvent {
     /// The installed extensions, or something about one of them, changed:
     /// this is the whole list as it now stands.
     ExtensionsChanged(Vec<Extension>),
+    /// Where a search stands in `tab`: the active match's ordinal (from
+    /// one) among `total`. Engines report several times per search, the
+    /// count growing, then once with `final_update`.
+    FindResult {
+        tab: TabId,
+        current: u32,
+        total: u32,
+        final_update: bool,
+    },
 }
 
 /// Fold an engine event into the model. Returns follow-up actions; only
@@ -259,6 +268,25 @@ pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
         }
         EngineEvent::FaviconChanged { tab, favicon } => {
             with_tab(browser, *tab, |t| t.favicon = Some(favicon.clone()));
+            Vec::new()
+        }
+        EngineEvent::FindResult {
+            tab,
+            current,
+            total,
+            final_update,
+        } => {
+            // Only the active tab's search is shown; interim counts only
+            // grow, so a smaller one is a stale report.
+            if let Some(window) = browser.window_of_tab(*tab)
+                && let Some(w) = browser.window_mut(window)
+                && w.active == *tab
+                && let Some(state) = w.find.as_mut()
+                && (*final_update || *total >= state.total)
+            {
+                state.total = *total;
+                state.current = *current;
+            }
             Vec::new()
         }
         EngineEvent::NewTabRequested {

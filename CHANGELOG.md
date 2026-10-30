@@ -6,6 +6,21 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- Find in page. `Window::find` (`FindState`: text, match case, current
+  and total) is the find bar, drawn at the top right of the page while
+  open; `Command::{OpenFind, CloseFind, FindText, FindNext,
+  FindPrevious}` with `CommandKind::{Find, FindNext, FindPrevious}`
+  (`Ctrl+F`; `Ctrl+G`/`Ctrl+Shift+G`, and `F3`/`Shift+F3` on Windows;
+  `Cmd` on macOS); `EngineAction::{Find, StopFinding, FocusFind}`;
+  `EngineEvent::FindResult` (the count and the active match's ordinal,
+  folded into the active tab's state, interim counts only growing);
+  `TabHost::{find, stop_finding}` with defaults that do nothing;
+  `EngineInfo::find`, which disables the menu entries and drops the
+  commands for an engine that cannot search. A search follows the
+  active tab: switching, opening or closing a tab ends it in the old
+  tab and starts it over in the new one. The ☰ menu gains "Find in
+  page…" and the menu bar's Edit menu "Find…", "Find Next", "Find
+  Previous".
 - Bookmarks as the everyday surface over the groups that already
   existed. The toolbar's star (`CommandKind::BookmarkPage`, `Ctrl+D`)
   bookmarks the page into the last-used group and opens the bookmark
@@ -46,6 +61,8 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- `EngineInfo` has a new field, `find`; `menus::window_menu` takes
+  `can_find` and `MenuBarInput` has `can_find`.
 - `menus::window_menu` and `MenuBarInput` take a `BookmarksMenu` (the
   bookmarks and whether the bar is shown) in place of `&Bookmarks`; the
   Bookmarks submenu is always enabled, since it holds the actions.

@@ -168,6 +168,16 @@ The engine contract, in `osmena-engine`:
   and a click lists the tabs; expanded (from its menu), its tabs follow
   it. The chip's menu also renames, ungroups, or closes the folder.
   Folders are not kept across launches.
+- **Find in page**, when the engine searches pages (`EngineInfo::find`).
+  `Ctrl+F` (or "Find in page…" in the ☰ menu, "Find…" in the macOS Edit
+  menu) opens a pill at the top right of the page: the text is searched
+  as it is typed, every match is highlighted and the active one scrolled
+  into view, the count reads "3 of 41" or "No matches", Enter and `F3`
+  (`Ctrl+G`) step forward, Shift+Enter and `Shift+F3` (`Ctrl+Shift+G`)
+  back, wrapping at the ends, "Aa" matches case, and Escape or × closes
+  the bar leaving the active match selected. Switching tabs runs the
+  search again in the new tab. An engine without it has the entries
+  disabled.
 - **Bookmarks.** The star at the address bar's right end (or `Ctrl+D`)
   bookmarks the page into the group the last bookmark went to ("Bookmarks
   bar" to begin with) and opens a popover under the star to name it,

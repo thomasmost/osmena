@@ -216,6 +216,19 @@ impl<E: Engine> BrowserWindow<E> {
         self.repaints.poll(&self.window)
     }
 
+    pub fn focus_find(&mut self) {
+        self.chrome.focus_find = true;
+        self.window.request_redraw();
+    }
+
+    pub fn find(&self, tab: TabId, text: &str, forward: bool, match_case: bool, find_next: bool) {
+        self.host.find(tab, text, forward, match_case, find_next);
+    }
+
+    pub fn stop_finding(&self, tab: TabId, clear_selection: bool) {
+        self.host.stop_finding(tab, clear_selection);
+    }
+
     pub fn focus_address_bar(&mut self) {
         self.chrome.focus_address = true;
         self.window.request_redraw();
@@ -978,6 +991,7 @@ impl<E: Engine> BrowserWindow<E> {
                     model,
                     keymap,
                     !browser.closed_tabs.is_empty(),
+                    self.engine_info.find,
                     menus::BookmarksMenu {
                         bookmarks: &browser.bookmarks,
                         bar_shown: browser.settings.show_bookmarks_bar,

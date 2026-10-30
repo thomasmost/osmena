@@ -115,6 +115,17 @@ impl Tab {
     }
 }
 
+/// The find bar's state in a window: what is searched for, and where
+/// the engine says the active tab stands ("3 of 41").
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FindState {
+    pub text: String,
+    pub match_case: bool,
+    /// The active match's ordinal, from 1; 0 before any result.
+    pub current: u32,
+    pub total: u32,
+}
+
 /// A browser window. Invariants: a window always has at least one tab,
 /// `active` names one of them, and `selected` holds `active` plus any other
 /// tabs of this window the user added to the selection (Ctrl-click,
@@ -131,6 +142,8 @@ pub struct Window {
     /// Every folder has at least one tab; a folder whose last tab goes
     /// goes with it.
     pub folders: Vec<Folder>,
+    /// The find bar, while it is open.
+    pub find: Option<FindState>,
 }
 
 impl Window {
@@ -144,6 +157,7 @@ impl Window {
             selected: vec![active],
             fullscreen: false,
             folders: Vec::new(),
+            find: None,
         }
     }
 
