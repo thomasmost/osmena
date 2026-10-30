@@ -36,7 +36,7 @@ use osmena_core::command::open_window;
 use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
     Bookmarks, Brand, Browser, Command, Downloads, EngineInfo, History, Keymap, Platform, Profile,
-    Settings, SiteZoom, dispatch,
+    Session, Settings, SiteZoom, dispatch,
 };
 use osmena_engine::{Engine, EngineError, Waker};
 use url::Url;
@@ -68,6 +68,10 @@ pub struct CliArgs {
     /// needs a build number to compare with.
     #[arg(long, hide = true, value_name = "URL")]
     pub update_manifest: Option<String>,
+    /// Open the windows and tabs of the last run, whatever the setting
+    /// says (the update's restart and a profile handover pass it).
+    #[arg(long, hide = true)]
+    pub restore: bool,
 }
 
 /// Builds the engine once the event loop is running: the engine's data
@@ -197,10 +201,44 @@ pub fn run<E: Engine>(launch: Launch<E>) -> ExitCode {
     browser.history = history;
     browser.zoom = zoom;
     browser.downloads = downloads;
-    let first: Url = urls.first().cloned().unwrap_or_else(|| browser.homepage());
-    let mut actions = open_window(&mut browser, first);
-    let window = browser.windows[0].id;
-    for url in urls.into_iter().skip(1) {
+    // The last run's windows: opened again when the setting (or the
+    // flag) says so, offered when the last run did not end cleanly (its
+    // claim on the profile is still there and names no live process).
+    let session = match Session::load(&browser.profile.session_path()) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!(
+                "{e} (in {}); starting without a session",
+                browser.profile.session_path().display()
+            );
+            Session::default()
+        }
+    };
+    let pid_path = browser.profile.pid_path();
+    let crashed = pid_path.exists() && !profiles::in_use(&pid_path);
+    let mut actions = Vec::new();
+    if (browser.settings.restore_windows_on_launch || args.restore) && !session.is_empty() {
+        log::info!(
+            "restoring {} window(s) with {} tab(s)",
+            session.windows.len(),
+            session.tab_count()
+        );
+        actions.extend(osmena_core::command::restore_session(
+            &mut browser,
+            &session,
+        ));
+    }
+    let mut urls = urls.into_iter();
+    if browser.windows.is_empty() {
+        let first: Url = urls.next().unwrap_or_else(|| browser.homepage());
+        actions.extend(open_window(&mut browser, first));
+        if crashed && !session.is_empty() {
+            log::info!("the last run did not end cleanly; offering its session");
+            browser.crashed_session = Some(session);
+        }
+    }
+    let window = browser.windows.last().expect("a window was opened").id;
+    for url in urls {
         actions.extend(dispatch(
             &mut browser,
             &Command::NewTab {

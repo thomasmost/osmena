@@ -11,7 +11,7 @@ use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
     Bookmarks, BookmarksFile, Brand, Browser, Command, CommandKind, DownloadPolicy, EngineAction,
     EngineEvent, EngineInfo, ExtensionSource, InstalledExtensions, Keymap, PageCommand, Profile,
-    TabId, UpdateStatus, WindowId, apply, bookmarks_html, dispatch,
+    Session, TabId, UpdateStatus, WindowGeometry, WindowId, apply, bookmarks_html, dispatch,
 };
 use osmena_engine::{Engine, TabHost, Waker};
 use url::Url;
@@ -32,6 +32,8 @@ use crate::window::BrowserWindow;
 /// How long after a history change the file is written, so a run of
 /// page loads is saved once.
 const HISTORY_SAVE_DELAY: Duration = Duration::from_secs(3);
+/// How long after the windows or tabs last changed the session is written.
+const SESSION_SAVE_DELAY: Duration = Duration::from_secs(2);
 
 /// The user events: the engine asked us to spin its message loop, the
 /// `--exit-after` timer ran out, an item of the menu bar was picked
@@ -95,6 +97,15 @@ pub struct App<E: Engine> {
     update_check_due: Option<Instant>,
     /// The favicons of visited sites on disk, for the bookmarks bar.
     favicons: FaviconCache,
+    /// When the windows or tabs last changed without the session being
+    /// written since.
+    session_dirty: Option<Instant>,
+    /// Where a window about to open goes (`EngineAction::PlaceWindow`
+    /// arrives before its `OpenWindow`).
+    pending_geometry: HashMap<WindowId, WindowGeometry>,
+    /// The session was written for this exit already (before the
+    /// windows went), so `exiting` leaves it alone.
+    session_final: bool,
 }
 
 impl<E: Engine> App<E> {
@@ -159,6 +170,74 @@ impl<E: Engine> App<E> {
             updater,
             update_check_due: None,
             favicons,
+            session_dirty: None,
+            pending_geometry: HashMap::new(),
+            session_final: false,
+        }
+    }
+
+    /// Write the session a moment from now.
+    fn session_changed(&mut self) {
+        self.session_dirty.get_or_insert_with(Instant::now);
+    }
+
+    /// The windows and tabs as they stand, with their places on screen.
+    fn capture_session(&self) -> Session {
+        let windows = &self.windows;
+        let geometry = |id: WindowId| {
+            windows
+                .values()
+                .find(|w| w.core_id() == id)
+                .and_then(|w| w.geometry())
+        };
+        Session::capture(&self.browser, &geometry)
+    }
+
+    fn write_session(&mut self, session: &Session) {
+        self.session_dirty = None;
+        let path = self.browser.profile.session_path();
+        if let Err(e) = session.save(&path) {
+            log::error!("cannot save the session to {}: {e}", path.display());
+        }
+    }
+
+    /// Write the windows and tabs as they stand.
+    fn save_session(&mut self) {
+        let session = self.capture_session();
+        self.write_session(&session);
+    }
+
+    /// The session as it stands is what the next start should bring
+    /// back: written now, before the windows go, and not again at exit.
+    fn save_session_for_exit(&mut self, session: Option<Session>) {
+        if self.session_final || self.delete_on_exit.is_some() {
+            return;
+        }
+        let session = session.unwrap_or_else(|| self.capture_session());
+        self.write_session(&session);
+        self.session_final = true;
+    }
+
+    /// `geometry`, unless its top-left corner is off every monitor (one
+    /// was unplugged): then only the size is kept.
+    fn on_a_monitor(event_loop: &ActiveEventLoop, geometry: WindowGeometry) -> WindowGeometry {
+        let (x, y) = (geometry.x + 32, geometry.y + 32);
+        let visible = event_loop.available_monitors().any(|m| {
+            let p = m.position();
+            let s = m.size();
+            x >= p.x
+                && y >= p.y
+                && x < p.x.saturating_add(s.width as i32)
+                && y < p.y.saturating_add(s.height as i32)
+        });
+        if visible {
+            geometry
+        } else {
+            WindowGeometry {
+                x: i32::MIN,
+                y: i32::MIN,
+                ..geometry
+            }
         }
     }
 
@@ -377,7 +456,21 @@ impl<E: Engine> App<E> {
     }
 
     fn run_commands(&mut self, commands: Vec<Command>, event_loop: &ActiveEventLoop) {
+        if !commands.is_empty() {
+            self.session_changed();
+        }
         for command in commands {
+            // Closing the last window or tab quits: the session to come
+            // back to is the one before the close, not the empty model
+            // after it.
+            let before_close = matches!(
+                command,
+                Command::CloseWindow(_)
+                    | Command::CloseTab(_)
+                    | Command::CloseTabs(_)
+                    | Command::CloseFolder(_)
+            )
+            .then(|| self.capture_session());
             // The find bar is the engine's to fill; an engine that cannot
             // search never gets a bar (its entries are disabled, but the
             // chord is still bound).
@@ -397,6 +490,11 @@ impl<E: Engine> App<E> {
                 self.reload_bookmarks(event_loop);
             }
             let actions = dispatch(&mut self.browser, &command);
+            if actions.iter().any(|a| matches!(a, EngineAction::Quit))
+                && let Some(session) = before_close
+            {
+                self.save_session_for_exit(Some(session));
+            }
             self.perform_all(actions, event_loop);
         }
     }
@@ -493,9 +591,14 @@ impl<E: Engine> App<E> {
             return;
         };
         match action {
+            EngineAction::PlaceWindow { window, geometry } => {
+                self.pending_geometry
+                    .insert(window, Self::on_a_monitor(event_loop, geometry));
+            }
             EngineAction::OpenWindow { window, tab, url } => {
                 let frameless = !self.browser.settings.system_title_bar;
                 let title = self.window_title();
+                let geometry = self.pending_geometry.remove(&window);
                 match BrowserWindow::open(
                     event_loop,
                     engine,
@@ -504,6 +607,7 @@ impl<E: Engine> App<E> {
                     window,
                     &title,
                     frameless,
+                    geometry,
                 ) {
                     Ok(mut bw) => {
                         bw.host_mut().create_tab(tab, url);
@@ -923,6 +1027,7 @@ impl<E: Engine> App<E> {
                 }
             }
             EngineAction::Quit => {
+                self.save_session_for_exit(None);
                 self.exiting = true;
                 self.close_settings_window();
                 self.windows.clear();
@@ -979,6 +1084,15 @@ impl<E: Engine> App<E> {
                 _ => {}
             }
             let actions = apply(&mut self.browser, &event);
+            if matches!(
+                event,
+                EngineEvent::UrlChanged { .. }
+                    | EngineEvent::TitleChanged { .. }
+                    | EngineEvent::TabClosed(_)
+                    | EngineEvent::NewTabRequested { .. }
+            ) {
+                self.session_changed();
+            }
             if let EngineEvent::FaviconChanged { tab, favicon } = &event
                 && let Some(host) = self
                     .browser
@@ -1346,6 +1460,9 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
             }
             self.run_commands(commands, event_loop);
         } else if self.windows.contains_key(&window_id) {
+            if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_)) {
+                self.session_changed();
+            }
             if matches!(event, WindowEvent::Focused(true)) {
                 // Another browser may have made or deleted a profile, or
                 // changed the shared bookmarks, meanwhile.
@@ -1420,6 +1537,14 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
                 next = repaint::earliest(next, Some(since + HISTORY_SAVE_DELAY));
             }
         }
+        // The session likewise.
+        if let Some(since) = self.session_dirty {
+            if since.elapsed() >= SESSION_SAVE_DELAY {
+                self.save_session();
+            } else {
+                next = repaint::earliest(next, Some(since + SESSION_SAVE_DELAY));
+            }
+        }
         if let Some(due) = self.update_check_due {
             if due <= Instant::now() {
                 self.automatic_update_check(event_loop);
@@ -1445,6 +1570,9 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.exiting = true;
         self.save_history();
+        // The windows as they were, for the next start (not for a
+        // profile on its way out).
+        self.save_session_for_exit(None);
         // What was still downloading is cut short with the engine.
         if self
             .browser

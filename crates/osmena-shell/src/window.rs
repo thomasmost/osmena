@@ -18,7 +18,7 @@ use osmena_chrome::routing::{
 use osmena_chrome::{icon, input, keyutils, menus, native_menu, theme};
 use osmena_core::{
     Brand, Browser, Command, Cursor, EngineInfo, EngineInput, Favicon, KeyInput, Keymap,
-    PageContext, Platform, Prompt, TabId, WindowId,
+    PageContext, Platform, Prompt, TabId, WindowGeometry, WindowId,
 };
 use osmena_engine::{
     BlitRect, Engine, EngineError, PagePaint, PhysicalSize, ScreenRect, Surface, TabHost,
@@ -84,6 +84,7 @@ pub struct BrowserWindow<E: Engine> {
 }
 
 impl<E: Engine> BrowserWindow<E> {
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         event_loop: &ActiveEventLoop,
         engine: &E,
@@ -92,12 +93,23 @@ impl<E: Engine> BrowserWindow<E> {
         id: WindowId,
         title: &str,
         frameless: bool,
+        geometry: Option<WindowGeometry>,
     ) -> Result<BrowserWindow<E>, EngineError> {
-        let attributes = Window::default_attributes()
+        let mut attributes = Window::default_attributes()
             .with_title(title)
             .with_inner_size(LogicalSize::new(1024.0, 768.0))
             .with_min_inner_size(LogicalSize::new(400.0, 300.0))
             .with_window_icon(icon::window_icon(brand));
+        // Where the window was last time, when the session says; a
+        // position off every monitor is dropped by the caller.
+        if let Some(g) = geometry {
+            attributes = attributes
+                .with_inner_size(PhysicalSize::new(g.width.max(400), g.height.max(300)))
+                .with_maximized(g.maximized);
+            if g.x != i32::MIN {
+                attributes = attributes.with_position(PhysicalPosition::new(g.x, g.y));
+            }
+        }
         let attributes = frameless_attributes(attributes, frameless);
         let window = event_loop
             .create_window(attributes)
@@ -237,6 +249,20 @@ impl<E: Engine> BrowserWindow<E> {
     pub fn toggle_downloads(&mut self) {
         self.chrome.downloads_open = !self.chrome.downloads_open;
         self.window.request_redraw();
+    }
+
+    /// Where the window is, for the session: the outer position and the
+    /// inner size in physical pixels, and whether it is maximized.
+    pub fn geometry(&self) -> Option<WindowGeometry> {
+        let position = self.window.outer_position().ok()?;
+        let size = self.window.inner_size();
+        Some(WindowGeometry {
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+            maximized: self.window.is_maximized(),
+        })
     }
 
     pub fn start_download(&self, tab: TabId, url: Url) {
@@ -881,6 +907,7 @@ impl<E: Engine> BrowserWindow<E> {
                 site_icons,
                 page_zoom: browser.settings.page_zoom,
                 downloads: &browser.downloads,
+                restore_offer: browser.crashed_session.is_some(),
             };
             commands = chrome::draw(ui, model, &context, chrome_state, keymap);
             let rect = ui.available_rect_before_wrap();

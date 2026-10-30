@@ -360,7 +360,7 @@ fn install_platform(
         "$ErrorActionPreference = 'SilentlyContinue'; \
          Wait-Process -Id {pid}; \
          Start-Process -FilePath {installer} -ArgumentList '/S' -Wait; \
-         Start-Process -FilePath {exe} -ArgumentList '--profile', {profile}",
+         Start-Process -FilePath {exe} -ArgumentList '--profile', {profile}, '--restore'",
         pid = std::process::id(),
         installer = quote(&file.to_string_lossy()),
         exe = quote(&exe.to_string_lossy()),
@@ -449,7 +449,7 @@ fn install_platform(
         .arg("-c")
         .arg(
             "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; \
-             open -n \"$2\" --args --profile \"$3\"",
+             open -n \"$2\" --args --profile \"$3\" --restore",
         )
         .arg("sh")
         .arg(std::process::id().to_string())

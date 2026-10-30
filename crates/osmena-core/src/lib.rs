@@ -21,6 +21,7 @@ pub mod input;
 pub mod keymap;
 pub mod model;
 pub mod profile;
+pub mod session;
 pub mod settings;
 pub mod suggest;
 pub mod update;
@@ -49,6 +50,9 @@ pub use model::{
     Window, WindowId, site_key,
 };
 pub use profile::{Avatar, Profile, ProfileEntry, ProfileError};
+pub use session::{
+    Session, SessionError, SessionFolder, SessionTab, SessionWindow, WindowGeometry,
+};
 pub use settings::{
     ChromeColor, DownloadSettings, ProfileSettings, SearchSettings, Settings, SettingsError,
 };

@@ -21,7 +21,10 @@ pub struct Settings {
     /// Loaded in every new window. A new tab asks for its address first
     /// (the launcher), so this is not what it opens on.
     pub new_tab_url: String,
-    /// Reserved for session restore; stored but not acted on in Phase 1.
+    /// Open the windows and tabs of the last run at the next start
+    /// ("Continue where you left off"; `crate::session`). Off, a start
+    /// opens the home page; the session is written all the same, and
+    /// offered after a crash.
     pub restore_windows_on_launch: bool,
     /// The colour of this profile's chrome (tab strip, toolbar tint), one of
     /// a few swatches so windows of different profiles tell apart at a glance.

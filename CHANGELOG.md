@@ -6,6 +6,22 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- Session restore. `Session` (`session.rs`: `SessionWindow` with a
+  `WindowGeometry`, `SessionTab`, `SessionFolder`, the closed tabs;
+  `session.toml` in the profile, `Profile::session_path`) is captured
+  by the shell (`Session::capture`) two seconds after the windows or
+  tabs change and at exit, and restored at start when
+  `Settings::restore_windows_on_launch` (now acted on: "Continue where
+  you left off") or the hidden `--restore` flag says so
+  (`command::restore_session`: each window's active tab loads and the
+  others are `Tab::deferred`, created in the engine when first shown;
+  `EngineAction::PlaceWindow` before each `OpenWindow` puts the window
+  where it was, unless that is off every monitor). A run that did not
+  end cleanly (the `running.pid` claim names no live process) leaves
+  `Browser::crashed_session`, offered in a bar under the toolbar
+  (`Command::{RestoreSession, DismissRestore}`). The update's restart
+  passes `--restore`. Deferred tabs are drawn faint and never asked of
+  the engine until shown; closing one asks nothing.
 - Downloads. `Browser::downloads` (`Downloads`, `Download`,
   `DownloadId`, `DownloadState`; `downloads.toml` in the profile,
   `Profile::downloads_path`, the newest 200 finished ones kept) is fed
@@ -105,6 +121,7 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- `BrowserWindow::open` takes an optional `WindowGeometry`.
 - `EngineInfo` has new fields, `find` and `downloads`;
   `menus::window_menu` takes `can_find` and `can_download` and
   `MenuBarInput` has both; `SettingsWindow::handle_event` takes whether

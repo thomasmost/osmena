@@ -13,6 +13,7 @@ use crate::model::{
     Browser, FindState, Folder, FolderId, LoadState, Tab, TabId, Window, WindowId, site_key,
 };
 use crate::profile::{Avatar, DEFAULT_PROFILE_NAME};
+use crate::session::{Session, WindowGeometry};
 use crate::settings::ChromeColor;
 use crate::update::{AvailableUpdate, UpdateStatus};
 use crate::zoom::{ZOOM_MAX, ZOOM_MIN, next_step};
@@ -227,6 +228,12 @@ pub enum Command {
     SetDownloadsDirectory(Option<PathBuf>),
     /// Quit although downloads are going (the confirmation's answer).
     ForceQuit,
+    /// Bring back the session the last run left behind
+    /// (`Browser::crashed_session`); `window`, the one the offer was
+    /// shown in, closes when it shows nothing but its first page.
+    RestoreSession(WindowId),
+    /// Decline that offer.
+    DismissRestore,
     NextTab(WindowId),
     PreviousTab(WindowId),
     /// Activate the tab at `index` in `window`'s strip; nothing if there
@@ -609,6 +616,12 @@ pub enum EngineAction {
     /// Show the system's folder dialog for the downloads directory; the
     /// answer is `Command::SetDownloadsDirectory`.
     PickFolder,
+    /// The window about to be opened (`OpenWindow` follows) goes where
+    /// it was last time. Sent before the window exists.
+    PlaceWindow {
+        window: WindowId,
+        geometry: WindowGeometry,
+    },
     /// The history changed: persist it (the shell may wait a moment and
     /// save once for a run of changes).
     SaveHistory,
@@ -1102,6 +1115,24 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             browser.quit_confirmed = true;
             vec![EngineAction::Quit]
         }
+        Command::RestoreSession(window) => {
+            let Some(session) = browser.crashed_session.take() else {
+                return Vec::new();
+            };
+            let mut actions = restore_session(browser, &session);
+            // The window the offer was in gives way when it shows only
+            // the page it started on.
+            if browser.windows.len() > 1
+                && browser.window(*window).is_some_and(|w| w.tabs.len() == 1)
+            {
+                actions.extend(close_window(browser, *window));
+            }
+            actions
+        }
+        Command::DismissRestore => {
+            browser.crashed_session = None;
+            Vec::new()
+        }
         Command::PromptRenameFolder(folder) => {
             let Some(window) = browser.window_of_folder(*folder) else {
                 return Vec::new();
@@ -1294,6 +1325,88 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             pass_through(browser, *tab, EngineAction::ContextMenuClosed(*tab))
         }
         Command::Quit => quit_guard(browser, None).unwrap_or_else(|| vec![EngineAction::Quit]),
+    }
+}
+
+/// Open the windows of `session`: each with its active tab loading and
+/// its other tabs deferred until shown, its folders back by name, and a
+/// `PlaceWindow` before its `OpenWindow` when its place is known. The
+/// closed-tab list comes back too.
+pub fn restore_session(browser: &mut Browser, session: &Session) -> Vec<EngineAction> {
+    let mut actions = Vec::new();
+    for sw in &session.windows {
+        if sw.tabs.is_empty() {
+            continue;
+        }
+        let active = sw.active.min(sw.tabs.len() - 1);
+        let opened = open_window(browser, sw.tabs[active].url.clone());
+        let window = browser
+            .windows
+            .last()
+            .expect("open_window pushed a window")
+            .id;
+        if let Some(geometry) = sw.geometry {
+            actions.push(EngineAction::PlaceWindow { window, geometry });
+        }
+        actions.extend(opened);
+        let folder_ids: Vec<(String, FolderId)> = sw
+            .folders
+            .iter()
+            .map(|f| (f.name.clone(), browser.allocate_folder_id()))
+            .collect();
+        let ids: Vec<TabId> = sw.tabs.iter().map(|_| browser.allocate_tab_id()).collect();
+        let w = browser.window_mut(window).expect("just opened");
+        for (f, (_, id)) in sw.folders.iter().zip(&folder_ids) {
+            w.folders.push(Folder {
+                id: *id,
+                name: f.name.clone(),
+                expanded: f.expanded,
+            });
+        }
+        let created = w.tabs.remove(0);
+        let mut tabs = Vec::with_capacity(sw.tabs.len());
+        for (i, st) in sw.tabs.iter().enumerate() {
+            let mut t = if i == active {
+                created.clone()
+            } else {
+                let mut t = Tab::new(ids[i], st.url.clone());
+                t.deferred = true;
+                t
+            };
+            t.title = st.title.clone();
+            t.folder = st.folder.as_ref().and_then(|name| {
+                folder_ids
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, id)| *id)
+            });
+            tabs.push(t);
+        }
+        w.tabs = tabs;
+        w.active = created.id;
+        w.select_only(created.id);
+        w.prune_folders();
+    }
+    for url in &session.closed_tabs {
+        browser.remember_closed(url.clone());
+    }
+    actions
+}
+
+/// Show `tab` in `w`: a deferred tab is created in the engine now (it
+/// comes up visible), any other is shown again.
+fn show_tab(w: &mut Window, tab: TabId) -> EngineAction {
+    let window = w.id;
+    match w.tab_mut(tab) {
+        Some(t) if t.deferred => {
+            t.deferred = false;
+            EngineAction::CreateTab {
+                window,
+                tab,
+                url: t.url.clone(),
+            }
+        }
+        _ => EngineAction::Show(tab),
     }
 }
 
@@ -1711,7 +1824,13 @@ pub(crate) fn close_tab(browser: &mut Browser, tab: TabId) -> Vec<EngineAction> 
     {
         return ask;
     }
-    let mut actions = vec![EngineAction::CloseTab(tab)];
+    // A deferred tab was never created in the engine.
+    let deferred = browser.tab(tab).is_some_and(|t| t.deferred);
+    let mut actions = if deferred {
+        Vec::new()
+    } else {
+        vec![EngineAction::CloseTab(tab)]
+    };
     let new_active = {
         let w = browser
             .window_mut(window_id)
@@ -1733,7 +1852,12 @@ pub(crate) fn close_tab(browser: &mut Browser, tab: TabId) -> Vec<EngineAction> 
         }
     };
     match new_active {
-        Some(next) => actions.push(EngineAction::Show(next)),
+        Some(next) => {
+            let w = browser
+                .window_mut(window_id)
+                .expect("window_of_tab returned an existing window");
+            actions.push(show_tab(w, next));
+        }
         None => {
             browser.windows.retain(|w| w.id != window_id);
             actions.push(EngineAction::CloseWindow(window_id));
@@ -1759,7 +1883,7 @@ fn activate_tab(browser: &mut Browser, tab: TabId) -> Vec<EngineAction> {
     let previous = w.active;
     w.active = tab;
     w.select_only(tab);
-    let mut actions = vec![EngineAction::Hide(previous), EngineAction::Show(tab)];
+    let mut actions = vec![EngineAction::Hide(previous), show_tab(w, tab)];
     actions.extend(find_follows_switch(w, Some(previous)));
     actions
 }
@@ -1955,6 +2079,7 @@ fn close_window(browser: &mut Browser, window: WindowId) -> Vec<EngineAction> {
     let mut actions: Vec<EngineAction> = removed
         .tabs
         .iter()
+        .filter(|t| !t.deferred)
         .map(|t| EngineAction::CloseTab(t.id))
         .collect();
     actions.push(EngineAction::CloseWindow(window));
@@ -3381,6 +3506,143 @@ mod tests {
         );
         assert!(!Command::ToggleBookmarksBar.changes_bookmarks());
         assert!(!Command::PickBookmarksFile(BookmarksFile::Export).changes_bookmarks());
+    }
+
+    fn saved_session() -> Session {
+        use crate::session::{SessionFolder, SessionTab, SessionWindow};
+        Session {
+            closed_tabs: vec![url("https://gone.example/")],
+            windows: vec![SessionWindow {
+                active: 1,
+                geometry: Some(WindowGeometry {
+                    x: 10,
+                    y: 20,
+                    width: 800,
+                    height: 600,
+                    maximized: false,
+                }),
+                folders: vec![SessionFolder {
+                    name: "Reading".to_string(),
+                    expanded: true,
+                }],
+                tabs: vec![
+                    SessionTab {
+                        url: url("https://a.example/"),
+                        title: "A".to_string(),
+                        folder: None,
+                    },
+                    SessionTab {
+                        url: url("https://b.example/"),
+                        title: "B".to_string(),
+                        folder: Some("Reading".to_string()),
+                    },
+                    SessionTab {
+                        url: url("https://c.example/"),
+                        title: "C".to_string(),
+                        folder: Some("Reading".to_string()),
+                    },
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    fn a_session_comes_back_with_deferred_tabs_that_load_when_shown() {
+        let mut b = browser();
+        let actions = restore_session(&mut b, &saved_session());
+        let w = &b.windows[0];
+        let window = w.id;
+        assert_eq!(w.tabs.len(), 3);
+        assert_eq!(w.active_index(), 1);
+        let (a, bb, c) = (w.tabs[0].id, w.tabs[1].id, w.tabs[2].id);
+        assert!(w.tabs[0].deferred && !w.tabs[1].deferred && w.tabs[2].deferred);
+        assert_eq!(w.tabs[1].title, "B");
+        assert_eq!(w.folders.len(), 1);
+        assert_eq!(w.folders[0].name, "Reading");
+        assert!(w.folders[0].expanded);
+        assert_eq!(w.tabs[1].folder, Some(w.folders[0].id));
+        assert_eq!(w.tabs[2].folder, Some(w.folders[0].id));
+        assert_eq!(w.tabs[0].folder, None);
+        // The place comes first, then the window with its active tab
+        // (the only one the engine is asked for).
+        assert!(matches!(
+            actions[0],
+            EngineAction::PlaceWindow {
+                geometry: WindowGeometry { x: 10, .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            &actions[1],
+            EngineAction::OpenWindow { tab, url, .. } if *tab == bb && url.as_str() == "https://b.example/"
+        ));
+        assert_eq!(actions.len(), 2);
+        assert_eq!(b.closed_tabs, vec![url("https://gone.example/")]);
+        // Showing a deferred tab creates it; closing one asks nothing
+        // of the engine.
+        let actions = dispatch(&mut b, &Command::ActivateTab(a));
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::Hide(bb),
+                EngineAction::CreateTab {
+                    window,
+                    tab: a,
+                    url: url("https://a.example/")
+                }
+            ]
+        );
+        assert!(!b.tab(a).unwrap().deferred);
+        assert_eq!(
+            dispatch(&mut b, &Command::ActivateTab(bb)),
+            vec![EngineAction::Hide(a), EngineAction::Show(bb)]
+        );
+        let actions = dispatch(&mut b, &Command::CloseTab(c));
+        assert!(actions.is_empty(), "{actions:?}");
+        assert_eq!(b.windows[0].tabs.len(), 2);
+        // Closing the active tab when the one that takes its place is
+        // deferred creates that one.
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window,
+                url: Some(url("https://d.example/")),
+            },
+        );
+        let d = b.windows[0].active;
+        dispatch(&mut b, &Command::ActivateTab(bb));
+        b.windows[0]
+            .tabs
+            .iter_mut()
+            .find(|t| t.id == d)
+            .unwrap()
+            .deferred = true;
+        let actions = dispatch(&mut b, &Command::CloseTab(bb));
+        assert!(actions.contains(&EngineAction::CloseTab(bb)));
+        assert!(
+            actions
+                .iter()
+                .any(|x| matches!(x, EngineAction::CreateTab { tab, .. } if *tab == d)),
+            "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn the_crash_offer_restores_or_is_dismissed() {
+        let (mut b, window, _) = one_window();
+        assert!(dispatch(&mut b, &Command::RestoreSession(window)).is_empty());
+        b.crashed_session = Some(saved_session());
+        let actions = dispatch(&mut b, &Command::RestoreSession(window));
+        assert!(b.crashed_session.is_none());
+        // The restored window arrived and the one-tab window the offer
+        // was in went.
+        assert_eq!(b.windows.len(), 1);
+        assert_ne!(b.windows[0].id, window);
+        assert!(actions.contains(&EngineAction::CloseWindow(window)));
+        assert!(!actions.contains(&EngineAction::Quit));
+        b.crashed_session = Some(saved_session());
+        assert!(dispatch(&mut b, &Command::DismissRestore).is_empty());
+        assert!(b.crashed_session.is_none());
     }
 
     fn download_report(name: &str, state: DownloadState) -> crate::download::DownloadReport {

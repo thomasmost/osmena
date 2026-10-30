@@ -497,6 +497,9 @@ pub struct ChromeContext<'a> {
     /// What is being and was downloaded: the toolbar button and its
     /// popover, when the engine downloads (`EngineInfo::downloads`).
     pub downloads: &'a Downloads,
+    /// The last run ended badly and left a session: offer to restore it
+    /// in a bar under the toolbar.
+    pub restore_offer: bool,
 }
 
 /// Something the chrome asks of the native window, recorded while drawing
@@ -904,6 +907,29 @@ pub fn draw(
             });
         });
 
+    if context.restore_offer {
+        let frame = Frame::new()
+            .fill(palette.toolbar)
+            .inner_margin(Margin::symmetric(10, 6));
+        Panel::top("restore-bar")
+            .frame(frame)
+            .show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        "Your last session closed unexpectedly. Restore its windows and tabs?",
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Dismiss").clicked() {
+                            commands.push(Command::DismissRestore);
+                        }
+                        if ui.button("Restore").clicked() {
+                            commands.push(Command::RestoreSession(window.id));
+                        }
+                    });
+                });
+            });
+    }
+
     commands.extend(find_bar(ui, window, state, keymap));
     commands.extend(draw_downloads(ui, window, context, state));
 
@@ -1245,6 +1271,7 @@ fn strip_tab(
             is_active,
             is_selected,
             favicon,
+            deferred: tab.deferred,
         },
         tab.display_title(),
     );
@@ -3468,6 +3495,8 @@ struct TabState {
     is_active: bool,
     is_selected: bool,
     favicon: Option<egui::TextureId>,
+    /// A restored tab not loaded yet: drawn faint.
+    deferred: bool,
 }
 
 /// One tab at `rect`: a rounded-top block with the favicon, the title
@@ -3488,11 +3517,14 @@ fn tab_widget(
         is_active,
         is_selected,
         favicon,
+        deferred,
     } = tab;
     let width = rect.width();
     let font = TextStyle::Body.resolve(ui.style());
     let text_color = if is_active {
         ui.visuals().text_color()
+    } else if deferred {
+        ui.visuals().weak_text_color()
     } else {
         palette.text_on_strip
     };

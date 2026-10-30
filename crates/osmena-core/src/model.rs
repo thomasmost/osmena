@@ -11,6 +11,7 @@ use crate::download::Downloads;
 use crate::extension::Extension;
 use crate::history::History;
 use crate::profile::{DEFAULT_PROFILE_NAME, Profile, ProfileEntry};
+use crate::session::Session;
 use crate::settings::Settings;
 use crate::update::UpdateStatus;
 use crate::zoom::SiteZoom;
@@ -99,6 +100,9 @@ pub struct Tab {
     /// The page's zoom level in percent (`crate::zoom`), shared by every
     /// tab on the same host.
     pub zoom: u16,
+    /// A restored tab the engine has not been asked for yet: it loads
+    /// when first shown. Never the active tab.
+    pub deferred: bool,
 }
 
 impl Tab {
@@ -115,6 +119,7 @@ impl Tab {
             crashed: None,
             folder: None,
             zoom: 100,
+            deferred: false,
         }
     }
 
@@ -359,6 +364,9 @@ pub struct Browser {
     pub downloads: Downloads,
     /// The user confirmed quitting with downloads still going.
     pub quit_confirmed: bool,
+    /// The last run ended without a clean exit and left this session,
+    /// which the chrome offers to restore until answered.
+    pub crashed_session: Option<Session>,
     next_window_id: u64,
     next_tab_id: u64,
     next_folder_id: u64,
@@ -383,6 +391,7 @@ impl Browser {
             zoom: SiteZoom::default(),
             downloads: Downloads::default(),
             quit_confirmed: false,
+            crashed_session: None,
             next_window_id: 1,
             next_tab_id: 1,
             next_folder_id: 1,

@@ -168,6 +168,18 @@ The engine contract, in `osmena-engine`:
   and a click lists the tabs; expanded (from its menu), its tabs follow
   it. The chip's menu also renames, ungroups, or closes the folder.
   Folders are not kept across launches.
+- **Session restore.** The windows and tabs are written to
+  `session.toml` in the profile a moment after they change and at exit
+  (their place on screen, their order, folders, the active tab, the
+  closed-tab list). With "Continue where you left off" in Settings
+  (`restore_windows_on_launch`), the next start opens them again where
+  they were: each window's active tab loads, the others wait, drawn
+  faint, until first shown; a URL on the command line opens as a tab in
+  the last window. "Restart to update" comes back the same way whatever
+  the setting says (`--restore`). After a crash (the profile's claim
+  names no live process), a bar under the toolbar offers the last
+  session: Restore brings it back and closes the home-page window,
+  Dismiss forgets it. "Reopen closed tab" works across a restart.
 - **Downloads**, when the engine downloads (`EngineInfo::downloads`).
   A file goes to the downloads directory (the system's Downloads folder,
   or the one Settings names) under its suggested name, made unique, or
@@ -280,7 +292,7 @@ The engine contract, in `osmena-engine`:
   default one and removes the directory on the way out.
 - **Settings** (`settings.toml`): homepage, new-tab URL, the search
   provider, a chrome colour per profile, the title bar switch, the
-  pinned extensions, the restore flag, the bookmarks bar switch and the
+  pinned extensions, the session-restore switch, the bookmarks bar switch and the
   group the last bookmark went to, the default page zoom, `[downloads]`
   (the directory and whether to ask each time), and `[profile]` (name,
   avatar, shared bookmarks, extensions to copy at the next start).

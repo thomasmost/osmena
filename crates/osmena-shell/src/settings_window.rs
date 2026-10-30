@@ -698,14 +698,24 @@ fn draw_general(ui: &mut egui::Ui, settings: &mut Settings, activity: &mut FormA
             ui.end_row();
 
             ui.label("On launch");
-            let restore = ui.checkbox(
-                &mut settings.restore_windows_on_launch,
-                "Restore previous windows (not yet implemented)",
-            );
-            if restore.changed() {
-                activity.edited = true;
-                activity.committed = true;
-            }
+            ui.vertical(|ui| {
+                let restore = ui.checkbox(
+                    &mut settings.restore_windows_on_launch,
+                    "Continue where you left off",
+                );
+                if restore.changed() {
+                    activity.edited = true;
+                    activity.committed = true;
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "Open the windows and tabs of the last run. Off, the home page opens; \
+                         after a crash the last session is offered either way.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
             ui.end_row();
         });
 }

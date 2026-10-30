@@ -5,11 +5,12 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-10-30 (downloads: the list, the button and popover,
-the engine contract; page zoom per site; find in page; bookmarks: the
-star and its popover, the bookmarks bar, the Bookmarks menu with import
-and export, merged suggestions, the favicon cache; before that updates
-over the air)._
+_Last updated: 2026-10-30 (session restore with deferred tabs and the
+crash offer; downloads: the list, the button and popover, the engine
+contract; page zoom per site; find in page; bookmarks: the star and its
+popover, the bookmarks bar, the Bookmarks menu with import and export,
+merged suggestions, the favicon cache; before that updates over the
+air)._
 
 ## Architecture
 
@@ -98,6 +99,20 @@ No engine is needed; the workspace builds in under a minute.
   directly, so bookmarks and history rank together. Site favicons are
   the shell's (`favicons.rs`, `Profile::favicons_dir`), handed to the
   chrome as `ChromeContext::site_icons` by host (`Bookmarks::site_key`).
+- **The session is the shell's file; restoring is the model's.**
+  `Session::capture` reads the model plus each window's geometry; the
+  shell writes it on a timer after any command, URL or title change,
+  move or resize, and at exit (`save_session`), and reads it in `run`.
+  `command::restore_session` rebuilds the windows: `open_window` for
+  each with its active tab, the other tabs pushed as `Tab::deferred`
+  (no engine tab yet), folders by name, and a `PlaceWindow` action
+  ahead of the `OpenWindow`, which the shell turns into window
+  attributes (`pending_geometry`, dropped off-monitor). The active tab
+  is never deferred: `show_tab` creates a deferred tab the moment it is
+  activated (also when the active tab closes and it is next), and
+  `close_tab`/`close_window` ask the engine nothing for one. A crash is
+  a `running.pid` that names no live process at start; the session is
+  then `Browser::crashed_session` and the chrome offers it.
 - **Downloads are the engine's work and the model's list.** The engine
   saves the file where `Engine::configure_downloads` said (the shell
   resolves `Settings::downloads` to a `DownloadPolicy` at engine start
@@ -285,6 +300,16 @@ No engine is needed; the workspace builds in under a minute.
   adds; the shared behaviour is documented here only.
 
 ## Status and handoff (2026-10-19)
+
+Added 2026-10-30 (fifth): session restore (see Conventions). Verified:
+`cargo test` (the file's round trip, the rebuild with deferred tabs
+and folders, showing and closing deferred tabs, the crash offer),
+clippy, fmt, and a scripted run of Nautilus on Windows: two tabs and a
+moved window come back at the same place on the next start with the
+second tab faint until clicked, when it loads; a killed run leaves the
+offer bar on the next start. Not verified: the update restart's
+`--restore` end to end, folders in a restored strip by eye, macOS, a
+window on a monitor that is gone.
 
 Added 2026-10-30 (fourth): downloads (see Conventions). Verified:
 `cargo test` (the list's upserts, trimming and TOML, the commands, the

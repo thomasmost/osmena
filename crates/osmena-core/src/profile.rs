@@ -600,6 +600,11 @@ impl Profile {
         self.dir.join("downloads.toml")
     }
 
+    /// The windows and tabs as they last stood (`crate::session`).
+    pub fn session_path(&self) -> PathBuf {
+        self.dir.join("session.toml")
+    }
+
     /// The installed extensions, as the engine last reported them
     /// ([`InstalledExtensions`]): what another profile copies from.
     ///
