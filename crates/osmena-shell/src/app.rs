@@ -10,8 +10,8 @@ use osmena_chrome::{icon, menus, native_menu};
 use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
     Bookmarks, Brand, Browser, Command, CommandKind, EngineAction, EngineEvent, EngineInfo,
-    ExtensionSource, InstalledExtensions, Keymap, PageCommand, Profile, TabId, WindowId, apply,
-    dispatch,
+    ExtensionSource, InstalledExtensions, Keymap, PageCommand, Profile, TabId, UpdateStatus,
+    WindowId, apply, dispatch,
 };
 use osmena_engine::{Engine, TabHost, Waker};
 use url::Url;
@@ -25,6 +25,7 @@ use crate::clipboard;
 use crate::profiles;
 use crate::repaint;
 use crate::settings_window::{SettingsOutcome, SettingsWindow};
+use crate::update::{self, Updater};
 use crate::window::BrowserWindow;
 
 /// How long after a history change the file is written, so a run of
@@ -32,13 +33,15 @@ use crate::window::BrowserWindow;
 const HISTORY_SAVE_DELAY: Duration = Duration::from_secs(3);
 
 /// The user events: the engine asked us to spin its message loop, the
-/// `--exit-after` timer ran out, or an item of the menu bar was picked
-/// (its id waits in `native_menu::take_menu_ids`).
+/// `--exit-after` timer ran out, an item of the menu bar was picked
+/// (its id waits in `native_menu::take_menu_ids`), or the update check
+/// has something to report.
 #[derive(Debug)]
 pub enum AppEvent {
     Wake,
     ExitAfter(std::time::Duration),
     Menu,
+    Update(UpdateStatus),
 }
 
 struct WinitWaker(Mutex<EventLoopProxy<AppEvent>>);
@@ -84,6 +87,11 @@ pub struct App<E: Engine> {
     /// The user deleted the profile this browser runs: its directory
     /// goes once the engine has let go of it, on the way out.
     delete_on_exit: Option<Profile>,
+    /// Checks for and installs newer builds; `None` for a build that
+    /// cannot update itself.
+    updater: Option<Updater>,
+    /// When the next automatic update check is due.
+    update_check_due: Option<Instant>,
 }
 
 impl<E: Engine> App<E> {
@@ -100,6 +108,7 @@ impl<E: Engine> App<E> {
         start_engine: StartEngine<E>,
         event_loop: &EventLoop<AppEvent>,
         exit_after: Option<std::time::Duration>,
+        update_manifest: Option<&str>,
     ) -> App<E> {
         let menu_proxy = Mutex::new(event_loop.create_proxy());
         native_menu::install_event_handler(move || {
@@ -110,6 +119,19 @@ impl<E: Engine> App<E> {
         });
         browser.profiles = browser.profile.siblings(brand);
         profiles::claim(&browser.profile.pid_path());
+        let updater = Updater::new(
+            brand,
+            update_manifest,
+            browser.profile.updates_dir(),
+            event_loop.create_proxy(),
+        );
+        match &updater {
+            Some(updater) => log::info!("running {}", updater.current()),
+            None => log::info!(
+                "{}: no build number or no update source; updates are off",
+                brand.describe_build()
+            ),
+        }
         App {
             brand,
             engine_info,
@@ -129,7 +151,59 @@ impl<E: Engine> App<E> {
             history_dirty: None,
             menu_bar: native_menu::MenuBar::default(),
             delete_on_exit: None,
+            updater,
+            update_check_due: None,
         }
+    }
+
+    /// Whether this build checks for updates on its own: it can, and
+    /// the setting says so.
+    fn checks_automatically(&self) -> bool {
+        self.updater.is_some() && self.browser.settings.check_for_updates
+    }
+
+    /// Put the next automatic check `delay` from now, unless one is
+    /// already due sooner.
+    fn schedule_update_check(&mut self, delay: Duration) {
+        if !self.checks_automatically() {
+            self.update_check_due = None;
+            return;
+        }
+        let at = Instant::now() + delay;
+        self.update_check_due = Some(match self.update_check_due {
+            Some(due) if due < at => due,
+            _ => at,
+        });
+    }
+
+    /// The automatic check is due: run it as the menu entry would, and
+    /// book the next one.
+    fn automatic_update_check(&mut self, event_loop: &ActiveEventLoop) {
+        self.update_check_due = None;
+        if !self.checks_automatically() {
+            return;
+        }
+        self.schedule_update_check(update::CHECK_INTERVAL);
+        if self.browser.update.can_check() {
+            self.run_commands(vec![Command::CheckForUpdates], event_loop);
+        }
+    }
+
+    /// The update check reported: show it.
+    fn update_reported(&mut self, status: UpdateStatus) {
+        if matches!(self.browser.update, UpdateStatus::Installing(_)) {
+            // On the way out; nothing changes that.
+            return;
+        }
+        match &status {
+            UpdateStatus::Ready { update, file } => {
+                log::info!("{} is ready at {}", update.id, file.display())
+            }
+            UpdateStatus::Failed(message) => log::warn!("update: {message}"),
+            _ => {}
+        }
+        self.browser.update = status;
+        self.redraw_all();
     }
 
     /// The title of a browser window: the product, and the profile's
@@ -277,10 +351,20 @@ impl<E: Engine> App<E> {
             .map(BrowserWindow::core_id)
     }
 
+    /// The update entry of the menus, from the model's status.
+    fn update_menu(&self) -> menus::UpdateMenu<'_> {
+        menus::UpdateMenu {
+            brand: self.brand.name,
+            status: &self.browser.update,
+            can_update: self.brand.can_update(),
+        }
+    }
+
     /// Rebuild the menu bar if the model it shows changed.
     fn sync_menu_bar(&mut self) {
         let window = self.menu_window().and_then(|id| self.browser.window(id));
         let profile_name = self.browser.profile_name();
+        let updates = self.update_menu();
         let entries = menus::menu_bar(&menus::MenuBarInput {
             brand: self.brand.name,
             window,
@@ -293,6 +377,7 @@ impl<E: Engine> App<E> {
                 name: &profile_name,
             },
             profiles: &self.browser.profiles,
+            updates,
         });
         self.menu_bar.sync(entries);
     }
@@ -627,6 +712,35 @@ impl<E: Engine> App<E> {
                     Err(e) => log::error!("cannot open settings window: {e}"),
                 },
             },
+            EngineAction::CheckForUpdates => match &self.updater {
+                Some(updater) => {
+                    updater.check();
+                    self.redraw_all();
+                }
+                None => {
+                    // Asked by hand on a build that cannot: say why.
+                    self.update_reported(UpdateStatus::Failed(format!(
+                        "{} cannot update itself",
+                        self.brand.describe_build()
+                    )));
+                }
+            },
+            EngineAction::InstallUpdate { update, file } => {
+                let outcome = match &self.updater {
+                    Some(updater) => updater.install(&update, &file, &self.browser.profile.name),
+                    None => Err("this build cannot install updates".to_string()),
+                };
+                match outcome {
+                    Ok(()) => {
+                        log::info!("quitting to install {}", update.id);
+                        self.perform(EngineAction::Quit, event_loop);
+                    }
+                    Err(e) => {
+                        self.browser.update = UpdateStatus::Idle;
+                        self.update_reported(UpdateStatus::Failed(e));
+                    }
+                }
+            }
             EngineAction::OpenInProfile { profile, urls } => {
                 if let Err(e) = crate::process::open_in_profile(&profile, &urls) {
                     let urls: Vec<&str> = urls.iter().map(Url::as_str).collect();
@@ -768,6 +882,13 @@ impl<E: Engine> App<E> {
             w.set_frameless(frameless);
             w.request_redraw();
         }
+        // Automatic checks switched on: the first one runs soon; switched
+        // off: the booked one is dropped.
+        if self.checks_automatically() {
+            self.schedule_update_check(update::FIRST_CHECK_DELAY);
+        } else {
+            self.update_check_due = None;
+        }
     }
 
     /// Drop the settings window, saving an uncommitted edit first.
@@ -893,6 +1014,7 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
             }
             let actions = std::mem::take(&mut self.pending_actions);
             self.perform_all(actions, event_loop);
+            self.schedule_update_check(update::FIRST_CHECK_DELAY);
         }
     }
 
@@ -917,6 +1039,8 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
                 &mut self.keymap,
                 &self.browser.extensions,
                 self.engine_info.extensions.as_ref(),
+                &self.browser.update,
+                self.brand.can_update(),
             );
             let commands = sw.take_commands();
             match outcome {
@@ -973,6 +1097,7 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
                 self.menu_picks(event_loop);
                 self.pump(event_loop);
             }
+            AppEvent::Update(status) => self.update_reported(status),
             AppEvent::ExitAfter(delay) => {
                 // What a smoke test reads: did the pages load.
                 let tabs: Vec<String> = self
@@ -1012,6 +1137,13 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
                 self.save_history();
             } else {
                 next = repaint::earliest(next, Some(since + HISTORY_SAVE_DELAY));
+            }
+        }
+        if let Some(due) = self.update_check_due {
+            if due <= Instant::now() {
+                self.automatic_update_check(event_loop);
+            } else {
+                next = repaint::earliest(next, Some(due));
             }
         }
         for w in self.windows.values_mut() {

@@ -11,6 +11,7 @@ use crate::extension::Extension;
 use crate::history::History;
 use crate::profile::{DEFAULT_PROFILE_NAME, Profile, ProfileEntry};
 use crate::settings::Settings;
+use crate::update::UpdateStatus;
 
 /// Identifies a browser window. Allocated by [`Browser`]; engine ids never
 /// leave the engine crate.
@@ -321,6 +322,9 @@ pub struct Browser {
     /// (when a window gained focus, or a profile was made or deleted):
     /// what the Profiles menu offers.
     pub profiles: Vec<ProfileEntry>,
+    /// Where the browser is with updates, as the shell last reported it
+    /// (checking, downloading, ready to restart, failed).
+    pub update: UpdateStatus,
     next_window_id: u64,
     next_tab_id: u64,
     next_folder_id: u64,
@@ -341,6 +345,7 @@ impl Browser {
             bookmarks: Bookmarks::default(),
             history: History::default(),
             profiles: Vec::new(),
+            update: UpdateStatus::Idle,
             next_window_id: 1,
             next_tab_id: 1,
             next_folder_id: 1,

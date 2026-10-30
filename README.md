@@ -38,14 +38,24 @@ engine crate.
 ## How a browser uses it
 
 ```rust
-use osmena_core::{Brand, EngineInfo, ExtensionSupport};
+use osmena_core::update::{UpdateSource, build_number};
+use osmena_core::{Brand, ChromeColor, EngineInfo, ExtensionSupport};
 
 static BRAND: Brand = Brand {
     name: "Nautilus",
     binary: "nautilus",
     data_dir: "Nautilus",
     homepage: "https://www.wikipedia.org/",
+    chrome_color: ChromeColor::Shell,
     icon_png: include_bytes!("../../../assets/icons/nautilus-256.png"),
+    version: env!("CARGO_PKG_VERSION"),
+    // CI sets OSMENA_BUILD_NUMBER when it packages a build; a local
+    // build has none and never updates itself.
+    build: build_number(option_env!("OSMENA_BUILD_NUMBER")),
+    // Where newer builds are announced (see "Updates" below), or None.
+    updates: Some(UpdateSource {
+        manifest_url: "https://github.com/thomasmost/nautilus/releases/latest/download/latest.toml",
+    }),
 };
 
 // In the engine crate:
@@ -162,6 +172,12 @@ The engine contract, in `osmena-engine`:
   (or an existing group) and saves the pages to `bookmarks.toml` in the
   profile; the window menu's "Bookmarks" submenu opens a group's pages
   one at a time or all at once.
+- **Updates over the air**, when the brand names a source and the build
+  has a number. The browser checks shortly after it starts and every
+  six hours, downloads a newer build in the background, and offers
+  "Restart to update" in the toolbar, the window menu, and the settings
+  window; the restart installs it and reopens the same profile. See
+  "Updates" below for what a browser's CI publishes.
 - **Extensions**, when the engine runs them (`EngineInfo::extensions`).
   The toolbar ends in a puzzle-piece button: its menu lists the installed
   extensions (click one to open its action's popup), has a "Pin to
@@ -215,6 +231,62 @@ The engine contract, in `osmena-engine`:
   provider, a chrome colour per profile, the title bar switch, the
   pinned extensions, the restore flag, and `[profile]` (name, avatar,
   shared bookmarks, extensions to copy at the next start).
+
+## Updates
+
+The shell updates a browser over the air from a manifest its CI publishes
+with every build. The browser's side is three fields of its `Brand`: the
+crate version, the build number CI stamped (`OSMENA_BUILD_NUMBER` in the
+environment of the release build, read with `option_env!` through
+`osmena_core::update::build_number`; a build without one never updates
+itself), and the manifest's URL. The manifest is a TOML document,
+`osmena_core::update::Manifest`:
+
+```toml
+version = "0.1.0"
+build = 150
+commit = "0123abcd"
+published = "2026-10-29T12:00:00Z"
+notes_url = "https://github.com/owner/repo/releases/tag/build-150"
+
+[assets.windows-x86_64]
+name = "nautilus_0.1.0_x64-setup.exe"
+url = "https://github.com/owner/repo/releases/download/build-150/nautilus_0.1.0_x64-setup.exe"
+sha256 = "…"
+size = 123456789
+
+[assets.macos-aarch64]
+name = "Nautilus-macos-arm64.zip"
+url = "…"
+sha256 = "…"
+size = 456789012
+```
+
+A build is newer when its version is higher, or its build number is
+within the same version. The asset keys are `<os>-<arch>` as Rust names
+them (`windows-x86_64`, `macos-aarch64`, `macos-x86_64`); a platform
+without an asset gets nothing from that build. On Windows the asset is
+an NSIS installer that takes `/S` (cargo-packager's does); on macOS it is
+a zip of the application bundle (`ditto -c -k --keepParent`). The
+browsers publish a GitHub release per green push to `main`, tagged
+`build-<run number>`, with the installers, the bundles, the symbols and
+`latest.toml`; `releases/latest/download/latest.toml` is then the
+manifest URL, which GitHub redirects to the newest release.
+
+The shell checks 15 seconds after the engine starts and every six hours
+after that (`check_for_updates` in `settings.toml` turns the automatic
+checks off; "Check for updates…" still works by hand), downloads into
+`<brand data dir>/updates/<build>/`, verifies the SHA-256, and shows the
+"Restart to update" pill. The restart quits and installs: on Windows a
+hidden PowerShell waits for the process to exit, runs the installer with
+`/S` (which closes every other window of the browser too) and starts
+the same profile again; on macOS the running bundle is moved into the
+updates directory, the unpacked one takes its place, and a shell reopens
+it for the profile once the process is gone. A check that finds the
+browser up to date removes what the updates directory holds for builds
+up to the running one. To try the flow against a local server, build
+with `OSMENA_BUILD_NUMBER=1` and start the browser with the hidden
+`--update-manifest http://127.0.0.1:8000/latest.toml`.
 
 ## Depending on osmena
 

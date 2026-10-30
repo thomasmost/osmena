@@ -21,6 +21,10 @@ egui_glow = { workspace = true }
 glow = { workspace = true }
 keyboard-types = { workspace = true }
 log = { workspace = true }
+# The update check and download (update.rs): rustls with the platform's
+# trust store, so a corporate proxy's certificates are honoured.
+ureq = { version = "3.4", default-features = false, features = ["rustls", "platform-verifier"] }
+sha2 = "0.10"
 url = { workspace = true }
 winit = { workspace = true }
 

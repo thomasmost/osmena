@@ -21,6 +21,7 @@ pub mod process;
 mod profiles;
 mod repaint;
 mod settings_window;
+mod update;
 mod window;
 
 use std::path::Path;
@@ -61,6 +62,11 @@ pub struct CliArgs {
     /// (does the engine start, does a page load, does shutdown finish).
     #[arg(long, hide = true, value_name = "SECONDS")]
     pub exit_after: Option<f64>,
+    /// Check for updates against this manifest instead of the brand's
+    /// (a local server, for trying the update flow). The build still
+    /// needs a build number to compare with.
+    #[arg(long, hide = true, value_name = "URL")]
+    pub update_manifest: Option<String>,
 }
 
 /// Builds the engine once the event loop is running: the engine's data
@@ -205,6 +211,7 @@ pub fn run<E: Engine>(launch: Launch<E>) -> ExitCode {
         start_engine,
         &event_loop,
         args.exit_after.map(std::time::Duration::from_secs_f64),
+        args.update_manifest.as_deref(),
     );
     match event_loop.run_app(&mut app) {
         Ok(()) if app.started_cleanly() => ExitCode::SUCCESS,

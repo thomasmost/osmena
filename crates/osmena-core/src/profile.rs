@@ -552,6 +552,18 @@ impl Profile {
             .unwrap_or_else(|| self.dir.clone())
     }
 
+    /// `<brand data dir>/updates`, beside the profiles directory: where
+    /// downloaded builds wait for the restart that installs them. Shared
+    /// by every profile, since an update is the browser's, not a
+    /// profile's.
+    pub fn updates_dir(&self) -> PathBuf {
+        let profiles = self.profiles_dir();
+        profiles
+            .parent()
+            .map(|brand| brand.join("updates"))
+            .unwrap_or_else(|| profiles.join("updates"))
+    }
+
     pub fn is_default(&self) -> bool {
         self.name == DEFAULT_PROFILE_NAME
     }

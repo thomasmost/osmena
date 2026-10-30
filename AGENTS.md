@@ -5,10 +5,10 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-10-29 (the avatar font and the colour families;
-before that profiles: name, colour, avatar, the Profiles menu behind
-the toolbar's avatar and in the menu bar, the profile dialog, adding
-and deleting profiles, shared bookmarks and copied extensions)._
+_Last updated: 2026-10-29 (updates over the air: the manifest, the
+build number, the check and download thread, the "Restart to update"
+pill and the installers; before that the avatar font and the colour
+families, and profiles)._
 
 ## Architecture
 
@@ -144,6 +144,23 @@ No engine is needed; the workspace builds in under a minute.
   `History::matches` ranks suggestions; the chrome draws them under the
   address bar (`address_suggestions`) and in the launcher, with
   `step_pick` for the arrow keys. Nothing else reads or writes the file.
+- **Updates are the shell's; the model carries the status.** A brand
+  that can update names its manifest URL (`Brand::updates`) and its
+  build number (`Brand::build`, stamped by CI through
+  `OSMENA_BUILD_NUMBER`; `None` for a local build, which never checks).
+  `osmena_shell::update` fetches `latest.toml`
+  (`osmena_core::update::Manifest`), compares `BuildId`s, downloads
+  into `Profile::updates_dir` and verifies the hash on a thread that
+  reports `AppEvent::Update(UpdateStatus)`; the app writes the status to
+  `Browser::update` the way it writes `profiles`, and the chrome, the
+  menus (`menus::UpdateMenu`) and the settings window draw from it.
+  The user's actions are commands (`CheckForUpdates`, `InstallUpdate`,
+  `DismissUpdateFailure`); `dispatch` moves the status (Checking,
+  Installing) and emits `EngineAction::{CheckForUpdates, InstallUpdate}`.
+  Installing is per platform in `update.rs` (the NSIS installer's `/S`
+  behind a PowerShell that waits for the exit on Windows; a bundle swap
+  and `open` on macOS) and ends in `Quit`. Nothing in osmena names a
+  repository: the URL comes from the brand.
 - **The native window is asked, never driven, by the chrome.** The strip
   records a `WindowRequest` (drag, minimize, maximize, system menu) the
   way it records a `MenuRequest`; `BrowserWindow` acts on it after the
@@ -215,6 +232,25 @@ No engine is needed; the workspace builds in under a minute.
   adds; the shared behaviour is documented here only.
 
 ## Status and handoff (2026-10-19)
+
+Added 2026-10-29 (later): updates over the air (see Conventions). The
+browsers' CI publishes a GitHub release per green push to `main` with a
+`latest.toml` manifest (`ci/update-manifest.sh` in each browser); the
+shell fetches it with `ureq` (rustls, platform trust store), downloads
+the platform's asset, verifies it with `sha2`, and the chrome offers the
+restart. Verified: `cargo test` (the manifest, the build order, the
+commands, the menu entry), clippy, fmt, the macOS target check
+(`cargo clippy --target aarch64-apple-darwin` with a stand-in C compiler
+for `ring`), and a scripted run of Nautilus on Windows against a local
+server: the check 15 s after start, the download and verification, the
+pill in the toolbar, the click quitting the browser, the helper running
+the (fake) installer with `/S` after the exit and relaunching the same
+profile; a second run reused the verified download. Not verified: the
+real NSIS installer in silent mode over a running install (its template
+kills every `<binary>.exe`, then installs over the previous location),
+anything on macOS (the bundle swap and `open -n … --args --profile`),
+the settings window's Updates section by hand, the "Release notes"
+button, and the release job itself before the first push.
 
 What exists: the five crates, extracted in one day from Paladin and Nautilus,
 both of which now build on them and pin the same revision. The repository is

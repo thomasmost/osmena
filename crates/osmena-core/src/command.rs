@@ -8,6 +8,7 @@ use crate::extension::ExtensionSource;
 use crate::model::{Browser, Folder, FolderId, LoadState, Tab, TabId, Window, WindowId};
 use crate::profile::{Avatar, DEFAULT_PROFILE_NAME};
 use crate::settings::ChromeColor;
+use crate::update::{AvailableUpdate, UpdateStatus};
 
 /// Every user action in the browser is one of these. The chrome, the keymap,
 /// and (in Phase 2) remappable hotkeys all produce `Command`s; nothing else
@@ -145,6 +146,15 @@ pub enum Command {
     OpenSettings,
     /// Clear the engine error shown in the status area.
     DismissEngineError,
+    /// Look for a newer build now (the menu entry, the settings window's
+    /// button). Nothing while a check or a download is already under
+    /// way.
+    CheckForUpdates,
+    /// Quit and install the update that is ready (the "Restart to
+    /// update" button). Nothing unless one is.
+    InstallUpdate,
+    /// Clear the update failure shown in the status area.
+    DismissUpdateFailure,
     /// Open the popup of `extension`'s toolbar action over `window`
     /// (the toolbar button or the menu entry was clicked). Nothing if
     /// the extension is unknown, disabled, or has no popup.
@@ -350,6 +360,17 @@ pub enum EngineAction {
         fullscreen: bool,
     },
     OpenSettings,
+    /// Fetch the brand's update manifest, compare it with this build,
+    /// and download the asset for this platform; the shell reports what
+    /// happens through `Browser::update`.
+    CheckForUpdates,
+    /// Install the downloaded update, verified at `file`, and start the
+    /// new build: the shell arranges the installation to run once this
+    /// process has exited, then quits as `Quit` does.
+    InstallUpdate {
+        update: AvailableUpdate,
+        file: std::path::PathBuf,
+    },
     /// Start a `<binary> --profile <profile> <urls>` process.
     OpenInProfile {
         profile: String,
@@ -721,6 +742,28 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
         Command::OpenSettings => vec![EngineAction::OpenSettings],
         Command::DismissEngineError => {
             browser.engine_error = None;
+            Vec::new()
+        }
+        Command::CheckForUpdates => {
+            if browser.update.can_check() {
+                browser.update = UpdateStatus::Checking;
+                vec![EngineAction::CheckForUpdates]
+            } else {
+                Vec::new()
+            }
+        }
+        Command::InstallUpdate => match &browser.update {
+            UpdateStatus::Ready { update, file } => {
+                let (update, file) = (update.clone(), file.clone());
+                browser.update = UpdateStatus::Installing(update.clone());
+                vec![EngineAction::InstallUpdate { update, file }]
+            }
+            _ => Vec::new(),
+        },
+        Command::DismissUpdateFailure => {
+            if matches!(browser.update, UpdateStatus::Failed(_)) {
+                browser.update = UpdateStatus::Idle;
+            }
             Vec::new()
         }
         Command::OpenExtensionAction { window, extension } => {
@@ -1776,6 +1819,67 @@ mod tests {
         b.engine_error = Some("lost backend".to_string());
         assert!(dispatch(&mut b, &Command::DismissEngineError).is_empty());
         assert_eq!(b.engine_error, None);
+    }
+
+    fn an_update() -> AvailableUpdate {
+        AvailableUpdate {
+            id: crate::update::BuildId::new("0.1.0", 9),
+            notes_url: None,
+            asset: crate::update::Asset {
+                name: "setup.exe".to_string(),
+                url: "https://updates.example/setup.exe".to_string(),
+                sha256: "0".repeat(64),
+                size: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn a_check_starts_only_when_nothing_is_under_way() {
+        let (mut b, _, _) = one_window();
+        assert_eq!(b.update, UpdateStatus::Idle);
+        assert_eq!(
+            dispatch(&mut b, &Command::CheckForUpdates),
+            vec![EngineAction::CheckForUpdates]
+        );
+        assert_eq!(b.update, UpdateStatus::Checking);
+        // Already checking: nothing more.
+        assert!(dispatch(&mut b, &Command::CheckForUpdates).is_empty());
+        // After a failure a check starts again, and the failure can be
+        // dismissed.
+        b.update = UpdateStatus::Failed("offline".to_string());
+        assert!(dispatch(&mut b, &Command::DismissUpdateFailure).is_empty());
+        assert_eq!(b.update, UpdateStatus::Idle);
+        b.update = UpdateStatus::Failed("offline".to_string());
+        assert_eq!(dispatch(&mut b, &Command::CheckForUpdates).len(), 1);
+        // Downloading: no check, no dismissal.
+        b.update = UpdateStatus::Downloading {
+            update: an_update(),
+            received: 0,
+        };
+        assert!(dispatch(&mut b, &Command::CheckForUpdates).is_empty());
+        assert!(dispatch(&mut b, &Command::DismissUpdateFailure).is_empty());
+        assert!(matches!(b.update, UpdateStatus::Downloading { .. }));
+    }
+
+    #[test]
+    fn install_needs_a_ready_update() {
+        let (mut b, _, _) = one_window();
+        assert!(dispatch(&mut b, &Command::InstallUpdate).is_empty());
+        b.update = UpdateStatus::Ready {
+            update: an_update(),
+            file: std::path::PathBuf::from("setup.exe"),
+        };
+        assert_eq!(
+            dispatch(&mut b, &Command::InstallUpdate),
+            vec![EngineAction::InstallUpdate {
+                update: an_update(),
+                file: std::path::PathBuf::from("setup.exe"),
+            }]
+        );
+        assert_eq!(b.update, UpdateStatus::Installing(an_update()));
+        // A second click while on the way out does nothing.
+        assert!(dispatch(&mut b, &Command::InstallUpdate).is_empty());
     }
 
     /// A window with three tabs; returns the browser, the window, and the

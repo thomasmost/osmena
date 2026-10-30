@@ -814,6 +814,7 @@ impl<E: Engine> BrowserWindow<E> {
                 maximized,
                 pinned: &pinned,
                 history,
+                update: &browser.update,
             };
             commands = chrome::draw(ui, model, &context, chrome_state, keymap);
             let rect = ui.available_rect_before_wrap();
@@ -969,6 +970,11 @@ impl<E: Engine> BrowserWindow<E> {
                     keymap,
                     !browser.closed_tabs.is_empty(),
                     &browser.bookmarks,
+                    menus::UpdateMenu {
+                        brand: self.brand.name,
+                        status: &browser.update,
+                        can_update: self.brand.can_update(),
+                    },
                 ),
                 position,
             ),

@@ -13,7 +13,7 @@ use osmena_chrome::keyboard_types::{Code, Modifiers};
 use osmena_chrome::{icon, keyutils, theme};
 use osmena_core::{
     Brand, Command, CommandKind, Extension, ExtensionSource, ExtensionSupport, KeyChord, Keymap,
-    Platform, Settings,
+    Platform, Settings, UpdateStatus,
 };
 use osmena_engine::{Engine, EngineError, PhysicalSize, Surface};
 use winit::dpi::LogicalSize;
@@ -61,9 +61,11 @@ pub struct SettingsWindow<S: Surface> {
     store_input: String,
     /// What the store field's last attempt said, if it failed.
     store_notice: Option<String>,
-    /// Commands the extensions section issued, taken by the app after
-    /// each event.
+    /// Commands the extensions and updates sections issued, taken by
+    /// the app after each event.
     commands: Vec<Command>,
+    /// The product, for the Updates section.
+    brand: &'static Brand,
     /// When egui wants the next frame.
     repaints: RepaintSchedule,
     egui: EguiGlow,
@@ -99,7 +101,7 @@ impl<S: Surface> SettingsWindow<S> {
     pub fn open<E: Engine<Surface = S>>(
         event_loop: &ActiveEventLoop,
         engine: &E,
-        brand: &Brand,
+        brand: &'static Brand,
     ) -> Result<SettingsWindow<S>, EngineError> {
         let attributes = Window::default_attributes()
             .with_title(format!("{} Settings", brand.name))
@@ -130,6 +132,7 @@ impl<S: Surface> SettingsWindow<S> {
             store_input: String::new(),
             store_notice: None,
             commands: Vec::new(),
+            brand,
             repaints,
             egui,
             surface,
@@ -159,7 +162,8 @@ impl<S: Surface> SettingsWindow<S> {
         self.repaints.poll(&self.window)
     }
 
-    /// The commands the extensions section issued since the last call.
+    /// The commands the extensions and updates sections issued since
+    /// the last call.
     pub fn take_commands(&mut self) -> Vec<Command> {
         std::mem::take(&mut self.commands)
     }
@@ -179,6 +183,10 @@ impl<S: Surface> SettingsWindow<S> {
 
     /// Handle one winit event. `extensions` and `support` feed the
     /// extensions section, shown only when the engine has extensions.
+    /// `update` and `can_update` feed the Updates section: where the
+    /// browser is with updates, and whether this build can update
+    /// itself at all.
+    #[allow(clippy::too_many_arguments)]
     pub fn handle_event(
         &mut self,
         event: &WindowEvent,
@@ -186,6 +194,8 @@ impl<S: Surface> SettingsWindow<S> {
         keymap: &mut Keymap,
         extensions: &[Extension],
         support: Option<&ExtensionSupport>,
+        update: &UpdateStatus,
+        can_update: bool,
     ) -> SettingsOutcome {
         match event {
             WindowEvent::CloseRequested => {
@@ -203,7 +213,12 @@ impl<S: Surface> SettingsWindow<S> {
                 self.window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
-                let activity = self.frame(settings, keymap, extensions, support);
+                let updates = UpdatesSection {
+                    brand: self.brand,
+                    status: update,
+                    can_update,
+                };
+                let activity = self.frame(settings, keymap, extensions, support, updates);
                 let (dirty, outcome) = after_frame(self.dirty, activity);
                 self.dirty = dirty;
                 return outcome;
@@ -296,8 +311,10 @@ impl<S: Surface> SettingsWindow<S> {
         keymap: &mut Keymap,
         extensions: &[Extension],
         support: Option<&ExtensionSupport>,
+        updates: UpdatesSection<'_>,
     ) -> FormActivity {
         let mut activity = FormActivity::default();
+        let mut update_commands = Vec::new();
         let Self {
             egui,
             window,
@@ -323,8 +340,13 @@ impl<S: Surface> SettingsWindow<S> {
                 capture,
                 notice,
                 extensions_section.as_mut(),
+                updates,
+                &mut update_commands,
             );
         });
+        // The extensions section borrowed `commands`; it is done with it.
+        let _ = extensions_section;
+        self.commands.extend(update_commands);
         self.surface.begin_frame();
         // egui_glow paints over whatever the framebuffer holds, so clear it
         // first; the form's panel fills the rest with the same colour.
@@ -465,8 +487,18 @@ struct ExtensionsSection<'a> {
     commands: &'a mut Vec<Command>,
 }
 
+/// What the updates section draws from: the build, the status, and
+/// whether this build can update itself at all.
+#[derive(Clone, Copy)]
+struct UpdatesSection<'a> {
+    brand: &'a Brand,
+    status: &'a UpdateStatus,
+    can_update: bool,
+}
+
 /// The settings form, on the panel fill so the window background is never
 /// left to the framebuffer.
+#[allow(clippy::too_many_arguments)]
 fn draw_settings(
     ui: &mut egui::Ui,
     settings: &mut Settings,
@@ -474,6 +506,8 @@ fn draw_settings(
     capture: &mut Option<(CommandKind, usize)>,
     notice: &mut Option<String>,
     extensions: Option<&mut ExtensionsSection<'_>>,
+    updates: UpdatesSection<'_>,
+    update_commands: &mut Vec<Command>,
 ) -> FormActivity {
     let mut activity = FormActivity::default();
     egui::CentralPanel::default().show_inside(ui, |ui| {
@@ -483,6 +517,10 @@ fn draw_settings(
                 ui.heading("General");
                 ui.add_space(8.0);
                 draw_general(ui, settings, &mut activity);
+                ui.add_space(20.0);
+                ui.heading("Updates");
+                ui.add_space(8.0);
+                draw_updates(ui, settings, updates, &mut activity, update_commands);
                 if let Some(section) = extensions {
                     ui.add_space(20.0);
                     ui.heading("Extensions");
@@ -629,6 +667,96 @@ fn draw_general(ui: &mut egui::Ui, settings: &mut Settings, activity: &mut FormA
                 activity.edited = true;
                 activity.committed = true;
             }
+            ui.end_row();
+        });
+}
+
+/// The build that is running, the automatic-check switch, and where the
+/// browser is with updates, with the one button that fits: "Check now",
+/// or "Restart to update" once a build is downloaded. The commands go to
+/// the app like the extensions section's.
+fn draw_updates(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    section: UpdatesSection<'_>,
+    activity: &mut FormActivity,
+    commands: &mut Vec<Command>,
+) {
+    let UpdatesSection {
+        brand,
+        status,
+        can_update,
+    } = section;
+    egui::Grid::new("updates-grid")
+        .num_columns(2)
+        .spacing([12.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Version");
+            ui.vertical(|ui| {
+                ui.label(brand.describe_build());
+                if !can_update {
+                    ui.label(
+                        egui::RichText::new(
+                            "This build was not made by the release pipeline, so it cannot \
+                             update itself.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                }
+            });
+            ui.end_row();
+
+            ui.label("Automatic");
+            let check = ui.add_enabled(
+                can_update,
+                egui::Checkbox::new(
+                    &mut settings.check_for_updates,
+                    "Check for updates and download them in the background",
+                ),
+            );
+            if check.changed() {
+                activity.edited = true;
+                activity.committed = true;
+            }
+            ui.end_row();
+
+            ui.label("Status");
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    match status {
+                        UpdateStatus::Ready { .. } => {
+                            if ui.button("Restart to update").clicked() {
+                                commands.push(Command::InstallUpdate);
+                            }
+                        }
+                        UpdateStatus::Checking
+                        | UpdateStatus::Downloading { .. }
+                        | UpdateStatus::Installing(_) => {
+                            ui.add_enabled(false, egui::Button::new("Check now"));
+                        }
+                        UpdateStatus::Idle | UpdateStatus::UpToDate | UpdateStatus::Failed(_) => {
+                            if ui
+                                .add_enabled(can_update, egui::Button::new("Check now"))
+                                .clicked()
+                            {
+                                commands.push(Command::CheckForUpdates);
+                            }
+                        }
+                    }
+                    if let Some(update) = status.update()
+                        && let Some(notes) = &update.notes_url
+                        && let Ok(url) = url::Url::parse(notes)
+                        && ui.button("Release notes").clicked()
+                    {
+                        commands.push(Command::OpenInNewWindow(url));
+                    }
+                });
+                let line = status.describe(brand.name);
+                if !line.is_empty() {
+                    ui.label(egui::RichText::new(line).small().weak());
+                }
+            });
             ui.end_row();
         });
 }

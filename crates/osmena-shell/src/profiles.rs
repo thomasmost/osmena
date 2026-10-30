@@ -112,6 +112,9 @@ mod tests {
         homepage: "https://home.example/",
         chrome_color: ChromeColor::Slate,
         icon_png: &[],
+        version: "0.1.0",
+        build: None,
+        updates: None,
     };
 
     static ENGINE: EngineInfo = EngineInfo {

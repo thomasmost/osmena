@@ -6,6 +6,38 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- Updates over the air. A browser whose `Brand` names an
+  `UpdateSource` (the URL of a `latest.toml` manifest; for a GitHub
+  repository `…/releases/latest/download/latest.toml`) and carries a
+  build number (`Brand::build`, from the `OSMENA_BUILD_NUMBER`
+  environment variable at compile time through `update::build_number`)
+  checks the manifest 15 seconds after it starts and every six hours,
+  downloads the asset for its platform into `<brand data dir>/updates/`
+  and verifies its SHA-256, and then shows a green "Restart to update"
+  pill at the toolbar's right end. Clicking it (or the window menu's
+  "Restart to update <brand>", the application menu's on macOS, or the
+  settings window's button) quits and installs: on Windows a hidden
+  helper waits for the exit, runs the NSIS installer silently (`/S`,
+  which also closes other windows of the browser) and starts the same
+  profile again; on macOS the running bundle is swapped for the
+  unpacked one and reopened for the same profile. A failed check or
+  download shows in the status area until dismissed. "Check for
+  updates…" sits above Settings in the window menu and under About in
+  the macOS application menu (disabled for a build with no number: a
+  local build never updates itself); the settings window's new Updates
+  section shows the running build, the "Check for updates and download
+  them in the background" switch (`check_for_updates` in
+  `settings.toml`, on by default), the status, "Check now", "Restart to
+  update" and "Release notes". The hidden `--update-manifest <url>`
+  flag points a numbered build at another manifest (a local server) for
+  trying the flow. The model: `osmena_core::update` (`UpdateSource`,
+  `BuildId`, `Manifest`, `Asset`, `AvailableUpdate`, `UpdateStatus`,
+  `platform_key`, `build_number`), `Brand::{version, build, updates}`
+  with `build_id`, `can_update` and `describe_build`, `Browser::update`,
+  `Profile::updates_dir`, `Command::{CheckForUpdates, InstallUpdate,
+  DismissUpdateFailure}`, `EngineAction::{CheckForUpdates,
+  InstallUpdate}`, `menus::UpdateMenu`, `ChromeContext::update`, and
+  `osmena_shell::update` (the thread, the download, the installers).
 - Profiles have a name, a colour and an avatar, and can be made and
   deleted from the browser. The toolbar ends in the profile's avatar
   (its glyph, or the name's first letter, on the profile's colour),
@@ -86,6 +118,11 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- `Brand` has three new required fields, `version`, `build` and
+  `updates`; `menus::window_menu` takes a `menus::UpdateMenu`, and
+  `MenuBarInput` has an `updates` field; `SettingsWindow::handle_event`
+  takes the update status and whether the build can update; the shell
+  depends on `ureq` (rustls with the platform's trust store) and `sha2`.
 - `menus::tab_menu` and `MenuBarInput` take the other profiles as
   `ProfileEntry`s (the "Open tab in profile" submenu shows their
   names), and `MenuBarInput::profile` names the current one;

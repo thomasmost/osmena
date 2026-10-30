@@ -14,7 +14,7 @@ use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
     Avatar, Brand, ChromeColor, Command, CommandKind, EngineInfo, Extension, Favicon, Folder,
     FolderId, FolderTarget, History, HistoryEntry, KeyChord, Keymap, LoadState, ProfileForm,
-    Prompt, StripItem, Tab, TabId, Window,
+    Prompt, StripItem, Tab, TabId, UpdateStatus, Window,
 };
 use url::{ParseError, Url};
 
@@ -68,6 +68,10 @@ const AVATAR_COLUMNS: usize = 6;
 const AVATAR_SPACING: f32 = 6.0;
 const SWATCH_SIZE: f32 = 26.0;
 const SWATCH_SPACING: f32 = 4.0;
+/// The "Restart to update" pill in the toolbar: a green that reads on
+/// every swatch's toolbar, light or dark, with white text.
+const UPDATE_PILL: Color32 = Color32::from_rgb(31, 112, 72);
+const UPDATE_PILL_HOVER: Color32 = Color32::from_rgb(42, 134, 88);
 
 /// The shades the chrome paints with, all derived from the profile's
 /// [`ChromeColor`]: the tab strip is the swatch at its top and fades to
@@ -401,6 +405,9 @@ pub struct ChromeContext<'a> {
     pub pinned: &'a [&'a Extension],
     /// Where the user has been, for the suggestions under what they type.
     pub history: &'a History,
+    /// Where the browser is with updates: the "Restart to update" pill
+    /// when a build is ready, the failure in the status area.
+    pub update: &'a UpdateStatus,
 }
 
 /// Something the chrome asks of the native window, recorded while drawing
@@ -437,6 +444,7 @@ pub fn draw(
         maximized,
         pinned,
         history,
+        update,
         ..
     } = *context;
     let mut commands = Vec::new();
@@ -665,6 +673,16 @@ pub fn draw(
                             position: profile.rect.left_bottom(),
                         });
                     }
+                    if let UpdateStatus::Ready { update: ready, .. } = update
+                        && update_pill(ui, window)
+                            .on_hover_text(format!(
+                                "{} {} is ready. Click to restart and install it.",
+                                context.brand.name, ready.id
+                            ))
+                            .clicked()
+                    {
+                        commands.push(Command::InstallUpdate);
+                    }
                     if engine.extensions.is_some() {
                         let puzzle =
                             puzzle_button(ui, &palette, window).on_hover_text("Extensions");
@@ -734,25 +752,34 @@ pub fn draw(
     commands.extend(draw_launcher(ui, window, history, state));
 
     // The status text floats over the bottom-left corner of the page as an
-    // overlay, so showing or hiding it never resizes the page.
-    let status = match engine_error {
-        Some(error) => Some(format!("Engine error: {error}")),
-        None if !active.status.is_empty() => Some(active.status.clone()),
-        None => None,
+    // overlay, so showing or hiding it never resizes the page. An error
+    // (the engine's, or an update that failed) stays until dismissed;
+    // the hover status comes and goes.
+    let (status, dismiss) = match (engine_error, update) {
+        (Some(error), _) => (
+            Some(format!("Engine error: {error}")),
+            Some(Command::DismissEngineError),
+        ),
+        (None, UpdateStatus::Failed(_)) => (
+            Some(update.describe(context.brand.name)),
+            Some(Command::DismissUpdateFailure),
+        ),
+        (None, _) if !active.status.is_empty() => (Some(active.status.clone()), None),
+        (None, _) => (None, None),
     };
     if let Some(text) = status {
         egui::Area::new(Id::new(("status", window.id)))
             .anchor(egui::Align2::LEFT_BOTTOM, Vec2::ZERO)
             .order(egui::Order::Foreground)
-            .interactable(engine_error.is_some())
+            .interactable(dismiss.is_some())
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(text).small());
-                        if engine_error.is_some()
+                        if let Some(dismiss) = dismiss
                             && ui.small_button("×").on_hover_text("Dismiss").clicked()
                         {
-                            commands.push(Command::DismissEngineError);
+                            commands.push(dismiss);
                         }
                     });
                 });
@@ -2393,6 +2420,33 @@ fn icon_button_rect(ui: &mut Ui, palette: &Palette, id: Id) -> (Rect, egui::Resp
         ui.painter().rect_filled(rect, 4.0, fill);
     }
     (rect, response, fill)
+}
+
+/// The "Restart to update" pill at the toolbar's right end, shown while
+/// a downloaded build waits for the restart. Its own fill, not the
+/// swatch's, so it stands out on every profile's chrome.
+fn update_pill(ui: &mut Ui, window: &Window) -> egui::Response {
+    let id = Id::new(("update-pill", window.id));
+    let text = ui.painter().layout_no_wrap(
+        "Restart to update".to_string(),
+        TextStyle::Button.resolve(ui.style()),
+        Color32::WHITE,
+    );
+    let size = Vec2::new(text.size().x + 2.0 * TAB_PADDING_X, ACTION_SIZE);
+    let (_, rect) = ui.allocate_space(size);
+    let response = ui.interact(rect, id, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let fill = if response.hovered() || response.is_pointer_button_down_on() {
+            UPDATE_PILL_HOVER
+        } else {
+            UPDATE_PILL
+        };
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::same(ACTION_SIZE as u8 / 2), fill);
+        let pos = rect.center() - text.size() / 2.0;
+        painter.galley(pos, text, Color32::WHITE);
+    }
+    response
 }
 
 /// The extensions menu button: a puzzle piece drawn with the painter, so

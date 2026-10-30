@@ -20,6 +20,7 @@ pub mod keymap;
 pub mod model;
 pub mod profile;
 pub mod settings;
+pub mod update;
 
 pub use bookmarks::{Bookmark, BookmarkGroup, Bookmarks, BookmarksError};
 pub use brand::{Brand, EngineInfo, ExtensionSupport, PageTools};
@@ -41,3 +42,4 @@ pub use model::{
 };
 pub use profile::{Avatar, Profile, ProfileEntry, ProfileError};
 pub use settings::{ChromeColor, ProfileSettings, SearchSettings, Settings, SettingsError};
+pub use update::{Asset, AvailableUpdate, BuildId, Manifest, UpdateSource, UpdateStatus};

@@ -39,6 +39,10 @@ pub struct Settings {
     /// How the profile presents itself and what it takes from the
     /// default profile.
     pub profile: ProfileSettings,
+    /// Look for a newer build now and then, download it, and offer to
+    /// restart into it. Off, the browser checks only when asked
+    /// ("Check for updates" in the menu or the settings window).
+    pub check_for_updates: bool,
 }
 
 impl Default for Settings {
@@ -52,6 +56,7 @@ impl Default for Settings {
             pinned_extensions: Vec::new(),
             search: SearchSettings::default(),
             profile: ProfileSettings::default(),
+            check_for_updates: true,
         }
     }
 }
@@ -400,8 +405,10 @@ mod tests {
                 share_bookmarks: true,
                 copy_extensions: false,
             },
+            check_for_updates: false,
         };
         let text = s.to_toml().unwrap();
+        assert!(text.contains("check_for_updates = false"), "{text}");
         assert!(text.contains("chrome_color = \"plum\""), "{text}");
         assert!(text.contains("[search]"), "{text}");
         assert!(text.contains("[profile]"), "{text}");
@@ -468,6 +475,7 @@ mod tests {
         let s = Settings::parse("").unwrap();
         assert_eq!(s, Settings::default());
         assert!(!s.system_title_bar, "windows are frameless by default");
+        assert!(s.check_for_updates, "updates are checked by default");
     }
 
     #[test]

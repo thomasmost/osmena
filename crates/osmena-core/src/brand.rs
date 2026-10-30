@@ -25,11 +25,44 @@ pub struct Brand {
     pub chrome_color: ChromeColor,
     /// The application icon as a PNG, straight RGBA8, 256 px square.
     pub icon_png: &'static [u8],
+    /// The version of this build: `env!("CARGO_PKG_VERSION")` of the
+    /// binary crate.
+    pub version: &'static str,
+    /// The build number CI stamped into this build, from the
+    /// [`crate::update::BUILD_NUMBER_ENV`] environment variable at compile
+    /// time (`crate::update::build_number(option_env!(..))`). `None` for
+    /// a build made outside CI, which never updates itself.
+    pub build: Option<u64>,
+    /// Where this brand's builds are announced, so the browser can check
+    /// for a newer one; `None` for a browser that never checks.
+    pub updates: Option<UpdateSource>,
+}
+
+impl Brand {
+    /// The running build, if CI numbered it.
+    pub fn build_id(&self) -> Option<BuildId> {
+        self.build.map(|build| BuildId::new(self.version, build))
+    }
+
+    /// Whether this build can check for and install newer ones: it has
+    /// a number and the brand has a source.
+    pub fn can_update(&self) -> bool {
+        self.build.is_some() && self.updates.is_some()
+    }
+
+    /// "Paladin 0.1.0 (build 150)", or "Paladin 0.1.0 (local build)".
+    pub fn describe_build(&self) -> String {
+        match self.build {
+            Some(build) => format!("{} {} (build {build})", self.name, self.version),
+            None => format!("{} {} (local build)", self.name, self.version),
+        }
+    }
 }
 
 use url::Url;
 
 use crate::settings::ChromeColor;
+use crate::update::{BuildId, UpdateSource};
 
 /// What an engine offers for browser extensions. `None` in
 /// [`EngineInfo::extensions`] means the engine runs none, and the chrome
@@ -135,6 +168,11 @@ pub(crate) mod test_support {
         homepage: "https://home.example/",
         chrome_color: ChromeColor::Slate,
         icon_png: &[],
+        version: "0.1.0",
+        build: Some(7),
+        updates: Some(UpdateSource {
+            manifest_url: "https://updates.example/latest.toml",
+        }),
     };
 
     /// An engine for tests.

@@ -7,7 +7,7 @@ use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
     Bookmarks, Command, CommandKind, Extension, ExtensionSource, ExtensionSupport, FolderId,
     History, HistoryEntry, KeyChord, Keymap, LoadState, MediaKind, PageCommand, PageContext,
-    PageTools, Platform, ProfileEntry, TabId, Window, WindowId,
+    PageTools, Platform, ProfileEntry, TabId, UpdateStatus, Window, WindowId,
 };
 use url::Url;
 
@@ -86,6 +86,47 @@ pub struct MenuBarInput<'a> {
     pub profile: CurrentProfile<'a>,
     /// The other profiles on this machine.
     pub profiles: &'a [ProfileEntry],
+    /// Where the browser is with updates, for the application menu's
+    /// update entry.
+    pub updates: UpdateMenu<'a>,
+}
+
+/// What the update entry of a menu is built from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UpdateMenu<'a> {
+    /// The product name, for "Restart to update …".
+    pub brand: &'a str,
+    pub status: &'a UpdateStatus,
+    /// Whether this build can update itself at all (`Brand::can_update`);
+    /// the entry is disabled otherwise.
+    pub can_update: bool,
+}
+
+impl UpdateMenu<'_> {
+    /// The one entry about updates: "Check for updates…" when nothing is
+    /// going on, "Restart to update <brand>" when a build is ready, and
+    /// a disabled line saying what is under way in between. Disabled
+    /// outright for a build that cannot update itself.
+    pub fn entry(&self) -> MenuEntry {
+        let disabled = |label: String| MenuEntry::Disabled { label, chord: None };
+        if !self.can_update {
+            return disabled("Check for updates…".to_string());
+        }
+        match self.status {
+            UpdateStatus::Idle | UpdateStatus::UpToDate | UpdateStatus::Failed(_) => {
+                MenuEntry::item("Check for updates…", true, Command::CheckForUpdates)
+            }
+            UpdateStatus::Checking => disabled("Checking for updates…".to_string()),
+            UpdateStatus::Downloading { .. } | UpdateStatus::Installing(_) => {
+                disabled(self.status.describe(self.brand))
+            }
+            UpdateStatus::Ready { .. } => MenuEntry::item(
+                format!("Restart to update {}", self.brand),
+                true,
+                Command::InstallUpdate,
+            ),
+        }
+    }
 }
 
 /// The profile this browser runs, as the Profiles menu names it.
@@ -125,12 +166,14 @@ impl MenuEntry {
 
 /// The window menu behind the "☰" button. `can_reopen` says whether a
 /// closed tab is there to reopen; the bookmark groups become a submenu
-/// each, with "Open all" and the pages.
+/// each, with "Open all" and the pages; `updates` is the entry about
+/// updates, above Settings.
 pub fn window_menu(
     window: &Window,
     keymap: &Keymap,
     can_reopen: bool,
     bookmarks: &Bookmarks,
+    updates: UpdateMenu<'_>,
 ) -> Vec<MenuEntry> {
     let tab = window.active;
     let bound = |kind: CommandKind| MenuEntry::bound(keymap, kind, &kind.label(), window.id, tab);
@@ -146,6 +189,8 @@ pub fn window_menu(
         bound(CommandKind::Home),
         bookmarks_menu(window.id, bookmarks),
         bound(CommandKind::ToggleFullscreen),
+        MenuEntry::Separator,
+        updates.entry(),
         bound(CommandKind::OpenSettings),
         MenuEntry::Separator,
         bound(CommandKind::Quit),
@@ -222,6 +267,7 @@ pub fn menu_bar(input: &MenuBarInput<'_>) -> Vec<MenuEntry> {
         history,
         profile,
         profiles,
+        updates,
     } = *input;
     let ids = window.map(|w| (w.id, w.active));
     let active = window.map(Window::active_tab);
@@ -349,6 +395,7 @@ pub fn menu_bar(input: &MenuBarInput<'_>) -> Vec<MenuEntry> {
             brand,
             vec![
                 system(format!("About {brand}"), SystemItem::About),
+                updates.entry(),
                 MenuEntry::Separator,
                 global(
                     CommandKind::OpenSettings,
@@ -1220,11 +1267,20 @@ mod tests {
         );
     }
 
+    /// A browser that can update and has nothing under way.
+    fn idle_updates() -> UpdateMenu<'static> {
+        UpdateMenu {
+            brand: "Test",
+            status: &UpdateStatus::Idle,
+            can_update: true,
+        }
+    }
+
     #[test]
     fn window_menu_carries_the_keymap_chords_and_commands() {
         let w = window_with(1);
         let keymap = Keymap::defaults(Platform::Windows);
-        let entries = window_menu(&w, &keymap, true, &Bookmarks::default());
+        let entries = window_menu(&w, &keymap, true, &Bookmarks::default(), idle_updates());
         assert_eq!(
             labels(&entries),
             vec![
@@ -1235,6 +1291,8 @@ mod tests {
                 "Open homepage",
                 "Bookmarks",
                 "Full screen",
+                "-",
+                "Check for updates…",
                 "Settings",
                 "-",
                 "Quit"
@@ -1243,8 +1301,17 @@ mod tests {
         // No bookmarks: the submenu is there, disabled.
         assert_eq!(
             enabled(&entries),
-            vec![true, true, true, true, true, false, true, true, true, true]
+            vec![
+                true, true, true, true, true, false, true, true, true, true, true, true
+            ]
         );
+        assert!(matches!(
+            &entries[8],
+            MenuEntry::Item {
+                command: Command::CheckForUpdates,
+                ..
+            }
+        ));
         let MenuEntry::Item { chord, command, .. } = &entries[1] else {
             panic!("second entry is an item");
         };
@@ -1265,7 +1332,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            &entries[9],
+            &entries[11],
             MenuEntry::Item {
                 command: Command::Quit,
                 ..
@@ -1281,8 +1348,86 @@ mod tests {
             &Keymap::defaults(Platform::Windows),
             false,
             &Bookmarks::default(),
+            idle_updates(),
         );
         assert!(!enabled(&entries)[2]);
+    }
+
+    fn sample_update() -> osmena_core::AvailableUpdate {
+        osmena_core::AvailableUpdate {
+            id: osmena_core::BuildId::new("0.1.0", 150),
+            notes_url: None,
+            asset: osmena_core::Asset {
+                name: "setup.exe".to_string(),
+                url: "https://updates.example/setup.exe".to_string(),
+                sha256: "0".repeat(64),
+                size: 200,
+            },
+        }
+    }
+
+    #[test]
+    fn the_update_entry_follows_the_status() {
+        let entry = |status: &UpdateStatus, can_update: bool| {
+            UpdateMenu {
+                brand: "Test",
+                status,
+                can_update,
+            }
+            .entry()
+        };
+        // A local build: the entry is there, disabled.
+        assert_eq!(
+            entry(&UpdateStatus::Idle, false),
+            MenuEntry::Disabled {
+                label: "Check for updates…".to_string(),
+                chord: None,
+            }
+        );
+        for status in [
+            UpdateStatus::Idle,
+            UpdateStatus::UpToDate,
+            UpdateStatus::Failed("x".to_string()),
+        ] {
+            assert_eq!(
+                entry(&status, true),
+                MenuEntry::item("Check for updates…", true, Command::CheckForUpdates)
+            );
+        }
+        assert_eq!(
+            entry(&UpdateStatus::Checking, true),
+            MenuEntry::Disabled {
+                label: "Checking for updates…".to_string(),
+                chord: None,
+            }
+        );
+        assert_eq!(
+            entry(
+                &UpdateStatus::Downloading {
+                    update: sample_update(),
+                    received: 100,
+                },
+                true
+            ),
+            MenuEntry::Disabled {
+                label: "Downloading Test 0.1.0 (build 150)… 50%".to_string(),
+                chord: None,
+            }
+        );
+        assert_eq!(
+            entry(
+                &UpdateStatus::Ready {
+                    update: sample_update(),
+                    file: std::path::PathBuf::from("setup.exe"),
+                },
+                true
+            ),
+            MenuEntry::item("Restart to update Test", true, Command::InstallUpdate)
+        );
+        assert!(matches!(
+            entry(&UpdateStatus::Installing(sample_update()), true),
+            MenuEntry::Disabled { .. }
+        ));
     }
 
     #[test]
@@ -1302,7 +1447,13 @@ mod tests {
                 },
             ],
         );
-        let entries = window_menu(&w, &Keymap::defaults(Platform::Windows), true, &bookmarks);
+        let entries = window_menu(
+            &w,
+            &Keymap::defaults(Platform::Windows),
+            true,
+            &bookmarks,
+            idle_updates(),
+        );
         let MenuEntry::Submenu {
             entries: groups,
             enabled: true,
@@ -1464,6 +1615,15 @@ mod page_menu_tests {
     use super::*;
     use osmena_core::{EditState, Media, Misspelling, Tab};
     use url::Url;
+
+    /// A browser that can update and has nothing under way.
+    fn idle_updates() -> UpdateMenu<'static> {
+        UpdateMenu {
+            brand: "Test",
+            status: &UpdateStatus::Idle,
+            can_update: true,
+        }
+    }
 
     fn window() -> Window {
         Window::with_tab(
@@ -1964,6 +2124,7 @@ mod page_menu_tests {
                 name: "Default",
             },
             profiles,
+            updates: idle_updates(),
         }
     }
 
@@ -2017,6 +2178,8 @@ mod page_menu_tests {
             }
         ));
         assert_eq!(labels(app)[0], "About Test");
+        assert_eq!(labels(app)[1], "Check for updates…");
+        assert_eq!(command(app, "Check for updates…"), Command::CheckForUpdates);
         assert_eq!(command(app, "Settings…"), Command::OpenSettings);
         assert_eq!(command(app, "Quit Test"), Command::Quit);
         assert_eq!(chord(app, "Quit Test"), keymap.chord_for(CommandKind::Quit));
