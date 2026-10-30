@@ -657,6 +657,18 @@ impl<E: Engine> App<E> {
                     w.stop_finding(tab, clear_selection);
                 }
             }
+            EngineAction::SetZoom { tab, percent } => {
+                if let Some(w) = self.window_for_tab(tab) {
+                    w.set_zoom(tab, percent);
+                    w.request_redraw();
+                }
+            }
+            EngineAction::SaveZoom => {
+                let path = self.browser.profile.zoom_path();
+                if let Err(e) = self.browser.zoom.save(&path) {
+                    log::error!("cannot save the zoom levels to {}: {e}", path.display());
+                }
+            }
             EngineAction::SetFullscreen { window, fullscreen } => {
                 if let Some(w) = self.window_for_core_id(window) {
                     w.set_fullscreen(fullscreen);
@@ -985,6 +997,16 @@ impl<E: Engine> App<E> {
     /// what the open windows show.
     fn settings_changed(&mut self) {
         self.save_settings();
+        // A new default zoom reaches the pages without a level of their
+        // own.
+        let zoomed = osmena_core::command::apply_default_zoom(&mut self.browser);
+        for action in zoomed {
+            if let EngineAction::SetZoom { tab, percent } = action
+                && let Some(w) = self.window_for_tab(tab)
+            {
+                w.set_zoom(tab, percent);
+            }
+        }
         let frameless = !self.browser.settings.system_title_bar;
         for w in self.windows.values_mut() {
             w.set_frameless(frameless);

@@ -590,6 +590,11 @@ impl Profile {
         self.dir.join("favicons")
     }
 
+    /// The zoom levels of sites that differ from the default.
+    pub fn zoom_path(&self) -> PathBuf {
+        self.dir.join("zoom.toml")
+    }
+
     /// The installed extensions, as the engine last reported them
     /// ([`InstalledExtensions`]): what another profile copies from.
     ///

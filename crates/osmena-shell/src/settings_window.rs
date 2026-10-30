@@ -662,6 +662,32 @@ fn draw_general(ui: &mut egui::Ui, settings: &mut Settings, activity: &mut FormA
             });
             ui.end_row();
 
+            ui.label("Page zoom");
+            ui.vertical(|ui| {
+                egui::ComboBox::from_id_salt("page-zoom")
+                    .selected_text(format!("{}%", settings.page_zoom))
+                    .show_ui(ui, |ui| {
+                        for step in osmena_core::ZOOM_STEPS {
+                            if ui
+                                .selectable_value(&mut settings.page_zoom, step, format!("{step}%"))
+                                .changed()
+                            {
+                                activity.edited = true;
+                                activity.committed = true;
+                            }
+                        }
+                    });
+                ui.label(
+                    egui::RichText::new(
+                        "For sites without a zoom of their own. Ctrl and + or \u{2212} (or the \
+                         wheel) zoom a site and remember it.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
+            ui.end_row();
+
             ui.label("On launch");
             let restore = ui.checkbox(
                 &mut settings.restore_windows_on_launch,

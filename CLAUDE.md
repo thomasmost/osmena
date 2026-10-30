@@ -5,10 +5,11 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-10-30 (find in page: the bar, the engine contract
-and the result event; bookmarks: the star and its popover, the
-bookmarks bar, the Bookmarks menu with import and export, merged
-suggestions, the favicon cache; before that updates over the air)._
+_Last updated: 2026-10-30 (page zoom per site; find in page: the bar,
+the engine contract and the result event; bookmarks: the star and its
+popover, the bookmarks bar, the Bookmarks menu with import and export,
+merged suggestions, the favicon cache; before that updates over the
+air)._
 
 ## Architecture
 
@@ -97,6 +98,18 @@ No engine is needed; the workspace builds in under a minute.
   directly, so bookmarks and history rank together. Site favicons are
   the shell's (`favicons.rs`, `Profile::favicons_dir`), handed to the
   chrome as `ChromeContext::site_icons` by host (`Bookmarks::site_key`).
+- **Zoom is per site, kept by the model, applied by the engine.**
+  `Tab::zoom` is the level; `set_zoom` in `command.rs` changes every
+  tab on the host at once and records the site in `Browser::zoom`
+  (`SiteZoom`; the default, `Settings::page_zoom`, is recorded as no
+  entry) and `apply` gives a tab its site's level when its URL changes,
+  so an engine only ever receives `EngineAction::SetZoom` and never
+  remembers anything itself (Chromium keeps its own per-host zoom, which
+  agrees because the model re-applies after every navigation). The
+  chord table has two chords per zoom kind (the row and the numpad);
+  the shell turns `Ctrl`+wheel over the page into `ZoomIn`/`ZoomOut`
+  a notch at a time. The settings window's default goes through
+  `command::apply_default_zoom`.
 - **The find bar is the window's state; the engine does the finding.**
   `Window::find` (`FindState`) is open or not; the chrome draws the bar
   from it and edits a copy of the text, sending `Command::FindText` as
@@ -258,6 +271,16 @@ No engine is needed; the workspace builds in under a minute.
   adds; the shared behaviour is documented here only.
 
 ## Status and handoff (2026-10-19)
+
+Added 2026-10-30 (later still): page zoom (see Conventions). Verified:
+`cargo test` (the steps, the site table, the fan-out over a host, the
+reset, the default), clippy, fmt, and a scripted run of Nautilus on
+Windows: Ctrl+= twice shows the 125% chip and a larger page, Ctrl and
+the wheel step in and out, the chip's popover offers −, + and Reset,
+a new tab on the same site opens at the site's level, Ctrl+0 resets
+both tabs and forgets the site in `zoom.toml`. Not verified: Paladin's
+`set_page_zoom` in a running Paladin, the settings window's "Page zoom"
+by hand, macOS.
 
 Added 2026-10-30 (later): find in page (see Conventions). Verified:
 `cargo test` (the commands, the tab switch, the result folding, the

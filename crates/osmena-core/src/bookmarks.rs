@@ -97,12 +97,10 @@ impl Bookmarks {
         !(url.scheme() == "about" && url.path() == "blank")
     }
 
-    /// The key a site's favicon is kept under: the host, in lower case.
-    /// `None` for an address without one.
+    /// The key a site's favicon is kept under: the host, in lower case
+    /// ([`crate::model::site_key`]). `None` for an address without one.
     pub fn site_key(url: &Url) -> Option<String> {
-        url.host_str()
-            .filter(|h| !h.is_empty())
-            .map(str::to_ascii_lowercase)
+        crate::model::site_key(url)
     }
 
     /// Whether `url` is bookmarked, in any group.

@@ -36,7 +36,7 @@ use osmena_core::command::open_window;
 use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
     Bookmarks, Brand, Browser, Command, EngineInfo, History, Keymap, Platform, Profile, Settings,
-    dispatch,
+    SiteZoom, dispatch,
 };
 use osmena_engine::{Engine, EngineError, Waker};
 use url::Url;
@@ -171,8 +171,20 @@ pub fn run<E: Engine>(launch: Launch<E>) -> ExitCode {
             History::default()
         }
     };
+    // The zoom levels likewise.
+    let zoom = match SiteZoom::load(&profile.zoom_path()) {
+        Ok(z) => z,
+        Err(e) => {
+            log::warn!(
+                "{e} (in {}); starting with no site zoom levels",
+                profile.zoom_path().display()
+            );
+            SiteZoom::default()
+        }
+    };
     browser.bookmarks = bookmarks;
     browser.history = history;
+    browser.zoom = zoom;
     let first: Url = urls.first().cloned().unwrap_or_else(|| browser.homepage());
     let mut actions = open_window(&mut browser, first);
     let window = browser.windows[0].id;

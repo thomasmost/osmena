@@ -8,10 +8,13 @@ use crate::bookmarks::{Bookmark, Bookmarks};
 use crate::bookmarks_html;
 use crate::event::PendingTab;
 use crate::extension::ExtensionSource;
-use crate::model::{Browser, FindState, Folder, FolderId, LoadState, Tab, TabId, Window, WindowId};
+use crate::model::{
+    Browser, FindState, Folder, FolderId, LoadState, Tab, TabId, Window, WindowId, site_key,
+};
 use crate::profile::{Avatar, DEFAULT_PROFILE_NAME};
 use crate::settings::ChromeColor;
 use crate::update::{AvailableUpdate, UpdateStatus};
+use crate::zoom::{ZOOM_MAX, ZOOM_MIN, next_step};
 
 /// Every user action in the browser is one of these. The chrome, the keymap,
 /// and (in Phase 2) remappable hotkeys all produce `Command`s; nothing else
@@ -186,6 +189,16 @@ pub enum Command {
     },
     FindNext(WindowId),
     FindPrevious(WindowId),
+    /// Zoom the page a step in, out, or back to the default; every tab
+    /// on the same host follows, and the site remembers the level.
+    ZoomIn(TabId),
+    ZoomOut(TabId),
+    ZoomReset(TabId),
+    /// Zoom the page to `percent` (clamped to the step table's range).
+    SetZoom {
+        tab: TabId,
+        percent: u16,
+    },
     NextTab(WindowId),
     PreviousTab(WindowId),
     /// Activate the tab at `index` in `window`'s strip; nothing if there
@@ -534,6 +547,13 @@ pub enum EngineAction {
     },
     /// Put the keyboard focus in `window`'s find bar.
     FocusFind(WindowId),
+    /// Zoom `tab`'s page to `percent`.
+    SetZoom {
+        tab: TabId,
+        percent: u16,
+    },
+    /// The sites' zoom levels changed: persist them.
+    SaveZoom,
     /// The history changed: persist it (the shell may wait a moment and
     /// save once for a run of changes).
     SaveHistory,
@@ -944,6 +964,13 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
         }
         Command::FindNext(window) => find_step(browser, *window, true),
         Command::FindPrevious(window) => find_step(browser, *window, false),
+        Command::ZoomIn(tab) => zoom_step(browser, *tab, true),
+        Command::ZoomOut(tab) => zoom_step(browser, *tab, false),
+        Command::ZoomReset(tab) => {
+            let default = browser.settings.page_zoom;
+            set_zoom(browser, *tab, default)
+        }
+        Command::SetZoom { tab, percent } => set_zoom(browser, *tab, *percent),
         Command::PromptRenameFolder(folder) => {
             let Some(window) = browser.window_of_folder(*folder) else {
                 return Vec::new();
@@ -1345,6 +1372,69 @@ fn history_step(browser: &mut Browser, tab: TabId, action: EngineAction) -> Vec<
         }
         None => Vec::new(),
     }
+}
+
+/// Zoom `tab`'s page a step in or out.
+fn zoom_step(browser: &mut Browser, tab: TabId, up: bool) -> Vec<EngineAction> {
+    let Some(t) = browser.tab(tab) else {
+        return Vec::new();
+    };
+    let next = next_step(t.zoom, up);
+    set_zoom(browser, tab, next)
+}
+
+/// Zoom `tab`'s page, and every other tab on its host, to `percent`;
+/// the site remembers the level (the default as no entry). A page
+/// without a host (`about:blank`) zooms alone and is not remembered.
+fn set_zoom(browser: &mut Browser, tab: TabId, percent: u16) -> Vec<EngineAction> {
+    let Some(t) = browser.tab(tab) else {
+        return Vec::new();
+    };
+    let percent = percent.clamp(ZOOM_MIN, ZOOM_MAX);
+    let default = browser.settings.page_zoom;
+    let mut actions = Vec::new();
+    match site_key(&t.url) {
+        Some(host) => {
+            if browser.zoom.set(&host, percent, default) {
+                actions.push(EngineAction::SaveZoom);
+            }
+            for t in browser.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()) {
+                if site_key(&t.url).as_deref() == Some(host.as_str()) && t.zoom != percent {
+                    t.zoom = percent;
+                    actions.push(EngineAction::SetZoom { tab: t.id, percent });
+                }
+            }
+        }
+        None => {
+            if let Some(t) = browser.tab_mut(tab)
+                && t.zoom != percent
+            {
+                t.zoom = percent;
+                actions.push(EngineAction::SetZoom { tab, percent });
+            }
+        }
+    }
+    actions
+}
+
+/// The default zoom changed (the settings window): every tab on a site
+/// without a level of its own takes the new default.
+pub fn apply_default_zoom(browser: &mut Browser) -> Vec<EngineAction> {
+    let default = browser.settings.page_zoom;
+    let mut actions = Vec::new();
+    for w in &mut browser.windows {
+        for t in &mut w.tabs {
+            let level = browser.zoom.level_for(&t.url, default);
+            if t.zoom != level {
+                t.zoom = level;
+                actions.push(EngineAction::SetZoom {
+                    tab: t.id,
+                    percent: level,
+                });
+            }
+        }
+    }
+    actions
 }
 
 /// Step to the next or previous match in `window`'s active tab, when
@@ -3109,6 +3199,85 @@ mod tests {
         );
         assert!(!Command::ToggleBookmarksBar.changes_bookmarks());
         assert!(!Command::PickBookmarksFile(BookmarksFile::Export).changes_bookmarks());
+    }
+
+    #[test]
+    fn zoom_steps_spread_over_the_host_and_are_remembered() {
+        let (mut b, window, tab) = one_window();
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window,
+                url: Some(url("https://a.example/other")),
+            },
+        );
+        let other = b.window(window).unwrap().active;
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window,
+                url: Some(url("https://b.example/")),
+            },
+        );
+        let elsewhere = b.window(window).unwrap().active;
+        let actions = dispatch(&mut b, &Command::ZoomIn(tab));
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::SaveZoom,
+                EngineAction::SetZoom { tab, percent: 110 },
+                EngineAction::SetZoom {
+                    tab: other,
+                    percent: 110
+                },
+            ]
+        );
+        assert_eq!(b.tab(elsewhere).unwrap().zoom, 100);
+        assert_eq!(b.zoom.sites["a.example"], 110);
+        // Out twice from 110 lands on 90; back to the default forgets
+        // the site.
+        dispatch(&mut b, &Command::ZoomOut(tab));
+        dispatch(&mut b, &Command::ZoomOut(other));
+        assert_eq!(b.tab(tab).unwrap().zoom, 90);
+        let actions = dispatch(&mut b, &Command::ZoomReset(tab));
+        assert_eq!(actions[0], EngineAction::SaveZoom);
+        assert!(b.zoom.sites.is_empty());
+        assert_eq!(b.tab(other).unwrap().zoom, 100);
+        // Setting a level that is already there changes nothing.
+        assert!(dispatch(&mut b, &Command::SetZoom { tab, percent: 100 }).is_empty());
+        // Clamped to the table.
+        dispatch(&mut b, &Command::SetZoom { tab, percent: 9000 });
+        assert_eq!(b.tab(tab).unwrap().zoom, 500);
+        // A blank page zooms alone and is not remembered.
+        dispatch(
+            &mut b,
+            &Command::Navigate {
+                tab: elsewhere,
+                url: url("about:blank"),
+            },
+        );
+        let actions = dispatch(&mut b, &Command::ZoomIn(elsewhere));
+        assert_eq!(
+            actions,
+            vec![EngineAction::SetZoom {
+                tab: elsewhere,
+                percent: 110
+            }]
+        );
+        assert!(!b.zoom.sites.contains_key(""));
+        // A new default reaches the tabs without a level of their own
+        // (the blank page); a site with its own level keeps it.
+        b.settings.page_zoom = 125;
+        let actions = apply_default_zoom(&mut b);
+        assert_eq!(
+            actions,
+            vec![EngineAction::SetZoom {
+                tab: elsewhere,
+                percent: 125
+            }]
+        );
+        assert_eq!(b.tab(tab).unwrap().zoom, 500);
+        assert_eq!(b.tab(other).unwrap().zoom, 500);
     }
 
     #[test]

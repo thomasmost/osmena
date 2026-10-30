@@ -168,6 +168,15 @@ The engine contract, in `osmena-engine`:
   and a click lists the tabs; expanded (from its menu), its tabs follow
   it. The chip's menu also renames, ungroups, or closes the folder.
   Folders are not kept across launches.
+- **Page zoom.** `Ctrl+Plus` (`Ctrl+Equal`, or the numpad's plus),
+  `Ctrl+Minus` and `Ctrl+0` (`Cmd` on macOS), `Ctrl` with the wheel over
+  the page, the ☰ menu's Zoom submenu or the macOS View menu zoom the
+  page through Chromium's steps (25% to 500%). Every tab on the same
+  host follows, the site remembers its level in `zoom.toml` in the
+  profile, and a chip beside the address bar shows the level while it
+  is not the default, with a popover for −, +, and Reset. "Page zoom"
+  in Settings (`page_zoom` in `settings.toml`) is the level of sites
+  without one of their own.
 - **Find in page**, when the engine searches pages (`EngineInfo::find`).
   `Ctrl+F` (or "Find in page…" in the ☰ menu, "Find…" in the macOS Edit
   menu) opens a pill at the top right of the page: the text is searched
@@ -258,8 +267,9 @@ The engine contract, in `osmena-engine`:
 - **Settings** (`settings.toml`): homepage, new-tab URL, the search
   provider, a chrome colour per profile, the title bar switch, the
   pinned extensions, the restore flag, the bookmarks bar switch and the
-  group the last bookmark went to, and `[profile]` (name, avatar,
-  shared bookmarks, extensions to copy at the next start).
+  group the last bookmark went to, the default page zoom, and
+  `[profile]` (name, avatar, shared bookmarks, extensions to copy at the
+  next start).
 
 ## Updates
 

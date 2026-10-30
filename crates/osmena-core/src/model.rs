@@ -12,6 +12,7 @@ use crate::history::History;
 use crate::profile::{DEFAULT_PROFILE_NAME, Profile, ProfileEntry};
 use crate::settings::Settings;
 use crate::update::UpdateStatus;
+use crate::zoom::SiteZoom;
 
 /// Identifies a browser window. Allocated by [`Browser`]; engine ids never
 /// leave the engine crate.
@@ -69,6 +70,14 @@ pub struct RgbaImage {
 /// A tab's icon.
 pub type Favicon = RgbaImage;
 
+/// The key a site's settings (its favicon, its zoom level) are kept
+/// under: the host, in lower case. `None` for an address without one.
+pub fn site_key(url: &Url) -> Option<String> {
+    url.host_str()
+        .filter(|h| !h.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
 /// One page shown as a tab.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tab {
@@ -86,6 +95,9 @@ pub struct Tab {
     pub crashed: Option<String>,
     /// The folder this tab is in, if any.
     pub folder: Option<FolderId>,
+    /// The page's zoom level in percent (`crate::zoom`), shared by every
+    /// tab on the same host.
+    pub zoom: u16,
 }
 
 impl Tab {
@@ -101,6 +113,7 @@ impl Tab {
             status: String::new(),
             crashed: None,
             folder: None,
+            zoom: 100,
         }
     }
 
@@ -339,6 +352,8 @@ pub struct Browser {
     /// Where the browser is with updates, as the shell last reported it
     /// (checking, downloading, ready to restart, failed).
     pub update: UpdateStatus,
+    /// The zoom levels of sites that differ from the default.
+    pub zoom: SiteZoom,
     next_window_id: u64,
     next_tab_id: u64,
     next_folder_id: u64,
@@ -360,6 +375,7 @@ impl Browser {
             history: History::default(),
             profiles: Vec::new(),
             update: UpdateStatus::Idle,
+            zoom: SiteZoom::default(),
             next_window_id: 1,
             next_tab_id: 1,
             next_folder_id: 1,

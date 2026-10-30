@@ -69,6 +69,9 @@ pub struct BrowserWindow<E: Engine> {
     page_presses: HashMap<keyboard_types::Code, KeyInput>,
     /// The uploaded frame of each tab that handed the shell pixels.
     textures: HashMap<TabId, PageTexture>,
+    /// Wheel travel with the primary modifier held, in pixels, until it
+    /// adds up to a zoom step.
+    zoom_wheel: f64,
     /// When egui wants the next frame.
     repaints: RepaintSchedule,
     egui: EguiGlow,
@@ -121,6 +124,7 @@ impl<E: Engine> BrowserWindow<E> {
             brand,
             engine_info,
             chrome: ChromeState::default(),
+            zoom_wheel: 0.0,
             modifiers: ModifiersState::default(),
             cursor: None,
             frameless,
@@ -223,6 +227,10 @@ impl<E: Engine> BrowserWindow<E> {
 
     pub fn find(&self, tab: TabId, text: &str, forward: bool, match_case: bool, find_next: bool) {
         self.host.find(tab, text, forward, match_case, find_next);
+    }
+
+    pub fn set_zoom(&self, tab: TabId, percent: u16) {
+        self.host.set_zoom(tab, percent);
     }
 
     pub fn stop_finding(&self, tab: TabId, clear_selection: bool) {
@@ -623,6 +631,27 @@ impl<E: Engine> BrowserWindow<E> {
                     if let (Some(tab), Some((x, y))) = (pointer_tab, self.content_point()) {
                         let (dx, dy) = input::wheel_delta(*delta, self.engine_info.wheel_line_px);
                         let modifiers = self.modifiers();
+                        // Ctrl (Cmd) and the wheel zoom the page a step per
+                        // notch instead of scrolling it.
+                        let primary = if cfg!(target_os = "macos") {
+                            Modifiers::META
+                        } else {
+                            Modifiers::CONTROL
+                        };
+                        if modifiers.contains(primary) {
+                            self.zoom_wheel += dy;
+                            let notch = f64::from(self.engine_info.wheel_line_px).max(1.0);
+                            while self.zoom_wheel >= notch {
+                                self.zoom_wheel -= notch;
+                                commands.push(Command::ZoomIn(tab));
+                            }
+                            while self.zoom_wheel <= -notch {
+                                self.zoom_wheel += notch;
+                                commands.push(Command::ZoomOut(tab));
+                            }
+                            return commands;
+                        }
+                        self.zoom_wheel = 0.0;
                         self.host.input(
                             tab,
                             EngineInput::Wheel {
@@ -837,6 +866,7 @@ impl<E: Engine> BrowserWindow<E> {
                 bookmarks: &browser.bookmarks,
                 show_bookmarks_bar: browser.settings.show_bookmarks_bar,
                 site_icons,
+                page_zoom: browser.settings.page_zoom,
             };
             commands = chrome::draw(ui, model, &context, chrome_state, keymap);
             let rect = ui.available_rect_before_wrap();

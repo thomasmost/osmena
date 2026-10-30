@@ -213,6 +213,15 @@ pub fn window_menu(
             entries: bookmarks_entries(Some(window), keymap, bookmarks, false),
         },
         bound(CommandKind::ToggleFullscreen),
+        MenuEntry::Submenu {
+            label: format!("Zoom ({}%)", window.active_tab().zoom),
+            enabled: true,
+            entries: vec![
+                bound(CommandKind::ZoomIn),
+                bound(CommandKind::ZoomOut),
+                bound(CommandKind::ZoomReset),
+            ],
+        },
         MenuEntry::Separator,
         updates.entry(),
         bound(CommandKind::OpenSettings),
@@ -627,6 +636,10 @@ pub fn menu_bar(input: &MenuBarInput<'_>) -> Vec<MenuEntry> {
                 bound(CommandKind::Stop, "Stop Loading", loading),
                 MenuEntry::Separator,
                 bound(CommandKind::FocusAddressBar, "Open Location…", true),
+                MenuEntry::Separator,
+                bound(CommandKind::ZoomIn, "Zoom In", true),
+                bound(CommandKind::ZoomOut, "Zoom Out", true),
+                bound(CommandKind::ZoomReset, "Actual Size", true),
                 MenuEntry::Separator,
                 bound(CommandKind::ToggleFullscreen, "Toggle Full Screen", true),
             ],
@@ -1463,6 +1476,7 @@ mod tests {
                 "Open homepage",
                 "Bookmarks",
                 "Full screen",
+                "Zoom (100%)",
                 "-",
                 "Check for updates…",
                 "Settings",
@@ -1474,9 +1488,21 @@ mod tests {
         assert_eq!(
             enabled(&entries),
             vec![
-                true, true, true, true, true, true, true, true, true, true, true, true, true
+                true, true, true, true, true, true, true, true, true, true, true, true, true, true
             ]
         );
+        let MenuEntry::Submenu { entries: zoom, .. } = &entries[8] else {
+            panic!("zoom is a submenu");
+        };
+        assert_eq!(labels(zoom), vec!["Zoom in", "Zoom out", "Actual size"]);
+        assert!(matches!(
+            &zoom[2],
+            MenuEntry::Item {
+                command: Command::ZoomReset(TabId(1)),
+                chord: Some(_),
+                ..
+            }
+        ));
         assert!(matches!(
             &entries[4],
             MenuEntry::Item {
@@ -1489,7 +1515,7 @@ mod tests {
         let without = window_menu(&w, &keymap, true, false, no_bookmarks(), idle_updates());
         assert!(!enabled(&without)[4]);
         assert!(matches!(
-            &entries[9],
+            &entries[10],
             MenuEntry::Item {
                 command: Command::CheckForUpdates,
                 ..
@@ -1515,7 +1541,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            &entries[12],
+            &entries[13],
             MenuEntry::Item {
                 command: Command::Quit,
                 ..

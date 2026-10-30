@@ -6,6 +6,25 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- Page zoom. `Tab::zoom` (percent) is set by `Command::{ZoomIn,
+  ZoomOut, ZoomReset, SetZoom}` (`CommandKind::{ZoomIn, ZoomOut,
+  ZoomReset}`: `Ctrl+Equal` or `Ctrl+NumpadAdd`, `Ctrl+Minus` or
+  `Ctrl+NumpadSubtract`, `Ctrl+Digit0` or `Ctrl+Numpad0`; `Cmd` on
+  macOS) through Chromium's step table (`zoom::ZOOM_STEPS`,
+  `next_step`); every tab on the same host follows and the site keeps
+  its level in `Browser::zoom` (`SiteZoom`, `zoom.toml` in the profile,
+  `Profile::zoom_path`), the default being `Settings::page_zoom`
+  (100, "Page zoom" in the settings window). `apply` gives a tab its
+  site's level on `UrlChanged`; `EngineAction::{SetZoom, SaveZoom}`;
+  `TabHost::set_zoom` with a default that does nothing;
+  `command::apply_default_zoom` for a changed default. The shell turns
+  the wheel with `Ctrl` (`Cmd`) held over the page into zoom steps. The
+  chrome shows a chip with the level beside the address bar while it is
+  not the default, with a popover for −, + and Reset
+  (`ChromeContext::page_zoom`); the ☰ menu gains a "Zoom (n%)" submenu
+  and the macOS View menu Zoom In, Zoom Out and Actual Size.
+  `model::site_key` is the host key both the favicon cache and the zoom
+  table use.
 - Find in page. `Window::find` (`FindState`: text, match case, current
   and total) is the find bar, drawn at the top right of the page while
   open; `Command::{OpenFind, CloseFind, FindText, FindNext,

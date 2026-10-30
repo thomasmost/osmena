@@ -51,6 +51,9 @@ pub struct Settings {
     /// The group the star put the last bookmark in, which is where the
     /// next one goes until the user picks another; empty, the bar.
     pub last_bookmark_group: String,
+    /// The zoom level, in percent, of sites without one of their own
+    /// (`crate::zoom`).
+    pub page_zoom: u16,
 }
 
 impl Default for Settings {
@@ -67,6 +70,7 @@ impl Default for Settings {
             check_for_updates: true,
             show_bookmarks_bar: false,
             last_bookmark_group: String::new(),
+            page_zoom: 100,
         }
     }
 }
@@ -418,6 +422,7 @@ mod tests {
             check_for_updates: false,
             show_bookmarks_bar: true,
             last_bookmark_group: "Work".to_string(),
+            page_zoom: 110,
         };
         let text = s.to_toml().unwrap();
         assert!(text.contains("check_for_updates = false"), "{text}");

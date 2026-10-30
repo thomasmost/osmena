@@ -184,6 +184,10 @@ pub trait TabHost {
     /// End the search in `tab`: drop the highlights, and the selection of
     /// the active match too when `clear_selection`. Default: nothing.
     fn stop_finding(&self, _tab: TabId, _clear_selection: bool) {}
+    /// Zoom `tab`'s page to `percent` (100 is the page's own size). The
+    /// model keeps the level per site and asks again after every
+    /// navigation to another site. Default: nothing.
+    fn set_zoom(&self, _tab: TabId, _percent: u16) {}
 }
 
 /// One engine instance, one per process. The shell builds it through a

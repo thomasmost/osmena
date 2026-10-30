@@ -479,6 +479,9 @@ pub struct ChromeContext<'a> {
     /// The favicons of bookmarked sites the shell has on file, by host
     /// (`Bookmarks::site_key`), for the bar's chips.
     pub site_icons: &'a HashMap<String, Favicon>,
+    /// The default zoom level (`Settings::page_zoom`): the zoom chip
+    /// shows when the page's differs.
+    pub page_zoom: u16,
 }
 
 /// Something the chrome asks of the native window, recorded while drawing
@@ -774,6 +777,46 @@ pub fn draw(
                                 });
                             }
                         }
+                    }
+                    if active.zoom != context.page_zoom {
+                        let chip = zoom_chip(ui, &palette, window, active.zoom)
+                            .on_hover_text("Zoom: click to change");
+                        egui::Popup::menu(&chip).show(|ui| {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add_enabled(
+                                        active.zoom > osmena_core::ZOOM_MIN,
+                                        Button::new("−"),
+                                    )
+                                    .on_hover_text(hint(keymap, CommandKind::ZoomOut, "Zoom out"))
+                                    .clicked()
+                                {
+                                    commands.push(Command::ZoomOut(active.id));
+                                }
+                                ui.label(format!("{}%", active.zoom));
+                                if ui
+                                    .add_enabled(
+                                        active.zoom < osmena_core::ZOOM_MAX,
+                                        Button::new("+"),
+                                    )
+                                    .on_hover_text(hint(keymap, CommandKind::ZoomIn, "Zoom in"))
+                                    .clicked()
+                                {
+                                    commands.push(Command::ZoomIn(active.id));
+                                }
+                                if ui
+                                    .button("Reset")
+                                    .on_hover_text(hint(
+                                        keymap,
+                                        CommandKind::ZoomReset,
+                                        "Actual size",
+                                    ))
+                                    .clicked()
+                                {
+                                    commands.push(Command::ZoomReset(active.id));
+                                }
+                            });
+                        });
                     }
                     if Bookmarks::bookmarkable(&active.url) {
                         let bookmarked = bookmarks.contains(&active.url);
@@ -2618,6 +2661,39 @@ fn site_icon_texture<'a>(
         );
     }
     state.site_icons.get(host).map(|cached| &cached.texture)
+}
+
+/// The zoom chip beside the address bar, shown while the page is not at
+/// the default level: the level in percent.
+fn zoom_chip(ui: &mut Ui, palette: &Palette, window: &Window, percent: u16) -> egui::Response {
+    let id = Id::new(("zoom-chip", window.id));
+    let text = ui.painter().layout_no_wrap(
+        format!("{percent}%"),
+        TextStyle::Small.resolve(ui.style()),
+        ui.visuals().text_color(),
+    );
+    let (rect, _) = ui.allocate_exact_size(
+        Vec2::new(text.size().x + 2.0 * BAR_CHIP_PADDING, ACTION_SIZE),
+        Sense::hover(),
+    );
+    let response = ui.interact(rect, id, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let fill = if response.hovered() || response.is_pointer_button_down_on() {
+            blend(palette.toolbar, ui.visuals().text_color(), 0.12)
+        } else {
+            blend(palette.toolbar, ui.visuals().text_color(), 0.06)
+        };
+        ui.painter().rect_filled(rect, 4.0, fill);
+        ui.painter().galley(
+            Pos2::new(
+                rect.center().x - text.size().x / 2.0,
+                rect.center().y - text.size().y / 2.0,
+            ),
+            text,
+            ui.visuals().text_color(),
+        );
+    }
+    response
 }
 
 /// The toolbar's star: filled when the page is bookmarked, an outline

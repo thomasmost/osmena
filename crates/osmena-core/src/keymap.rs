@@ -137,6 +137,9 @@ pub enum CommandKind {
     Find,
     FindNext,
     FindPrevious,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
     BookmarkPage,
     ToggleBookmarksBar,
     NewWindow,
@@ -149,7 +152,7 @@ pub enum CommandKind {
 impl CommandKind {
     /// Every kind, in the order the settings window lists them. Used to
     /// check that the defaults bind each one and to write the keymap file.
-    pub const ALL: [CommandKind; 30] = [
+    pub const ALL: [CommandKind; 33] = [
         CommandKind::NewTab,
         CommandKind::CloseTab,
         CommandKind::ReopenClosedTab,
@@ -173,6 +176,9 @@ impl CommandKind {
         CommandKind::Find,
         CommandKind::FindNext,
         CommandKind::FindPrevious,
+        CommandKind::ZoomIn,
+        CommandKind::ZoomOut,
+        CommandKind::ZoomReset,
         CommandKind::BookmarkPage,
         CommandKind::ToggleBookmarksBar,
         CommandKind::NewWindow,
@@ -201,6 +207,9 @@ impl CommandKind {
             CommandKind::Find => "find".to_string(),
             CommandKind::FindNext => "find-next".to_string(),
             CommandKind::FindPrevious => "find-previous".to_string(),
+            CommandKind::ZoomIn => "zoom-in".to_string(),
+            CommandKind::ZoomOut => "zoom-out".to_string(),
+            CommandKind::ZoomReset => "zoom-reset".to_string(),
             CommandKind::BookmarkPage => "bookmark-page".to_string(),
             CommandKind::ToggleBookmarksBar => "toggle-bookmarks-bar".to_string(),
             CommandKind::NewWindow => "new-window".to_string(),
@@ -235,6 +244,9 @@ impl CommandKind {
             CommandKind::Find => "Find in page".to_string(),
             CommandKind::FindNext => "Find next".to_string(),
             CommandKind::FindPrevious => "Find previous".to_string(),
+            CommandKind::ZoomIn => "Zoom in".to_string(),
+            CommandKind::ZoomOut => "Zoom out".to_string(),
+            CommandKind::ZoomReset => "Actual size".to_string(),
             CommandKind::BookmarkPage => "Bookmark this page".to_string(),
             CommandKind::ToggleBookmarksBar => "Show bookmarks bar".to_string(),
             CommandKind::NewWindow => "New window".to_string(),
@@ -266,6 +278,9 @@ impl CommandKind {
             CommandKind::Find => Command::OpenFind(window),
             CommandKind::FindNext => Command::FindNext(window),
             CommandKind::FindPrevious => Command::FindPrevious(window),
+            CommandKind::ZoomIn => Command::ZoomIn(tab),
+            CommandKind::ZoomOut => Command::ZoomOut(tab),
+            CommandKind::ZoomReset => Command::ZoomReset(tab),
             CommandKind::BookmarkPage => Command::ToggleBookmark(tab),
             CommandKind::ToggleBookmarksBar => Command::ToggleBookmarksBar,
             CommandKind::NewWindow => Command::NewWindow,
@@ -376,6 +391,12 @@ impl Keymap {
         bind(primary, Code::KeyF, CommandKind::Find);
         bind(primary, Code::KeyG, CommandKind::FindNext);
         bind(shift, Code::KeyG, CommandKind::FindPrevious);
+        bind(primary, Code::Equal, CommandKind::ZoomIn);
+        bind(primary, Code::NumpadAdd, CommandKind::ZoomIn);
+        bind(primary, Code::Minus, CommandKind::ZoomOut);
+        bind(primary, Code::NumpadSubtract, CommandKind::ZoomOut);
+        bind(primary, Code::Digit0, CommandKind::ZoomReset);
+        bind(primary, Code::Numpad0, CommandKind::ZoomReset);
         bind(primary, Code::KeyD, CommandKind::BookmarkPage);
         bind(shift, Code::KeyB, CommandKind::ToggleBookmarksBar);
         bind(primary, Code::KeyN, CommandKind::NewWindow);

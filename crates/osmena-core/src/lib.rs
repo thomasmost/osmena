@@ -23,6 +23,7 @@ pub mod profile;
 pub mod settings;
 pub mod suggest;
 pub mod update;
+pub mod zoom;
 
 pub use bookmarks::{Bookmark, BookmarkGroup, Bookmarks, BookmarksError};
 pub use brand::{Brand, EngineInfo, ExtensionSupport, PageTools};
@@ -40,9 +41,10 @@ pub use input::{ButtonAction, EngineInput, KeyInput, MouseButton};
 pub use keymap::{ChordParseError, CommandKind, KeyChord, Keymap, KeymapError, Platform};
 pub use model::{
     Browser, Favicon, FindState, Folder, FolderId, LoadState, RgbaImage, StripItem, Tab, TabId,
-    Window, WindowId,
+    Window, WindowId, site_key,
 };
 pub use profile::{Avatar, Profile, ProfileEntry, ProfileError};
 pub use settings::{ChromeColor, ProfileSettings, SearchSettings, Settings, SettingsError};
 pub use suggest::{Suggestion, SuggestionSource, suggestions};
 pub use update::{Asset, AvailableUpdate, BuildId, Manifest, UpdateSource, UpdateStatus};
+pub use zoom::{SiteZoom, ZOOM_MAX, ZOOM_MIN, ZOOM_STEPS, ZoomError, next_step};

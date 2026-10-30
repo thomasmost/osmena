@@ -219,8 +219,20 @@ pub enum EngineEvent {
 pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
     match event {
         EngineEvent::UrlChanged { tab, url } => {
-            with_tab(browser, *tab, |t| t.url = url.clone());
-            Vec::new()
+            // A page on another site takes that site's zoom level.
+            let level = browser.zoom.level_for(url, browser.settings.page_zoom);
+            let mut actions = Vec::new();
+            with_tab(browser, *tab, |t| {
+                t.url = url.clone();
+                if t.zoom != level {
+                    t.zoom = level;
+                    actions.push(EngineAction::SetZoom {
+                        tab: t.id,
+                        percent: level,
+                    });
+                }
+            });
+            actions
         }
         EngineEvent::TitleChanged { tab, title } => {
             with_tab(browser, *tab, |t| t.title = title.clone());
