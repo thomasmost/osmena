@@ -9,9 +9,9 @@ use osmena_chrome::fatal::report_fatal;
 use osmena_chrome::{icon, menus, native_menu};
 use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
-    Bookmarks, Brand, Browser, Command, CommandKind, EngineAction, EngineEvent, EngineInfo,
-    ExtensionSource, InstalledExtensions, Keymap, PageCommand, Profile, TabId, UpdateStatus,
-    WindowId, apply, dispatch,
+    Bookmarks, BookmarksFile, Brand, Browser, Command, CommandKind, EngineAction, EngineEvent,
+    EngineInfo, ExtensionSource, InstalledExtensions, Keymap, PageCommand, Profile, TabId,
+    UpdateStatus, WindowId, apply, bookmarks_html, dispatch,
 };
 use osmena_engine::{Engine, TabHost, Waker};
 use url::Url;
@@ -22,6 +22,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 
 use crate::StartEngine;
 use crate::clipboard;
+use crate::favicons::FaviconCache;
 use crate::profiles;
 use crate::repaint;
 use crate::settings_window::{SettingsOutcome, SettingsWindow};
@@ -92,6 +93,8 @@ pub struct App<E: Engine> {
     updater: Option<Updater>,
     /// When the next automatic update check is due.
     update_check_due: Option<Instant>,
+    /// The favicons of visited sites on disk, for the bookmarks bar.
+    favicons: FaviconCache,
 }
 
 impl<E: Engine> App<E> {
@@ -119,6 +122,8 @@ impl<E: Engine> App<E> {
         });
         browser.profiles = browser.profile.siblings(brand);
         profiles::claim(&browser.profile.pid_path());
+        let mut favicons = FaviconCache::new(browser.profile.favicons_dir());
+        favicons.preload(bookmarked_hosts(&browser.bookmarks));
         let updater = Updater::new(
             brand,
             update_manifest,
@@ -153,6 +158,7 @@ impl<E: Engine> App<E> {
             delete_on_exit: None,
             updater,
             update_check_due: None,
+            favicons,
         }
     }
 
@@ -244,11 +250,52 @@ impl<E: Engine> App<E> {
     fn reload_bookmarks(&mut self, event_loop: &ActiveEventLoop) {
         let path = self.browser.bookmarks_path();
         match Bookmarks::load(&path) {
-            Ok(bookmarks) => self.browser.bookmarks = bookmarks,
+            Ok(bookmarks) => {
+                self.browser.bookmarks = bookmarks;
+                self.favicons
+                    .preload(bookmarked_hosts(&self.browser.bookmarks));
+            }
             Err(e) => self.report_error(
                 format!("cannot read bookmarks from {}: {e}", path.display()),
                 event_loop,
             ),
+        }
+    }
+
+    /// The system's file dialog for a bookmarks file, then the import or
+    /// the export itself.
+    fn pick_bookmarks_file(&mut self, which: BookmarksFile, event_loop: &ActiveEventLoop) {
+        let dialog = rfd::FileDialog::new().add_filter("HTML bookmarks file", &["html", "htm"]);
+        match which {
+            BookmarksFile::Import => {
+                let Some(path) = dialog.set_title("Import bookmarks").pick_file() else {
+                    return;
+                };
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => {
+                        let source = path
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        self.run_commands(
+                            vec![Command::ImportBookmarks { text, source }],
+                            event_loop,
+                        );
+                    }
+                    Err(e) => self
+                        .report_error(format!("cannot read {}: {e}", path.display()), event_loop),
+                }
+            }
+            BookmarksFile::Export => {
+                let Some(path) = dialog
+                    .set_title("Export bookmarks")
+                    .set_file_name("bookmarks.html")
+                    .save_file()
+                else {
+                    return;
+                };
+                self.run_commands(vec![Command::ExportBookmarks(path)], event_loop);
+            }
         }
     }
 
@@ -333,7 +380,7 @@ impl<E: Engine> App<E> {
         for command in commands {
             // Shared bookmarks are another browser's too: start from what
             // is on disk, so its additions survive ours.
-            if matches!(command, Command::BookmarkTabs { .. }) && self.bookmarks_shared() {
+            if command.changes_bookmarks() && self.bookmarks_shared() {
                 self.reload_bookmarks(event_loop);
             }
             let actions = dispatch(&mut self.browser, &command);
@@ -370,7 +417,10 @@ impl<E: Engine> App<E> {
             window,
             keymap: &self.keymap,
             can_reopen: !self.browser.closed_tabs.is_empty(),
-            bookmarks: &self.browser.bookmarks,
+            bookmarks: menus::BookmarksMenu {
+                bookmarks: &self.browser.bookmarks,
+                bar_shown: self.browser.settings.show_bookmarks_bar,
+            },
             history: &self.browser.history,
             profile: menus::CurrentProfile {
                 dir: &self.browser.profile.name,
@@ -587,6 +637,18 @@ impl<E: Engine> App<E> {
                 let path = self.browser.bookmarks_path();
                 if let Err(e) = self.browser.bookmarks.save(&path) {
                     log::error!("cannot save bookmarks to {}: {e}", path.display());
+                }
+                self.favicons
+                    .preload(bookmarked_hosts(&self.browser.bookmarks));
+                self.redraw_all();
+            }
+            EngineAction::PickFile(which) => self.pick_bookmarks_file(which, event_loop),
+            EngineAction::ExportBookmarks(path) => {
+                let html = bookmarks_html::export(&self.browser.bookmarks);
+                if let Err(e) = std::fs::write(&path, html) {
+                    self.report_error(format!("cannot write {}: {e}", path.display()), event_loop);
+                } else {
+                    log::info!("bookmarks exported to {}", path.display());
                 }
             }
             EngineAction::SwitchBookmarks { shared } => {
@@ -810,6 +872,14 @@ impl<E: Engine> App<E> {
                 _ => {}
             }
             let actions = apply(&mut self.browser, &event);
+            if let EngineEvent::FaviconChanged { tab, favicon } = &event
+                && let Some(host) = self
+                    .browser
+                    .tab(*tab)
+                    .and_then(|t| Bookmarks::site_key(&t.url))
+            {
+                self.favicons.remember(&host, favicon);
+            }
             if matches!(event, EngineEvent::ExtensionsChanged(_))
                 && self.browser.settings.profile.copy_extensions
             {
@@ -946,6 +1016,11 @@ fn edit_events(command: &PageCommand) -> Option<Vec<egui::Event>> {
     })
 }
 
+/// The hosts of every bookmarked page, whose favicons the bar shows.
+fn bookmarked_hosts(bookmarks: &Bookmarks) -> impl Iterator<Item = String> + '_ {
+    bookmarks.all().filter_map(|b| Bookmarks::site_key(&b.url))
+}
+
 fn tab_of(event: &EngineEvent) -> Option<TabId> {
     match event {
         EngineEvent::UrlChanged { tab, .. }
@@ -1078,7 +1153,8 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
                 .windows
                 .get_mut(&window_id)
                 .expect("checked by contains_key");
-            let commands = window.handle_event(&self.browser, &self.keymap, &event);
+            let commands =
+                window.handle_event(&self.browser, &self.keymap, self.favicons.icons(), &event);
             let drop = window.take_tab_drop();
             self.run_commands(commands, event_loop);
             if let Some((tabs, point)) = drop

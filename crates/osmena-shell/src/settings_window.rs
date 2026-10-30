@@ -12,8 +12,8 @@ use osmena_chrome::input::{self, KeyRoute};
 use osmena_chrome::keyboard_types::{Code, Modifiers};
 use osmena_chrome::{icon, keyutils, theme};
 use osmena_core::{
-    Brand, Command, CommandKind, Extension, ExtensionSource, ExtensionSupport, KeyChord, Keymap,
-    Platform, Settings, UpdateStatus,
+    BookmarksFile, Brand, Command, CommandKind, Extension, ExtensionSource, ExtensionSupport,
+    KeyChord, Keymap, Platform, Settings, UpdateStatus,
 };
 use osmena_engine::{Engine, EngineError, PhysicalSize, Surface};
 use winit::dpi::LogicalSize;
@@ -518,6 +518,10 @@ fn draw_settings(
                 ui.add_space(8.0);
                 draw_general(ui, settings, &mut activity);
                 ui.add_space(20.0);
+                ui.heading("Bookmarks");
+                ui.add_space(8.0);
+                draw_bookmarks(ui, settings, &mut activity, update_commands);
+                ui.add_space(20.0);
                 ui.heading("Updates");
                 ui.add_space(8.0);
                 draw_updates(ui, settings, updates, &mut activity, update_commands);
@@ -667,6 +671,58 @@ fn draw_general(ui: &mut egui::Ui, settings: &mut Settings, activity: &mut FormA
                 activity.edited = true;
                 activity.committed = true;
             }
+            ui.end_row();
+        });
+}
+
+/// The bookmarks bar switch, and import and export of an HTML bookmarks
+/// file (the commands go to the app, which shows the file dialog).
+fn draw_bookmarks(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    activity: &mut FormActivity,
+    commands: &mut Vec<Command>,
+) {
+    egui::Grid::new("bookmarks-grid")
+        .num_columns(2)
+        .spacing([12.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Bookmarks bar");
+            ui.vertical(|ui| {
+                let bar = ui.checkbox(&mut settings.show_bookmarks_bar, "Show the bookmarks bar");
+                if bar.changed() {
+                    activity.edited = true;
+                    activity.committed = true;
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "The group \u{201c}Bookmarks bar\u{201d} under the toolbar; the other \
+                         groups follow it as drop-downs.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
+            ui.end_row();
+
+            ui.label("Import and export");
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Import…").clicked() {
+                        commands.push(Command::PickBookmarksFile(BookmarksFile::Import));
+                    }
+                    if ui.button("Export…").clicked() {
+                        commands.push(Command::PickBookmarksFile(BookmarksFile::Export));
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "An HTML bookmarks file, as every browser exports and imports.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
             ui.end_row();
         });
 }

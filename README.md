@@ -168,10 +168,28 @@ The engine contract, in `osmena-engine`:
   and a click lists the tabs; expanded (from its menu), its tabs follow
   it. The chip's menu also renames, ungroups, or closes the folder.
   Folders are not kept across launches.
-- **Bookmark groups.** "Bookmark all selected…" asks for a group name
-  (or an existing group) and saves the pages to `bookmarks.toml` in the
-  profile; the window menu's "Bookmarks" submenu opens a group's pages
-  one at a time or all at once.
+- **Bookmarks.** The star at the address bar's right end (or `Ctrl+D`)
+  bookmarks the page into the group the last bookmark went to ("Bookmarks
+  bar" to begin with) and opens a popover under the star to name it,
+  move it to another group (or a new one), or remove it; the star is
+  filled on a bookmarked page, and clicking it again edits. "Bookmark
+  all selected…" in the tab menu (and "Bookmark all tabs…" in the
+  Bookmarks menu) asks for a group name and saves the pages together.
+  Bookmarks live in `bookmarks.toml` in the profile. The bookmarks bar
+  (`Ctrl+Shift+B`, or the Bookmarks menu's check item, or Settings) sits
+  under the toolbar: the "Bookmarks bar" group's pages as chips with
+  the site's favicon (a click loads the page, a middle click opens it
+  behind, a right click offers open in new tab or window, copy, edit
+  and delete, and a drag reorders), a "»" chip for the ones that did not
+  fit, and the other groups as drop-down chips at the right end. The
+  Bookmarks menu (in the ☰ menu and the macOS menu bar) has the same
+  actions, import and export of an HTML bookmarks file (the format
+  every browser reads and writes), and a submenu per group with "Open
+  all", the pages, rename and delete. Bookmarks also appear among the
+  suggestions under the address bar and in the launcher, with a star,
+  ranked above history matches of the same kind. Favicons of visited
+  sites are kept as PNGs under `favicons/` in the profile so the bar
+  shows them before a site is open.
 - **Updates over the air**, when the brand names a source and the build
   has a number. The browser checks shortly after it starts and every
   six hours, downloads a newer build in the background, and offers
@@ -229,7 +247,8 @@ The engine contract, in `osmena-engine`:
   default one and removes the directory on the way out.
 - **Settings** (`settings.toml`): homepage, new-tab URL, the search
   provider, a chrome colour per profile, the title bar switch, the
-  pinned extensions, the restore flag, and `[profile]` (name, avatar,
+  pinned extensions, the restore flag, the bookmarks bar switch and the
+  group the last bookmark went to, and `[profile]` (name, avatar,
   shared bookmarks, extensions to copy at the next start).
 
 ## Updates

@@ -6,6 +6,53 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- Bookmarks as the everyday surface over the groups that already
+  existed. The toolbar's star (`CommandKind::BookmarkPage`, `Ctrl+D`)
+  bookmarks the page into the last-used group and opens the bookmark
+  popover (`Prompt::Bookmark`: name, group or a new group, Remove,
+  Done); on a bookmarked page the star is filled and opens the popover
+  to edit. The bookmarks bar (`Settings::show_bookmarks_bar`,
+  `CommandKind::ToggleBookmarksBar`, `Ctrl+Shift+B`) under the toolbar
+  shows the "Bookmarks bar" group as chips with favicons, a "»" chip
+  for the overflow, and the other groups as drop-down chips; chips load
+  on click, open behind on middle click, have a context menu
+  (`menus::bookmark_menu`) and drag to reorder. The Bookmarks menu
+  (`menus::bookmarks_entries`, in the ☰ menu and the menu bar) gained
+  "Bookmark this tab…", "Bookmark all tabs…", the bar's check item,
+  import and export of an HTML bookmarks file (`bookmarks_html`, the
+  Netscape format; the shell shows the system's file dialog with
+  `rfd`), and per-group rename and delete (with a confirmation prompt).
+  Suggestions under the address bar and in the launcher now come from
+  `osmena_core::suggest::suggestions`, which merges the bookmarks with
+  the history (a bookmark ranks above a history match of the same tier
+  and is drawn with a star). The shell keeps a favicon cache
+  (`favicons/<host>.png` in the profile) so the bar shows a site's icon
+  before any tab of it is open. New: `Bookmarks::{BAR, bookmarkable,
+  site_key, contains, find, bar, all, is_empty, remove, update,
+  rename_group, delete_group, move_within, merge}`,
+  `Command::{ToggleBookmark, PromptEditBookmark, EditBookmark,
+  RemoveBookmark, PromptRenameBookmarkGroup, RenameBookmarkGroup,
+  PromptDeleteBookmarkGroup, DeleteBookmarkGroup, MoveBookmark,
+  ToggleBookmarksBar, PickBookmarksFile, ImportBookmarks,
+  ExportBookmarks}` with `Command::changes_bookmarks`, `BookmarksFile`,
+  `Prompt::{Bookmark, RenameBookmarkGroup, DeleteBookmarkGroup}`,
+  `EngineAction::{PickFile, ExportBookmarks}`,
+  `Settings::{show_bookmarks_bar, last_bookmark_group}`,
+  `Profile::favicons_dir`, `menus::{BookmarksMenu, bookmarks_entries,
+  bookmark_menu, bookmark_group_menu, bookmark_overflow_menu,
+  bookmark_label}`, `ChromeContext::{bookmarks, show_bookmarks_bar,
+  site_icons}`, `MenuRequest::{Bookmark, BookmarkGroup,
+  BookmarkOverflow}`.
+
+### Changed
+
+- `menus::window_menu` and `MenuBarInput` take a `BookmarksMenu` (the
+  bookmarks and whether the bar is shown) in place of `&Bookmarks`; the
+  Bookmarks submenu is always enabled, since it holds the actions.
+  `BrowserWindow::handle_event` takes the favicon cache's icons. A
+  bookmark group named by an empty string is the bar ("Bookmarks bar"),
+  where it used to be "Bookmarks".
+
 - Updates over the air. A browser whose `Brand` names an
   `UpdateSource` (the URL of a `latest.toml` manifest; for a GitHub
   repository `…/releases/latest/download/latest.toml`) and carries a

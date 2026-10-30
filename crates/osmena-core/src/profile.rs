@@ -584,6 +584,12 @@ impl Profile {
         self.dir.join("history.toml")
     }
 
+    /// The favicons of visited sites, one PNG per host, for the
+    /// bookmarks bar.
+    pub fn favicons_dir(&self) -> PathBuf {
+        self.dir.join("favicons")
+    }
+
     /// The installed extensions, as the engine last reported them
     /// ([`InstalledExtensions`]): what another profile copies from.
     ///

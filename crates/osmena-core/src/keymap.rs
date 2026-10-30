@@ -134,6 +134,8 @@ pub enum CommandKind {
     Stop,
     Home,
     FocusAddressBar,
+    BookmarkPage,
+    ToggleBookmarksBar,
     NewWindow,
     CloseWindow,
     ToggleFullscreen,
@@ -144,7 +146,7 @@ pub enum CommandKind {
 impl CommandKind {
     /// Every kind, in the order the settings window lists them. Used to
     /// check that the defaults bind each one and to write the keymap file.
-    pub const ALL: [CommandKind; 25] = [
+    pub const ALL: [CommandKind; 27] = [
         CommandKind::NewTab,
         CommandKind::CloseTab,
         CommandKind::ReopenClosedTab,
@@ -165,6 +167,8 @@ impl CommandKind {
         CommandKind::Stop,
         CommandKind::Home,
         CommandKind::FocusAddressBar,
+        CommandKind::BookmarkPage,
+        CommandKind::ToggleBookmarksBar,
         CommandKind::NewWindow,
         CommandKind::CloseWindow,
         CommandKind::ToggleFullscreen,
@@ -188,6 +192,8 @@ impl CommandKind {
             CommandKind::Stop => "stop".to_string(),
             CommandKind::Home => "home".to_string(),
             CommandKind::FocusAddressBar => "focus-address-bar".to_string(),
+            CommandKind::BookmarkPage => "bookmark-page".to_string(),
+            CommandKind::ToggleBookmarksBar => "toggle-bookmarks-bar".to_string(),
             CommandKind::NewWindow => "new-window".to_string(),
             CommandKind::CloseWindow => "close-window".to_string(),
             CommandKind::ToggleFullscreen => "toggle-fullscreen".to_string(),
@@ -217,6 +223,8 @@ impl CommandKind {
             CommandKind::Stop => "Stop loading".to_string(),
             CommandKind::Home => "Open homepage".to_string(),
             CommandKind::FocusAddressBar => "Focus address bar".to_string(),
+            CommandKind::BookmarkPage => "Bookmark this page".to_string(),
+            CommandKind::ToggleBookmarksBar => "Show bookmarks bar".to_string(),
             CommandKind::NewWindow => "New window".to_string(),
             CommandKind::CloseWindow => "Close window".to_string(),
             CommandKind::ToggleFullscreen => "Full screen".to_string(),
@@ -243,6 +251,8 @@ impl CommandKind {
             CommandKind::Stop => Command::Stop(tab),
             CommandKind::Home => Command::Home(tab),
             CommandKind::FocusAddressBar => Command::FocusAddressBar(window),
+            CommandKind::BookmarkPage => Command::ToggleBookmark(tab),
+            CommandKind::ToggleBookmarksBar => Command::ToggleBookmarksBar,
             CommandKind::NewWindow => Command::NewWindow,
             CommandKind::CloseWindow => Command::CloseWindow(window),
             CommandKind::ToggleFullscreen => Command::ToggleFullscreen(window),
@@ -348,6 +358,8 @@ impl Keymap {
         // Not bare Escape: pages need it to close menus and dialogs.
         bind(primary, Code::Period, CommandKind::Stop);
         bind(primary, Code::KeyL, CommandKind::FocusAddressBar);
+        bind(primary, Code::KeyD, CommandKind::BookmarkPage);
+        bind(shift, Code::KeyB, CommandKind::ToggleBookmarksBar);
         bind(primary, Code::KeyN, CommandKind::NewWindow);
         bind(shift, Code::KeyW, CommandKind::CloseWindow);
         bind(primary, Code::Comma, CommandKind::OpenSettings);

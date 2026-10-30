@@ -5,10 +5,9 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-10-29 (updates over the air: the manifest, the
-build number, the check and download thread, the "Restart to update"
-pill and the installers; before that the avatar font and the colour
-families, and profiles)._
+_Last updated: 2026-10-30 (bookmarks: the star and its popover, the
+bookmarks bar, the Bookmarks menu with import and export, merged
+suggestions, the favicon cache; before that updates over the air)._
 
 ## Architecture
 
@@ -82,6 +81,21 @@ No engine is needed; the workspace builds in under a minute.
   and the pinned actions only when `extensions` is `Some`; pinned ids
   live in `Settings::pinned_extensions`, kept even for an extension that
   is gone. An engine without extensions (`None`) needs none of this.
+- **Bookmarks are the model's; the star, the bar and the menus are
+  views of it.** `Bookmarks` (`bookmarks.rs`) is flat groups of pages;
+  the group named `Bookmarks::BAR` is what the bar shows, and
+  `Settings::last_bookmark_group` is where the star puts the next page.
+  Every edit is a `Command` through `dispatch` (`ToggleBookmark` adds
+  then asks `Prompt::Bookmark`; `EditBookmark` is the popover's answer),
+  which answers `EngineAction::SaveBookmarks`; the shell reloads shared
+  bookmarks before any command for which `Command::changes_bookmarks`
+  is true. Import and export are `bookmarks_html` (pure, tested); the
+  shell only shows the file dialog (`EngineAction::PickFile`, `rfd`)
+  and writes the file (`EngineAction::ExportBookmarks`). Suggestions
+  come from `suggest::suggestions`, never from `History::matches`
+  directly, so bookmarks and history rank together. Site favicons are
+  the shell's (`favicons.rs`, `Profile::favicons_dir`), handed to the
+  chrome as `ChromeContext::site_icons` by host (`Bookmarks::site_key`).
 - **A question to the user is a `Prompt`.** A menu entry that needs
   input (a folder or group name) issues a `Command::Prompt…`, `dispatch`
   answers with `EngineAction::ShowPrompt` carrying what the question
@@ -232,6 +246,17 @@ No engine is needed; the workspace builds in under a minute.
   adds; the shared behaviour is documented here only.
 
 ## Status and handoff (2026-10-19)
+
+Added 2026-10-30: bookmarks (see Conventions): the star in the toolbar
+and its popover, the bookmarks bar with favicon chips, overflow and
+group drop-downs, the Bookmarks menu with import and export of HTML
+bookmarks files and per-group rename and delete, bookmarks among the
+address-bar and launcher suggestions, the favicon cache. Verified:
+`cargo test` (the bookmark operations, the HTML round-trip with a
+Chrome export, the merged ranking, the commands and prompts, the
+menus, the cache), clippy, fmt. Not verified by hand yet: the popover's
+placement under the star and under a chip, chip dragging, the "»"
+overflow, the file dialogs on either platform, the bar on macOS.
 
 Added 2026-10-29 (later): updates over the air (see Conventions). The
 browsers' CI publishes a GitHub release per green push to `main` with a

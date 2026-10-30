@@ -25,6 +25,10 @@ log = { workspace = true }
 # trust store, so a corporate proxy's certificates are honoured.
 ureq = { version = "3.4", default-features = false, features = ["rustls", "platform-verifier"] }
 sha2 = "0.10"
+# The favicon cache (favicons.rs) on disk.
+png = "0.18"
+# The system's file dialogs, for importing and exporting bookmarks.
+rfd = { version = "0.15", default-features = false }
 url = { workspace = true }
 winit = { workspace = true }
 

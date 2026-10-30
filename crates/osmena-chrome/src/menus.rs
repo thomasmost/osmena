@@ -5,9 +5,10 @@
 use keyboard_types::{Code, Modifiers};
 use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
-    Bookmarks, Command, CommandKind, Extension, ExtensionSource, ExtensionSupport, FolderId,
-    History, HistoryEntry, KeyChord, Keymap, LoadState, MediaKind, PageCommand, PageContext,
-    PageTools, Platform, ProfileEntry, TabId, UpdateStatus, Window, WindowId,
+    Bookmark, BookmarkGroup, Bookmarks, BookmarksFile, Command, CommandKind, Extension,
+    ExtensionSource, ExtensionSupport, FolderId, History, HistoryEntry, KeyChord, Keymap,
+    LoadState, MediaKind, PageCommand, PageContext, PageTools, Platform, ProfileEntry, TabId,
+    UpdateStatus, Window, WindowId,
 };
 use url::Url;
 
@@ -80,7 +81,7 @@ pub struct MenuBarInput<'a> {
     pub keymap: &'a Keymap,
     /// Whether a closed tab is there to reopen.
     pub can_reopen: bool,
-    pub bookmarks: &'a Bookmarks,
+    pub bookmarks: BookmarksMenu<'a>,
     pub history: &'a History,
     /// The current profile: its directory name and its display name.
     pub profile: CurrentProfile<'a>,
@@ -129,6 +130,14 @@ impl UpdateMenu<'_> {
     }
 }
 
+/// What the Bookmarks menus are built from.
+#[derive(Clone, Copy, Debug)]
+pub struct BookmarksMenu<'a> {
+    pub bookmarks: &'a Bookmarks,
+    /// Whether the bookmarks bar is shown (the check item).
+    pub bar_shown: bool,
+}
+
 /// The profile this browser runs, as the Profiles menu names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CurrentProfile<'a> {
@@ -165,14 +174,14 @@ impl MenuEntry {
 }
 
 /// The window menu behind the "☰" button. `can_reopen` says whether a
-/// closed tab is there to reopen; the bookmark groups become a submenu
-/// each, with "Open all" and the pages; `updates` is the entry about
-/// updates, above Settings.
+/// closed tab is there to reopen; the Bookmarks submenu holds the
+/// actions and a submenu per group ([`bookmarks_entries`]); `updates`
+/// is the entry about updates, above Settings.
 pub fn window_menu(
     window: &Window,
     keymap: &Keymap,
     can_reopen: bool,
-    bookmarks: &Bookmarks,
+    bookmarks: BookmarksMenu<'_>,
     updates: UpdateMenu<'_>,
 ) -> Vec<MenuEntry> {
     let tab = window.active;
@@ -187,7 +196,11 @@ pub fn window_menu(
         reopen,
         MenuEntry::Separator,
         bound(CommandKind::Home),
-        bookmarks_menu(window.id, bookmarks),
+        MenuEntry::Submenu {
+            label: "Bookmarks".to_string(),
+            enabled: true,
+            entries: bookmarks_entries(Some(window), keymap, bookmarks, false),
+        },
         bound(CommandKind::ToggleFullscreen),
         MenuEntry::Separator,
         updates.entry(),
@@ -197,56 +210,212 @@ pub fn window_menu(
     ]
 }
 
-/// The "Bookmarks" submenu: a submenu per group, holding "Open all" and
-/// one entry per page (a new tab). Disabled with no groups.
-fn bookmarks_menu(window: WindowId, bookmarks: &Bookmarks) -> MenuEntry {
-    MenuEntry::Submenu {
-        label: "Bookmarks".to_string(),
-        enabled: !bookmarks.groups.is_empty(),
-        entries: bookmark_groups(window, bookmarks),
-    }
-}
-
-/// One submenu per bookmark group, holding "Open all" and one entry per
-/// page (a new tab of `window`).
-fn bookmark_groups(window: WindowId, bookmarks: &Bookmarks) -> Vec<MenuEntry> {
-    bookmarks
-        .groups
-        .iter()
-        .map(|group| {
-            let mut entries = vec![
+/// The entries of a Bookmarks menu (the "☰" menu's submenu, or the
+/// menu bar's menu, in title case): bookmark this tab (the star's
+/// command, with its chord), bookmark all tabs, the bookmarks bar
+/// switch, import and export, then a submenu per group. Entries that
+/// need a browser window are disabled without one.
+pub fn bookmarks_entries(
+    window: Option<&Window>,
+    keymap: &Keymap,
+    bookmarks: BookmarksMenu<'_>,
+    title_case: bool,
+) -> Vec<MenuEntry> {
+    let BookmarksMenu {
+        bookmarks,
+        bar_shown,
+    } = bookmarks;
+    let label = |sentence: &str, title: &str| {
+        if title_case {
+            title.to_string()
+        } else {
+            sentence.to_string()
+        }
+    };
+    let this_tab = label("Bookmark this tab…", "Bookmark This Tab…");
+    let all_tabs = label("Bookmark all tabs…", "Bookmark All Tabs…");
+    let mut entries = match window {
+        Some(w) => {
+            let tab = w.active_tab();
+            vec![
+                MenuEntry::Item {
+                    label: this_tab,
+                    enabled: Bookmarks::bookmarkable(&tab.url),
+                    chord: keymap.chord_for(CommandKind::BookmarkPage),
+                    command: Command::ToggleBookmark(tab.id),
+                },
                 MenuEntry::item(
-                    format!("Open all ({})", group.bookmarks.len()),
-                    !group.bookmarks.is_empty(),
-                    Command::OpenBookmarkGroup {
-                        window,
-                        group: group.name.clone(),
-                    },
+                    all_tabs,
+                    w.tabs.iter().any(|t| Bookmarks::bookmarkable(&t.url)),
+                    Command::PromptBookmarkTabs(w.tabs.iter().map(|t| t.id).collect()),
                 ),
-                MenuEntry::Separator,
-            ];
-            entries.extend(group.bookmarks.iter().map(|b| {
-                let label = if b.title.is_empty() {
-                    b.url.to_string()
-                } else {
-                    b.title.clone()
-                };
-                MenuEntry::item(
-                    label,
-                    true,
-                    Command::NewTab {
-                        window,
-                        url: Some(b.url.clone()),
-                    },
-                )
-            }));
-            MenuEntry::Submenu {
+            ]
+        }
+        None => vec![
+            MenuEntry::Disabled {
+                label: this_tab,
+                chord: keymap.chord_for(CommandKind::BookmarkPage),
+            },
+            MenuEntry::Disabled {
+                label: all_tabs,
+                chord: None,
+            },
+        ],
+    };
+    entries.push(MenuEntry::Check {
+        label: label("Show bookmarks bar", "Show Bookmarks Bar"),
+        enabled: true,
+        checked: bar_shown,
+        command: Command::ToggleBookmarksBar,
+    });
+    entries.push(MenuEntry::Separator);
+    entries.push(MenuEntry::item(
+        label("Import bookmarks…", "Import Bookmarks…"),
+        true,
+        Command::PickBookmarksFile(BookmarksFile::Import),
+    ));
+    entries.push(MenuEntry::item(
+        label("Export bookmarks…", "Export Bookmarks…"),
+        !bookmarks.is_empty(),
+        Command::PickBookmarksFile(BookmarksFile::Export),
+    ));
+    entries.push(MenuEntry::Separator);
+    match window {
+        Some(w) if !bookmarks.groups.is_empty() => {
+            entries.extend(bookmarks.groups.iter().map(|group| MenuEntry::Submenu {
                 label: group.name.clone(),
                 enabled: true,
-                entries,
-            }
+                entries: group_entries(w.id, group, title_case),
+            }));
+        }
+        _ => entries.push(MenuEntry::Disabled {
+            label: label("No bookmarks", "No Bookmarks"),
+            chord: None,
+        }),
+    }
+    entries
+}
+
+/// A group's entries: "Open all", one entry per page (a new tab of
+/// `window`), then rename and delete.
+fn group_entries(window: WindowId, group: &BookmarkGroup, title_case: bool) -> Vec<MenuEntry> {
+    let label = |sentence: &str, title: &str| {
+        if title_case {
+            title.to_string()
+        } else {
+            sentence.to_string()
+        }
+    };
+    let mut entries = vec![
+        MenuEntry::item(
+            format!(
+                "{} ({})",
+                label("Open all", "Open All"),
+                group.bookmarks.len()
+            ),
+            !group.bookmarks.is_empty(),
+            Command::OpenBookmarkGroup {
+                window,
+                group: group.name.clone(),
+            },
+        ),
+        MenuEntry::Separator,
+    ];
+    entries.extend(group.bookmarks.iter().map(|b| {
+        MenuEntry::item(
+            elide(bookmark_label(b), 60),
+            true,
+            Command::NewTab {
+                window,
+                url: Some(b.url.clone()),
+            },
+        )
+    }));
+    if !group.bookmarks.is_empty() {
+        entries.push(MenuEntry::Separator);
+    }
+    entries.push(MenuEntry::item(
+        label("Rename group…", "Rename Group…"),
+        true,
+        Command::PromptRenameBookmarkGroup {
+            window,
+            group: group.name.clone(),
+        },
+    ));
+    entries.push(MenuEntry::item(
+        label("Delete group", "Delete Group"),
+        true,
+        Command::PromptDeleteBookmarkGroup {
+            window,
+            group: group.name.clone(),
+        },
+    ));
+    entries
+}
+
+/// A group chip's menu in the bookmarks bar: the group's entries.
+pub fn bookmark_group_menu(window: WindowId, group: &BookmarkGroup) -> Vec<MenuEntry> {
+    group_entries(window, group, false)
+}
+
+/// A bookmark chip's context menu in the bookmarks bar.
+pub fn bookmark_menu(window: WindowId, url: &Url) -> Vec<MenuEntry> {
+    vec![
+        MenuEntry::item(
+            "Open in new tab",
+            true,
+            Command::NewTab {
+                window,
+                url: Some(url.clone()),
+            },
+        ),
+        MenuEntry::item(
+            "Open in new window",
+            true,
+            Command::OpenInNewWindow(url.clone()),
+        ),
+        MenuEntry::item(
+            "Copy link address",
+            true,
+            Command::CopyText(url.to_string()),
+        ),
+        MenuEntry::Separator,
+        MenuEntry::item(
+            "Edit…",
+            true,
+            Command::PromptEditBookmark {
+                window,
+                url: url.clone(),
+            },
+        ),
+        MenuEntry::item("Delete", true, Command::RemoveBookmark(url.clone())),
+    ]
+}
+
+/// The bar's "»" menu: the bookmarks that did not fit, each loading in
+/// `tab`.
+pub fn bookmark_overflow_menu(tab: TabId, rest: &[Bookmark]) -> Vec<MenuEntry> {
+    rest.iter()
+        .map(|b| {
+            MenuEntry::item(
+                elide(bookmark_label(b), 60),
+                true,
+                Command::Navigate {
+                    tab,
+                    url: b.url.clone(),
+                },
+            )
         })
         .collect()
+}
+
+/// A bookmark's title, or its address when it has none.
+pub fn bookmark_label(bookmark: &Bookmark) -> &str {
+    if bookmark.title.is_empty() {
+        bookmark.url.as_str()
+    } else {
+        &bookmark.title
+    }
 }
 
 /// The application's menu bar, as macOS shows it: the application menu
@@ -372,21 +541,7 @@ pub fn menu_bar(input: &MenuBarInput<'_>) -> Vec<MenuEntry> {
         });
     }
 
-    let mut bookmarks_menu = vec![
-        on_tab("Bookmark This Tab…", true, |tab| {
-            Command::PromptBookmarkTabs(vec![tab])
-        }),
-        MenuEntry::Separator,
-    ];
-    match ids {
-        Some((window, _)) if !bookmarks.groups.is_empty() => {
-            bookmarks_menu.extend(bookmark_groups(window, bookmarks));
-        }
-        _ => bookmarks_menu.push(MenuEntry::Disabled {
-            label: "No Bookmarks".to_string(),
-            chord: None,
-        }),
-    }
+    let bookmarks_menu = bookmarks_entries(window, keymap, bookmarks, true);
 
     let profiles_menu = profiles_menu(ids.map(|(window, _)| window), profile, profiles);
 
@@ -1280,7 +1435,7 @@ mod tests {
     fn window_menu_carries_the_keymap_chords_and_commands() {
         let w = window_with(1);
         let keymap = Keymap::defaults(Platform::Windows);
-        let entries = window_menu(&w, &keymap, true, &Bookmarks::default(), idle_updates());
+        let entries = window_menu(&w, &keymap, true, no_bookmarks(), idle_updates());
         assert_eq!(
             labels(&entries),
             vec![
@@ -1298,11 +1453,11 @@ mod tests {
                 "Quit"
             ]
         );
-        // No bookmarks: the submenu is there, disabled.
+        // The Bookmarks submenu is always there: it holds the actions.
         assert_eq!(
             enabled(&entries),
             vec![
-                true, true, true, true, true, false, true, true, true, true, true, true
+                true, true, true, true, true, true, true, true, true, true, true, true
             ]
         );
         assert!(matches!(
@@ -1347,10 +1502,158 @@ mod tests {
             &w,
             &Keymap::defaults(Platform::Windows),
             false,
-            &Bookmarks::default(),
+            no_bookmarks(),
             idle_updates(),
         );
         assert!(!enabled(&entries)[2]);
+    }
+
+    fn no_bookmarks() -> BookmarksMenu<'static> {
+        static NONE: Bookmarks = Bookmarks { groups: Vec::new() };
+        BookmarksMenu {
+            bookmarks: &NONE,
+            bar_shown: false,
+        }
+    }
+
+    fn is_enabled(entries: &[MenuEntry], label: &str) -> bool {
+        entries
+            .iter()
+            .find_map(|e| match e {
+                MenuEntry::Disabled { label: l, .. } if l == label => Some(false),
+                MenuEntry::Item {
+                    label: l, enabled, ..
+                }
+                | MenuEntry::Check {
+                    label: l, enabled, ..
+                }
+                | MenuEntry::Submenu {
+                    label: l, enabled, ..
+                } if l == label => Some(*enabled),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no entry {label:?}"))
+    }
+
+    #[test]
+    fn the_bookmarks_submenu_holds_the_actions_and_the_bar_switch() {
+        let w = window_with(2);
+        let keymap = Keymap::defaults(Platform::Windows);
+        let entries = window_menu(&w, &keymap, true, no_bookmarks(), idle_updates());
+        let MenuEntry::Submenu { entries: menu, .. } = &entries[5] else {
+            panic!("bookmarks is a submenu");
+        };
+        assert_eq!(
+            labels(menu),
+            vec![
+                "Bookmark this tab…",
+                "Bookmark all tabs…",
+                "Show bookmarks bar",
+                "-",
+                "Import bookmarks…",
+                "Export bookmarks…",
+                "-",
+                "No bookmarks"
+            ]
+        );
+        assert_eq!(
+            enabled(menu),
+            vec![true, true, true, true, true, false, true, false]
+        );
+        assert!(matches!(
+            &menu[0],
+            MenuEntry::Item {
+                command: Command::ToggleBookmark(TabId(1)),
+                chord: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &menu[1],
+            MenuEntry::Item { command: Command::PromptBookmarkTabs(tabs), .. }
+                if *tabs == vec![TabId(1), TabId(2)]
+        ));
+        assert!(matches!(
+            &menu[2],
+            MenuEntry::Check {
+                checked: false,
+                command: Command::ToggleBookmarksBar,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &menu[4],
+            MenuEntry::Item {
+                command: Command::PickBookmarksFile(BookmarksFile::Import),
+                ..
+            }
+        ));
+        // A blank page cannot be bookmarked.
+        let mut blank = window_with(1);
+        blank.tabs[0].url = Url::parse("about:blank").unwrap();
+        let entries = window_menu(&blank, &keymap, true, no_bookmarks(), idle_updates());
+        let MenuEntry::Submenu { entries: menu, .. } = &entries[5] else {
+            panic!("bookmarks is a submenu");
+        };
+        assert_eq!(&enabled(menu)[..2], &[false, false]);
+    }
+
+    #[test]
+    fn a_chip_menu_and_a_group_menu() {
+        let url = Url::parse("https://a.example/").unwrap();
+        let entries = bookmark_menu(WindowId(1), &url);
+        assert_eq!(
+            labels(&entries),
+            vec![
+                "Open in new tab",
+                "Open in new window",
+                "Copy link address",
+                "-",
+                "Edit…",
+                "Delete"
+            ]
+        );
+        assert!(matches!(
+            &entries[4],
+            MenuEntry::Item { command: Command::PromptEditBookmark { window: WindowId(1), url: u }, .. }
+                if *u == url
+        ));
+        assert!(matches!(
+            &entries[5],
+            MenuEntry::Item { command: Command::RemoveBookmark(u), .. } if *u == url
+        ));
+        let group = BookmarkGroup {
+            name: "Work".to_string(),
+            bookmarks: vec![Bookmark {
+                title: String::new(),
+                url: url.clone(),
+            }],
+        };
+        let entries = bookmark_group_menu(WindowId(1), &group);
+        assert_eq!(
+            labels(&entries),
+            vec![
+                "Open all (1)",
+                "-",
+                "https://a.example/",
+                "-",
+                "Rename group…",
+                "Delete group"
+            ]
+        );
+        assert!(matches!(
+            &entries[4],
+            MenuEntry::Item { command: Command::PromptRenameBookmarkGroup { group, .. }, .. }
+                if group == "Work"
+        ));
+        let rest = bookmark_overflow_menu(TabId(3), &group.bookmarks);
+        assert!(matches!(
+            &rest[0],
+            MenuEntry::Item {
+                command: Command::Navigate { tab: TabId(3), .. },
+                ..
+            }
+        ));
     }
 
     fn sample_update() -> osmena_core::AvailableUpdate {
@@ -1451,24 +1754,38 @@ mod tests {
             &w,
             &Keymap::defaults(Platform::Windows),
             true,
-            &bookmarks,
+            BookmarksMenu {
+                bookmarks: &bookmarks,
+                bar_shown: true,
+            },
             idle_updates(),
         );
         let MenuEntry::Submenu {
-            entries: groups,
+            entries: menu,
             enabled: true,
             ..
         } = &entries[5]
         else {
             panic!("bookmarks is an enabled submenu");
         };
+        assert!(matches!(&menu[2], MenuEntry::Check { checked: true, .. }));
+        assert!(is_enabled(menu, "Export bookmarks…"));
+        let groups = &menu[7..];
         assert_eq!(labels(groups), vec!["Work"]);
         let MenuEntry::Submenu { entries: pages, .. } = &groups[0] else {
             panic!("a group is a submenu");
         };
         assert_eq!(
             labels(pages),
-            vec!["Open all (2)", "-", "A", "https://b.example/"]
+            vec![
+                "Open all (2)",
+                "-",
+                "A",
+                "https://b.example/",
+                "-",
+                "Rename group…",
+                "Delete group"
+            ]
         );
         assert!(matches!(
             &pages[0],
@@ -2117,7 +2434,10 @@ mod page_menu_tests {
             window,
             keymap,
             can_reopen: false,
-            bookmarks,
+            bookmarks: BookmarksMenu {
+                bookmarks,
+                bar_shown: false,
+            },
             history,
             profile: CurrentProfile {
                 dir: "default",
@@ -2243,9 +2563,10 @@ mod page_menu_tests {
         let bookmarks_menu = submenu(&entries, "Bookmarks");
         assert_eq!(
             command(bookmarks_menu, "Bookmark This Tab…"),
-            Command::PromptBookmarkTabs(vec![TabId(1)])
+            Command::ToggleBookmark(TabId(1))
         );
         assert!(!is_enabled(bookmarks_menu, "No Bookmarks"));
+        assert!(is_enabled(bookmarks_menu, "Import Bookmarks…"));
         let profiles_menu = submenu(&entries, "Profiles");
         assert!(!is_enabled(profiles_menu, "Default"));
         assert_eq!(

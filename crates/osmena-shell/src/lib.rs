@@ -16,6 +16,7 @@
 
 mod app;
 mod clipboard;
+mod favicons;
 mod page;
 pub mod process;
 mod profiles;

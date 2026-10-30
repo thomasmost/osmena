@@ -17,8 +17,8 @@ use osmena_chrome::routing::{
 };
 use osmena_chrome::{icon, input, keyutils, menus, native_menu, theme};
 use osmena_core::{
-    Brand, Browser, Command, Cursor, EngineInfo, EngineInput, KeyInput, Keymap, PageContext,
-    Platform, Prompt, TabId, WindowId,
+    Brand, Browser, Command, Cursor, EngineInfo, EngineInput, Favicon, KeyInput, Keymap,
+    PageContext, Platform, Prompt, TabId, WindowId,
 };
 use osmena_engine::{
     BlitRect, Engine, EngineError, PagePaint, PhysicalSize, ScreenRect, Surface, TabHost,
@@ -475,6 +475,7 @@ impl<E: Engine> BrowserWindow<E> {
         &mut self,
         browser: &Browser,
         keymap: &Keymap,
+        site_icons: &HashMap<String, Favicon>,
         event: &WindowEvent,
     ) -> Vec<Command> {
         let active = browser.window(self.id).map(|w| w.active);
@@ -497,7 +498,7 @@ impl<E: Engine> BrowserWindow<E> {
                 self.update_content_origin();
             }
             WindowEvent::RedrawRequested => {
-                return self.frame(browser, keymap);
+                return self.frame(browser, keymap, site_icons);
             }
             WindowEvent::CloseRequested => {
                 return vec![Command::CloseWindow(self.id)];
@@ -768,7 +769,12 @@ impl<E: Engine> BrowserWindow<E> {
     }
 
     /// Draw the chrome and the active tab under it, and present.
-    fn frame(&mut self, browser: &Browser, keymap: &Keymap) -> Vec<Command> {
+    fn frame(
+        &mut self,
+        browser: &Browser,
+        keymap: &Keymap,
+        site_icons: &HashMap<String, Favicon>,
+    ) -> Vec<Command> {
         let Some(model) = browser.window(self.id) else {
             return Vec::new();
         };
@@ -815,6 +821,9 @@ impl<E: Engine> BrowserWindow<E> {
                 pinned: &pinned,
                 history,
                 update: &browser.update,
+                bookmarks: &browser.bookmarks,
+                show_bookmarks_bar: browser.settings.show_bookmarks_bar,
+                site_icons,
             };
             commands = chrome::draw(ui, model, &context, chrome_state, keymap);
             let rect = ui.available_rect_before_wrap();
@@ -969,7 +978,10 @@ impl<E: Engine> BrowserWindow<E> {
                     model,
                     keymap,
                     !browser.closed_tabs.is_empty(),
-                    &browser.bookmarks,
+                    menus::BookmarksMenu {
+                        bookmarks: &browser.bookmarks,
+                        bar_shown: browser.settings.show_bookmarks_bar,
+                    },
                     menus::UpdateMenu {
                         brand: self.brand.name,
                         status: &browser.update,
@@ -980,6 +992,18 @@ impl<E: Engine> BrowserWindow<E> {
             ),
             chrome::MenuRequest::Folder { folder, position } => {
                 (menus::folder_menu(model, folder), position)
+            }
+            chrome::MenuRequest::Bookmark { url, position } => {
+                (menus::bookmark_menu(self.id, &url), position)
+            }
+            chrome::MenuRequest::BookmarkGroup { group, position } => {
+                let group = browser.bookmarks.group(&group)?;
+                (menus::bookmark_group_menu(self.id, group), position)
+            }
+            chrome::MenuRequest::BookmarkOverflow { from, position } => {
+                let bar = browser.bookmarks.bar()?;
+                let rest = bar.bookmarks.get(from..).unwrap_or(&[]);
+                (menus::bookmark_overflow_menu(model.active, rest), position)
             }
             chrome::MenuRequest::Extensions { position } => {
                 let support = self.engine_info.extensions.as_ref()?;

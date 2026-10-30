@@ -10,6 +10,7 @@
 //! without a browser engine.
 
 pub mod bookmarks;
+pub mod bookmarks_html;
 pub mod brand;
 pub mod command;
 pub mod event;
@@ -20,12 +21,13 @@ pub mod keymap;
 pub mod model;
 pub mod profile;
 pub mod settings;
+pub mod suggest;
 pub mod update;
 
 pub use bookmarks::{Bookmark, BookmarkGroup, Bookmarks, BookmarksError};
 pub use brand::{Brand, EngineInfo, ExtensionSupport, PageTools};
 pub use command::{
-    Command, EngineAction, FolderTarget, PageCommand, ProfileForm, Prompt, dispatch,
+    BookmarksFile, Command, EngineAction, FolderTarget, PageCommand, ProfileForm, Prompt, dispatch,
 };
 pub use event::{
     Cursor, EditState, EngineEvent, Media, MediaKind, Misspelling, PageContext, PendingTab, apply,
@@ -42,4 +44,5 @@ pub use model::{
 };
 pub use profile::{Avatar, Profile, ProfileEntry, ProfileError};
 pub use settings::{ChromeColor, ProfileSettings, SearchSettings, Settings, SettingsError};
+pub use suggest::{Suggestion, SuggestionSource, suggestions};
 pub use update::{Asset, AvailableUpdate, BuildId, Manifest, UpdateSource, UpdateStatus};

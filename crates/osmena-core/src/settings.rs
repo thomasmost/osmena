@@ -43,6 +43,14 @@ pub struct Settings {
     /// restart into it. Off, the browser checks only when asked
     /// ("Check for updates" in the menu or the settings window).
     pub check_for_updates: bool,
+    /// Show the bookmarks bar (the group [`Bookmarks::BAR`]) under the
+    /// toolbar.
+    ///
+    /// [`Bookmarks::BAR`]: crate::bookmarks::Bookmarks::BAR
+    pub show_bookmarks_bar: bool,
+    /// The group the star put the last bookmark in, which is where the
+    /// next one goes until the user picks another; empty, the bar.
+    pub last_bookmark_group: String,
 }
 
 impl Default for Settings {
@@ -57,6 +65,8 @@ impl Default for Settings {
             search: SearchSettings::default(),
             profile: ProfileSettings::default(),
             check_for_updates: true,
+            show_bookmarks_bar: false,
+            last_bookmark_group: String::new(),
         }
     }
 }
@@ -406,9 +416,12 @@ mod tests {
                 copy_extensions: false,
             },
             check_for_updates: false,
+            show_bookmarks_bar: true,
+            last_bookmark_group: "Work".to_string(),
         };
         let text = s.to_toml().unwrap();
         assert!(text.contains("check_for_updates = false"), "{text}");
+        assert!(text.contains("show_bookmarks_bar = true"), "{text}");
         assert!(text.contains("chrome_color = \"plum\""), "{text}");
         assert!(text.contains("[search]"), "{text}");
         assert!(text.contains("[profile]"), "{text}");

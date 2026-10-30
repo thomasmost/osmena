@@ -1,23 +1,26 @@
-//! The window chrome: tab strip, toolbar, status overlay, and crash panel.
-//! Pure functions of the model that return the commands the user issued.
+//! The window chrome: tab strip, toolbar, bookmarks bar, status overlay,
+//! and crash panel. Pure functions of the model that return the commands
+//! the user issued.
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use egui::{
-    Align2, Button, Color32, ColorImage, CornerRadius, Frame, Id, Key, Margin, Panel, Pos2, Rect,
-    RichText, Sense, Stroke, StrokeKind, TextStyle, TextureHandle, TextureOptions, Ui, Vec2,
+    Align2, Button, Color32, ColorImage, CornerRadius, FontFamily, Frame, Id, Key, Margin, Panel,
+    Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextStyle, TextureHandle, TextureOptions, Ui,
+    Vec2,
 };
 use keyboard_types::Code;
 use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
-    Avatar, Brand, ChromeColor, Command, CommandKind, EngineInfo, Extension, Favicon, Folder,
-    FolderId, FolderTarget, History, HistoryEntry, KeyChord, Keymap, LoadState, ProfileForm,
-    Prompt, StripItem, Tab, TabId, UpdateStatus, Window,
+    Avatar, Bookmark, Bookmarks, Brand, ChromeColor, Command, CommandKind, EngineInfo, Extension,
+    Favicon, Folder, FolderId, FolderTarget, History, KeyChord, Keymap, LoadState, ProfileForm,
+    Prompt, StripItem, Suggestion, SuggestionSource, Tab, TabId, UpdateStatus, Window, suggestions,
 };
 use url::{ParseError, Url};
 
+use crate::menus::bookmark_label;
 use crate::theme;
 
 /// The widest a title is drawn in a folder's drop-down list.
@@ -57,6 +60,19 @@ const SUGGESTION_TITLE_MAX_CHARS: usize = 64;
 const SUGGESTION_URL_MAX_CHARS: usize = 90;
 /// Inside a suggestion row, around its text.
 const SUGGESTION_PADDING: f32 = 4.0;
+/// The icon at the left of a suggestion row (a star for a bookmark).
+const SUGGESTION_ICON: f32 = 14.0;
+
+/// The bookmarks bar: its chips' height, the gap between them, the
+/// padding inside one, the widest title drawn in one, and the width of
+/// the "»" chip that holds what did not fit.
+const BAR_CHIP_HEIGHT: f32 = 24.0;
+const BAR_CHIP_GAP: f32 = 2.0;
+const BAR_CHIP_PADDING: f32 = 6.0;
+const BAR_TITLE_MAX_CHARS: usize = 24;
+const BAR_OVERFLOW_WIDTH: f32 = 28.0;
+/// The bookmark popover's width.
+const BOOKMARK_POPOVER_WIDTH: f32 = 340.0;
 /// The toolbar's avatar button: the disc inside it, and the discs the
 /// profile dialog offers.
 const AVATAR_RADIUS: f32 = 10.0;
@@ -209,6 +225,16 @@ pub struct ChromeState {
     launcher: Option<Launcher>,
     /// The history's matches under the address bar.
     suggest: Suggest,
+    /// Where the toolbar's star was in the last frame: the bookmark
+    /// popover opens under it.
+    star_rect: Option<Rect>,
+    /// Where a bookmarks-bar chip whose menu asked to edit was, so the
+    /// popover opens under that chip instead of the star.
+    bookmark_anchor: Option<Rect>,
+    /// The uploaded favicons of bookmarked sites, by host.
+    site_icons: HashMap<String, CachedFavicon>,
+    /// A chip of the bookmarks bar being dragged along it: its index.
+    bar_drag: Option<usize>,
 }
 
 /// The address bar's suggestions: what the user typed (the field shows
@@ -241,6 +267,10 @@ struct PromptState {
     prompt: Prompt,
     text: String,
     existing: Option<usize>,
+    /// The bookmark popover's second field: the name of a new group,
+    /// when `new_group`.
+    extra: String,
+    new_group: bool,
     form: ProfileForm,
     /// The profile dialog's avatar tab, an index into `Avatar::PALETTES`.
     avatar_tab: usize,
@@ -281,19 +311,33 @@ impl ChromeState {
     pub fn open_prompt(&mut self, prompt: Prompt) {
         let text = match &prompt {
             Prompt::MoveToFolder { suggested, .. } => suggested.clone(),
-            Prompt::BookmarkTabs { .. } | Prompt::DeleteProfile { .. } => String::new(),
+            Prompt::BookmarkTabs { .. }
+            | Prompt::DeleteProfile { .. }
+            | Prompt::DeleteBookmarkGroup { .. } => String::new(),
             Prompt::RenameFolder { name, .. } => name.clone(),
             Prompt::Profile { form, .. } => form.name.clone(),
+            Prompt::Bookmark { title, .. } => title.clone(),
+            Prompt::RenameBookmarkGroup { group } => group.clone(),
+        };
+        // The popover starts on the bookmark's group.
+        let existing = match &prompt {
+            Prompt::Bookmark { group, groups, .. } => groups.iter().position(|g| g == group),
+            _ => None,
         };
         let form = match &prompt {
             Prompt::Profile { form, .. } => form.clone(),
             _ => ProfileForm::default(),
         };
         let avatar_tab = avatar_tab_for(form.avatar);
+        if !matches!(prompt, Prompt::Bookmark { .. }) {
+            self.bookmark_anchor = None;
+        }
         self.prompt = Some(PromptState {
             prompt,
             text,
-            existing: None,
+            existing,
+            extra: String::new(),
+            new_group: false,
             form,
             avatar_tab,
             focus: true,
@@ -346,6 +390,14 @@ pub enum MenuRequest {
     Tab { targets: Vec<TabId>, position: Pos2 },
     /// A folder's context menu, at the pointer.
     Folder { folder: FolderId, position: Pos2 },
+    /// A bookmarks-bar chip's context menu, at the pointer.
+    Bookmark { url: Url, position: Pos2 },
+    /// A group chip's menu in the bookmarks bar: its pages, rename and
+    /// delete, below the chip.
+    BookmarkGroup { group: String, position: Pos2 },
+    /// The bookmarks bar's "»": the bar's bookmarks from index `from`
+    /// on, which did not fit, below the chip.
+    BookmarkOverflow { from: usize, position: Pos2 },
 }
 
 /// A drag of tabs that ended outside the window: the tabs to move and
@@ -408,6 +460,13 @@ pub struct ChromeContext<'a> {
     /// Where the browser is with updates: the "Restart to update" pill
     /// when a build is ready, the failure in the status area.
     pub update: &'a UpdateStatus,
+    /// The bookmarks: the star's state, the bar, and the suggestions.
+    pub bookmarks: &'a Bookmarks,
+    /// Whether the bookmarks bar is drawn under the toolbar.
+    pub show_bookmarks_bar: bool,
+    /// The favicons of bookmarked sites the shell has on file, by host
+    /// (`Bookmarks::site_key`), for the bar's chips.
+    pub site_icons: &'a HashMap<String, Favicon>,
 }
 
 /// Something the chrome asks of the native window, recorded while drawing
@@ -445,11 +504,14 @@ pub fn draw(
         pinned,
         history,
         update,
+        bookmarks,
+        show_bookmarks_bar,
         ..
     } = *context;
     let mut commands = Vec::new();
     let active = window.active_tab();
     sync_address_text(state, active.id, &active.url);
+    state.star_rect = None;
     state
         .favicons
         .retain(|tab, _| window.index_of(*tab).is_some());
@@ -701,6 +763,21 @@ pub fn draw(
                             }
                         }
                     }
+                    if Bookmarks::bookmarkable(&active.url) {
+                        let bookmarked = bookmarks.contains(&active.url);
+                        let label = if bookmarked {
+                            "Edit bookmark"
+                        } else {
+                            "Bookmark this page"
+                        };
+                        let star = star_button(ui, &palette, window, bookmarked)
+                            .on_hover_text(hint(keymap, CommandKind::BookmarkPage, label));
+                        state.star_rect = Some(star.rect);
+                        if star.clicked() {
+                            state.bookmark_anchor = None;
+                            commands.push(Command::ToggleBookmark(active.id));
+                        }
+                    }
                     let address_id = Id::new(("address", window.id));
                     theme::pill_fields(ui);
                     let field = ui.add_sized(
@@ -725,7 +802,7 @@ pub fn draw(
                         select_all(ui, address_id, state.address_text.chars().count());
                     }
                     commands.extend(address_suggestions(
-                        ui, window, history, state, &field, active.id,
+                        ui, window, history, bookmarks, state, &field, active.id,
                     ));
                     if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                         // A URL loads; anything else is a search.
@@ -748,8 +825,22 @@ pub fn draw(
             });
         });
 
+    if show_bookmarks_bar {
+        let bar_frame = Frame::new().fill(palette.toolbar).inner_margin(Margin {
+            left: 8,
+            right: 8,
+            top: 0,
+            bottom: 6,
+        });
+        Panel::top("bookmarks-bar")
+            .frame(bar_frame)
+            .show_inside(ui, |ui| {
+                commands.extend(bookmarks_bar(ui, window, context, &palette, state, keymap));
+            });
+    }
+
     commands.extend(draw_prompt(ui, window, context, state));
-    commands.extend(draw_launcher(ui, window, history, state));
+    commands.extend(draw_launcher(ui, window, history, bookmarks, state));
 
     // The status text floats over the bottom-left corner of the page as an
     // overlay, so showing or hiding it never resizes the page. An error
@@ -1361,6 +1452,7 @@ fn draw_launcher(
     ui: &mut Ui,
     window: &Window,
     history: &History,
+    bookmarks: &Bookmarks,
     state: &mut ChromeState,
 ) -> Vec<Command> {
     let Some(launcher) = state.launcher.as_mut() else {
@@ -1383,7 +1475,7 @@ fn draw_launcher(
     ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, area_id))
         .rect_filled(content, 0.0, Color32::from_black_alpha(96));
 
-    let matches = history.matches(&launcher.typed);
+    let matches = suggestions(history, bookmarks, &launcher.typed);
     let width = (content.width() - 48.0).clamp(200.0, LAUNCHER_WIDTH);
     let top_left = Pos2::new(
         content.center().x - width / 2.0,
@@ -1493,10 +1585,12 @@ fn draw_launcher(
 /// down under it while the field has focus and the text is the user's
 /// (not the page's address). Up and Down put a match's address in the
 /// field, so Enter loads it; a click on a match loads it at once.
+#[allow(clippy::too_many_arguments)]
 fn address_suggestions(
     ui: &mut Ui,
     window: &Window,
     history: &History,
+    bookmarks: &Bookmarks,
     state: &mut ChromeState,
     field: &egui::Response,
     tab: TabId,
@@ -1510,7 +1604,7 @@ fn address_suggestions(
     if !typing && !state.suggest.open {
         return commands;
     }
-    let matches = history.matches(&state.suggest.typed);
+    let matches = suggestions(history, bookmarks, &state.suggest.typed);
     if matches.is_empty() {
         state.suggest.open = false;
         return commands;
@@ -1570,15 +1664,12 @@ fn step_pick(picked: Option<usize>, count: usize, down: bool) -> Option<usize> {
     }
 }
 
-/// One history match as a row the width of its list: its title (or
-/// address, untitled) with the address after it, small; filled when
-/// picked or hovered. Returns the row's response (click).
-fn suggestion_row(ui: &mut Ui, entry: &HistoryEntry, picked: bool) -> egui::Response {
-    let title = if entry.title.is_empty() {
-        entry.url.as_str()
-    } else {
-        entry.title.as_str()
-    };
+/// One suggestion as a row the width of its list: a star for a bookmark
+/// (a dot for a page from the history), its title (or address,
+/// untitled) with the address after it, small; filled when picked or
+/// hovered. Returns the row's response (click).
+fn suggestion_row(ui: &mut Ui, entry: &Suggestion, picked: bool) -> egui::Response {
+    let title = entry.display_title();
     let (body, small) = (
         TextStyle::Body.resolve(ui.style()),
         TextStyle::Small.resolve(ui.style()),
@@ -1612,7 +1703,9 @@ fn suggestion_row(ui: &mut Ui, entry: &HistoryEntry, picked: bool) -> egui::Resp
             ..Default::default()
         },
     );
-    job.wrap = egui::text::TextWrapping::truncate_at_width(width - 2.0 * SUGGESTION_PADDING);
+    let text_left = rect.left() + SUGGESTION_PADDING + SUGGESTION_ICON + SUGGESTION_PADDING;
+    job.wrap =
+        egui::text::TextWrapping::truncate_at_width(rect.right() - SUGGESTION_PADDING - text_left);
     let galley = ui.painter().layout_job(job);
     let painter = ui.painter();
     if picked {
@@ -1620,11 +1713,28 @@ fn suggestion_row(ui: &mut Ui, entry: &HistoryEntry, picked: bool) -> egui::Resp
     } else if response.hovered() {
         painter.rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill);
     }
-    painter.galley(
-        Pos2::new(
-            rect.left() + SUGGESTION_PADDING,
-            rect.center().y - galley.size().y / 2.0,
+    let icon_center = Pos2::new(
+        rect.left() + SUGGESTION_PADDING + SUGGESTION_ICON / 2.0,
+        rect.center().y,
+    );
+    match entry.source {
+        SuggestionSource::Bookmark => paint_star(
+            painter,
+            icon_center,
+            SUGGESTION_ICON / 2.0,
+            text_color,
+            true,
         ),
+        SuggestionSource::History => {
+            painter.circle_stroke(
+                icon_center,
+                SUGGESTION_ICON / 4.0,
+                Stroke::new(1.2_f32, weak),
+            );
+        }
+    }
+    painter.galley(
+        Pos2::new(text_left, rect.center().y - galley.size().y / 2.0),
         galley,
         text_color,
     );
@@ -1647,6 +1757,8 @@ fn draw_prompt(
         None => return Vec::new(),
         Some(Prompt::Profile { .. }) => return draw_profile_prompt(ui, window, context, state),
         Some(Prompt::DeleteProfile { .. }) => return draw_delete_profile_prompt(ui, state),
+        Some(Prompt::Bookmark { .. }) => return draw_bookmark_prompt(ui, state),
+        Some(Prompt::DeleteBookmarkGroup { .. }) => return draw_delete_group_prompt(ui, state),
         Some(_) => {}
     }
     let Some(prompt) = state.prompt.as_mut() else {
@@ -1667,7 +1779,11 @@ fn draw_prompt(
                 groups.clone(),
             ),
             Prompt::RenameFolder { .. } => ("Rename folder", "Name", "", Vec::new()),
-            Prompt::Profile { .. } | Prompt::DeleteProfile { .. } => return Vec::new(),
+            Prompt::RenameBookmarkGroup { .. } => ("Rename group", "Name", "", Vec::new()),
+            Prompt::Profile { .. }
+            | Prompt::DeleteProfile { .. }
+            | Prompt::Bookmark { .. }
+            | Prompt::DeleteBookmarkGroup { .. } => return Vec::new(),
         };
     let mut answered = false;
     let mut cancelled = false;
@@ -1776,8 +1892,616 @@ fn draw_prompt(
             }
             vec![Command::RenameFolder { folder, name }]
         }
-        Prompt::Profile { .. } | Prompt::DeleteProfile { .. } => Vec::new(),
+        Prompt::RenameBookmarkGroup { group } => {
+            if name.is_empty() {
+                return Vec::new();
+            }
+            vec![Command::RenameBookmarkGroup { group, name }]
+        }
+        Prompt::Profile { .. }
+        | Prompt::DeleteProfile { .. }
+        | Prompt::Bookmark { .. }
+        | Prompt::DeleteBookmarkGroup { .. } => Vec::new(),
     }
+}
+
+/// The bookmark popover, under the toolbar's star (or the chip whose
+/// menu asked for it): "Bookmark added" or "Edit bookmark", the name,
+/// the group (one of the existing ones, or a new one by name), Remove
+/// and Done. Enter, Escape, Done, and a click outside all keep the
+/// bookmark with what the fields say; Remove forgets it.
+fn draw_bookmark_prompt(ui: &mut Ui, state: &mut ChromeState) -> Vec<Command> {
+    let anchor = state.bookmark_anchor.or(state.star_rect);
+    let Some(prompt) = state.prompt.as_mut() else {
+        return Vec::new();
+    };
+    let Prompt::Bookmark {
+        url, groups, added, ..
+    } = &prompt.prompt
+    else {
+        return Vec::new();
+    };
+    let ctx = ui.ctx().clone();
+    let content = ctx.content_rect();
+    let position = match anchor {
+        Some(rect) => Pos2::new(
+            (rect.right() - BOOKMARK_POPOVER_WIDTH).max(content.left() + 8.0),
+            rect.bottom() + 6.0,
+        ),
+        None => Pos2::new(
+            content.center().x - BOOKMARK_POPOVER_WIDTH / 2.0,
+            content.top() + 80.0,
+        ),
+    };
+    let heading = if *added {
+        "Bookmark added"
+    } else {
+        "Edit bookmark"
+    };
+    let mut done = false;
+    let mut removed = false;
+    let shown = egui::Window::new(heading)
+        .id(Id::new("chrome-prompt"))
+        .title_bar(false)
+        .collapsible(false)
+        .resizable(false)
+        .fixed_pos(position)
+        .default_width(BOOKMARK_POPOVER_WIDTH)
+        .show(&ctx, |ui| {
+            ui.set_min_width(BOOKMARK_POPOVER_WIDTH - 24.0);
+            ui.set_max_width(BOOKMARK_POPOVER_WIDTH - 24.0);
+            ui.label(RichText::new(heading).family(FontFamily::Name(theme::MEDIUM.into())));
+            ui.add_space(8.0);
+            egui::Grid::new("bookmark-popover")
+                .num_columns(2)
+                .spacing([10.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label("Name");
+                    let field = ui.add(
+                        egui::TextEdit::singleline(&mut prompt.text)
+                            .margin(theme::INPUT_MARGIN)
+                            .desired_width(f32::INFINITY),
+                    );
+                    if prompt.focus {
+                        prompt.focus = false;
+                        field.request_focus();
+                        select_all(ui, field.id, prompt.text.chars().count());
+                    }
+                    if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        done = true;
+                    }
+                    ui.end_row();
+
+                    ui.label("Group");
+                    let current = if prompt.new_group {
+                        "New group…".to_string()
+                    } else {
+                        prompt
+                            .existing
+                            .and_then(|i| groups.get(i))
+                            .cloned()
+                            .unwrap_or_else(|| Bookmarks::BAR.to_string())
+                    };
+                    egui::ComboBox::from_id_salt("bookmark-group")
+                        .selected_text(current)
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for (i, name) in groups.iter().enumerate() {
+                                let picked = !prompt.new_group && prompt.existing == Some(i);
+                                if ui.selectable_label(picked, name).clicked() {
+                                    prompt.existing = Some(i);
+                                    prompt.new_group = false;
+                                }
+                            }
+                            if !groups.iter().any(|g| g == Bookmarks::BAR)
+                                && ui
+                                    .selectable_label(
+                                        !prompt.new_group && prompt.existing.is_none(),
+                                        Bookmarks::BAR,
+                                    )
+                                    .clicked()
+                            {
+                                prompt.existing = None;
+                                prompt.new_group = false;
+                            }
+                            ui.separator();
+                            if ui
+                                .selectable_label(prompt.new_group, "New group…")
+                                .clicked()
+                            {
+                                prompt.new_group = true;
+                            }
+                        });
+                    ui.end_row();
+
+                    if prompt.new_group {
+                        ui.label("");
+                        let field = ui.add(
+                            egui::TextEdit::singleline(&mut prompt.extra)
+                                .margin(theme::INPUT_MARGIN)
+                                .hint_text("Group name")
+                                .desired_width(f32::INFINITY),
+                        );
+                        if prompt.extra.is_empty() && !field.has_focus() && field.changed() {
+                            field.request_focus();
+                        }
+                        if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                            done = true;
+                        }
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                let danger = ui.visuals().error_fg_color;
+                if ui
+                    .add(Button::new(RichText::new("Remove").color(danger)))
+                    .clicked()
+                {
+                    removed = true;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Done").clicked() {
+                        done = true;
+                    }
+                });
+            });
+            if ui.input(|i| i.key_pressed(Key::Escape)) {
+                done = true;
+            }
+        });
+    let pressed_outside = ctx.input(|i| {
+        i.pointer.any_pressed()
+            && i.pointer
+                .interact_pos()
+                .is_some_and(|p| !shown.as_ref().is_some_and(|s| s.response.rect.contains(p)))
+            && !egui::Popup::is_any_open(&ctx)
+    });
+    if pressed_outside {
+        done = true;
+    }
+    if !done && !removed {
+        return Vec::new();
+    }
+    let url = url.clone();
+    let Some(PromptState {
+        prompt: Prompt::Bookmark { groups, group, .. },
+        text,
+        existing,
+        extra,
+        new_group,
+        ..
+    }) = state.prompt.take()
+    else {
+        return Vec::new();
+    };
+    state.bookmark_anchor = None;
+    if removed {
+        return vec![Command::RemoveBookmark(url)];
+    }
+    let group = if new_group {
+        match extra.trim() {
+            "" => group,
+            name => name.to_string(),
+        }
+    } else {
+        existing
+            .and_then(|i| groups.get(i))
+            .cloned()
+            .unwrap_or_else(|| Bookmarks::BAR.to_string())
+    };
+    vec![Command::EditBookmark {
+        url,
+        title: text.trim().to_string(),
+        group,
+    }]
+}
+
+/// "Delete the group and its bookmarks?", answered with
+/// `Command::DeleteBookmarkGroup`.
+fn draw_delete_group_prompt(ui: &mut Ui, state: &mut ChromeState) -> Vec<Command> {
+    let Some(prompt) = state.prompt.as_ref() else {
+        return Vec::new();
+    };
+    let Prompt::DeleteBookmarkGroup { group, count } = &prompt.prompt else {
+        return Vec::new();
+    };
+    let mut confirmed = false;
+    let mut cancelled = false;
+    egui::Window::new("Delete group")
+        .id(Id::new("chrome-prompt"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_TOP, Vec2::new(0.0, 80.0))
+        .show(ui.ctx(), |ui| {
+            ui.set_min_width(320.0);
+            ui.set_max_width(420.0);
+            let what = match count {
+                0 => "It holds no bookmarks.".to_string(),
+                1 => "Its one bookmark goes with it.".to_string(),
+                n => format!("Its {n} bookmarks go with it."),
+            };
+            ui.label(format!("Delete the group \u{201c}{group}\u{201d}? {what}"));
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                let danger = ui.visuals().error_fg_color;
+                if ui
+                    .add(Button::new(RichText::new("Delete").color(danger)))
+                    .clicked()
+                {
+                    confirmed = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancelled = true;
+                }
+            });
+            if ui.input(|i| i.key_pressed(Key::Escape)) {
+                cancelled = true;
+            }
+        });
+    if cancelled || confirmed {
+        let group = group.clone();
+        state.prompt = None;
+        if confirmed {
+            return vec![Command::DeleteBookmarkGroup(group)];
+        }
+    }
+    Vec::new()
+}
+
+/// The bookmarks bar under the toolbar: the bar group's bookmarks as
+/// chips (favicon and title; a click loads the page in the active tab,
+/// a middle click in a background tab, a right click opens the chip's
+/// menu, a drag reorders), a "»" chip for those that did not fit, and
+/// the other groups as drop-down chips at the right end.
+fn bookmarks_bar(
+    ui: &mut Ui,
+    window: &Window,
+    context: &ChromeContext<'_>,
+    palette: &Palette,
+    state: &mut ChromeState,
+    keymap: &Keymap,
+) -> Vec<Command> {
+    let bookmarks = context.bookmarks;
+    let mut commands = Vec::new();
+    let active = window.active_tab().id;
+    let bar: &[Bookmark] = bookmarks
+        .bar()
+        .map(|g| g.bookmarks.as_slice())
+        .unwrap_or(&[]);
+    let others: Vec<&osmena_core::BookmarkGroup> = bookmarks
+        .groups
+        .iter()
+        .filter(|g| g.name != Bookmarks::BAR)
+        .collect();
+    state
+        .site_icons
+        .retain(|host, _| context.site_icons.contains_key(host));
+    ui.horizontal(|ui| {
+        ui.set_min_height(BAR_CHIP_HEIGHT);
+        ui.spacing_mut().item_spacing.x = BAR_CHIP_GAP;
+        if bar.is_empty() && others.is_empty() {
+            ui.add_space(4.0);
+            let how = match keymap.chord_for(CommandKind::BookmarkPage) {
+                Some(chord) => format!("the star or {}", describe_chord(chord)),
+                None => "the star".to_string(),
+            };
+            ui.label(
+                RichText::new(format!("Bookmark a page with {how} and it shows here."))
+                    .small()
+                    .weak(),
+            );
+            return;
+        }
+        let font = TextStyle::Body.resolve(ui.style());
+        let chip_width = |ui: &Ui, title: &str, icon: bool| -> f32 {
+            let text = ui
+                .painter()
+                .layout_no_wrap(
+                    truncate(title, BAR_TITLE_MAX_CHARS),
+                    font.clone(),
+                    Color32::WHITE,
+                )
+                .size()
+                .x;
+            let icon_width = if icon {
+                FAVICON_SIZE + BAR_CHIP_PADDING
+            } else {
+                0.0
+            };
+            text + icon_width + 2.0 * BAR_CHIP_PADDING
+        };
+        let groups_width: f32 = others
+            .iter()
+            .map(|g| chip_width(ui, &format!("{} ▾", g.name), false) + BAR_CHIP_GAP)
+            .sum();
+        let available = ui.available_width();
+        let mut used = 0.0;
+        let mut shown = 0;
+        let mut rects = Vec::new();
+        for (i, bookmark) in bar.iter().enumerate() {
+            let width = chip_width(ui, bookmark_label(bookmark), true);
+            let overflow = if i + 1 < bar.len() {
+                BAR_OVERFLOW_WIDTH + BAR_CHIP_GAP
+            } else {
+                0.0
+            };
+            if used + width + overflow + groups_width > available {
+                break;
+            }
+            let response = bookmark_chip(ui, state, context, palette, window, bookmark, width);
+            rects.push(response.rect);
+            if response.clicked() {
+                commands.push(Command::Navigate {
+                    tab: active,
+                    url: bookmark.url.clone(),
+                });
+            } else if response.middle_clicked() {
+                commands.push(Command::NewBackgroundTab {
+                    opener: active,
+                    url: bookmark.url.clone(),
+                });
+            } else if response.secondary_clicked() {
+                state.bookmark_anchor = Some(response.rect);
+                state.menu_request = Some(MenuRequest::Bookmark {
+                    url: bookmark.url.clone(),
+                    position: response.rect.left_bottom(),
+                });
+            }
+            if response.drag_started() {
+                state.bar_drag = Some(i);
+            }
+            used += width + BAR_CHIP_GAP;
+            shown += 1;
+        }
+        if shown < bar.len() {
+            let id = Id::new(("bookmarks-overflow", window.id));
+            let (rect, _) = ui.allocate_exact_size(
+                Vec2::new(BAR_OVERFLOW_WIDTH, BAR_CHIP_HEIGHT),
+                Sense::hover(),
+            );
+            let response = ui.interact(rect, id, Sense::click());
+            if ui.is_rect_visible(rect) {
+                chip_background(ui, palette, rect, &response);
+                ui.painter().text(
+                    rect.center(),
+                    Align2::CENTER_CENTER,
+                    "»",
+                    font.clone(),
+                    ui.visuals().text_color(),
+                );
+            }
+            if response
+                .on_hover_text(format!("{} more", bar.len() - shown))
+                .clicked()
+            {
+                state.menu_request = Some(MenuRequest::BookmarkOverflow {
+                    from: shown,
+                    position: rect.left_bottom(),
+                });
+            }
+        }
+        if others.is_empty() {
+            // An empty right-to-left run would still take a zero-sized
+            // slot, which egui reports as a widget changing id.
+        } else {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                for group in others.iter().rev() {
+                    let label = format!("{} ▾", group.name);
+                    let width = chip_width(ui, &label, false);
+                    let (rect, _) =
+                        ui.allocate_exact_size(Vec2::new(width, BAR_CHIP_HEIGHT), Sense::click());
+                    let response = ui.interact(
+                        rect,
+                        Id::new(("bookmark-group-chip", window.id, &group.name)),
+                        Sense::click(),
+                    );
+                    if ui.is_rect_visible(rect) {
+                        chip_background(ui, palette, rect, &response);
+                        ui.painter().text(
+                            Pos2::new(rect.left() + BAR_CHIP_PADDING, rect.center().y),
+                            Align2::LEFT_CENTER,
+                            truncate(&label, BAR_TITLE_MAX_CHARS + 2),
+                            font.clone(),
+                            ui.visuals().text_color(),
+                        );
+                    }
+                    if response.clicked() {
+                        state.menu_request = Some(MenuRequest::BookmarkGroup {
+                            group: group.name.clone(),
+                            position: rect.left_bottom(),
+                        });
+                    }
+                }
+            });
+        }
+
+        // A chip being dragged: a line where it would land, and the
+        // move when the button goes up.
+        if let Some(from) = state.bar_drag {
+            let (pointer, released) =
+                ui.input(|i| (i.pointer.interact_pos(), i.pointer.any_released()));
+            match pointer {
+                Some(p) if !rects.is_empty() => {
+                    let to = rects
+                        .iter()
+                        .position(|r| p.x < r.center().x)
+                        .unwrap_or(rects.len());
+                    let x = if to < rects.len() {
+                        rects[to].left() - BAR_CHIP_GAP / 2.0
+                    } else {
+                        rects[rects.len() - 1].right() + BAR_CHIP_GAP / 2.0
+                    };
+                    let y = rects[0].y_range();
+                    if to != from && to != from + 1 {
+                        ui.painter()
+                            .vline(x, y, Stroke::new(2.0_f32, ui.visuals().text_color()));
+                    }
+                    if released {
+                        state.bar_drag = None;
+                        commands.push(Command::MoveBookmark {
+                            group: Bookmarks::BAR.to_string(),
+                            from,
+                            to,
+                        });
+                    }
+                }
+                _ => {
+                    if released {
+                        state.bar_drag = None;
+                    }
+                }
+            }
+        }
+    });
+    commands
+}
+
+/// One chip of the bookmarks bar, `width` wide: the site's favicon (a
+/// dot without one) and the title.
+fn bookmark_chip(
+    ui: &mut Ui,
+    state: &mut ChromeState,
+    context: &ChromeContext<'_>,
+    palette: &Palette,
+    window: &Window,
+    bookmark: &Bookmark,
+    width: f32,
+) -> egui::Response {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, BAR_CHIP_HEIGHT), Sense::hover());
+    let response = ui.interact(
+        rect,
+        Id::new(("bookmark-chip", window.id, bookmark.url.as_str())),
+        Sense::click_and_drag(),
+    );
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    chip_background(ui, palette, rect, &response);
+    let icon_rect = Rect::from_center_size(
+        Pos2::new(
+            rect.left() + BAR_CHIP_PADDING + FAVICON_SIZE / 2.0,
+            rect.center().y,
+        ),
+        Vec2::splat(FAVICON_SIZE),
+    );
+    let icon = Bookmarks::site_key(&bookmark.url).and_then(|host| {
+        let favicon = context.site_icons.get(&host)?;
+        site_icon_texture(ui, state, &host, favicon).map(|t| t.id())
+    });
+    match icon {
+        Some(texture) => {
+            ui.painter().image(
+                texture,
+                icon_rect,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+        None => {
+            ui.painter().circle_stroke(
+                icon_rect.center(),
+                FAVICON_SIZE / 4.0,
+                Stroke::new(1.2_f32, ui.visuals().weak_text_color()),
+            );
+        }
+    }
+    ui.painter().text(
+        Pos2::new(icon_rect.right() + BAR_CHIP_PADDING, rect.center().y),
+        Align2::LEFT_CENTER,
+        truncate(bookmark_label(bookmark), BAR_TITLE_MAX_CHARS),
+        TextStyle::Body.resolve(ui.style()),
+        ui.visuals().text_color(),
+    );
+    response.on_hover_text(format!("{}\n{}", bookmark_label(bookmark), bookmark.url))
+}
+
+/// A chip's fill: the toolbar's, a little darker under the pointer.
+fn chip_background(ui: &Ui, palette: &Palette, rect: Rect, response: &egui::Response) {
+    if response.hovered() || response.is_pointer_button_down_on() {
+        ui.painter().rect_filled(
+            rect,
+            4.0,
+            blend(palette.toolbar, ui.visuals().text_color(), 0.12),
+        );
+    }
+}
+
+/// The texture of a bookmarked site's favicon, uploaded on first use and
+/// again when the shell has a different image for the host.
+fn site_icon_texture<'a>(
+    ui: &Ui,
+    state: &'a mut ChromeState,
+    host: &str,
+    favicon: &Favicon,
+) -> Option<&'a TextureHandle> {
+    let fresh = state
+        .site_icons
+        .get(host)
+        .is_some_and(|cached| cached.is_for(favicon));
+    if !fresh {
+        let image = ColorImage::from_rgba_unmultiplied(
+            [favicon.width as usize, favicon.height as usize],
+            &favicon.rgba,
+        );
+        let texture = ui
+            .ctx()
+            .load_texture(format!("site-{host}"), image, TextureOptions::LINEAR);
+        state.site_icons.insert(
+            host.to_string(),
+            CachedFavicon {
+                width: favicon.width,
+                height: favicon.height,
+                rgba: favicon.rgba.clone(),
+                texture,
+            },
+        );
+    }
+    state.site_icons.get(host).map(|cached| &cached.texture)
+}
+
+/// The toolbar's star: filled when the page is bookmarked, an outline
+/// otherwise.
+fn star_button(ui: &mut Ui, palette: &Palette, window: &Window, filled: bool) -> egui::Response {
+    let id = Id::new(("bookmark-star", window.id));
+    let (rect, response, _) = icon_button_rect(ui, palette, id);
+    if ui.is_rect_visible(rect) {
+        paint_star(
+            ui.painter(),
+            rect.center(),
+            7.5,
+            ui.visuals().text_color(),
+            filled,
+        );
+    }
+    response
+}
+
+/// A five-pointed star of outer radius `radius` at `center`.
+fn paint_star(painter: &egui::Painter, center: Pos2, radius: f32, color: Color32, filled: bool) {
+    let inner = radius * 0.42;
+    let points: Vec<Pos2> = (0..10)
+        .map(|i| {
+            let r = if i % 2 == 0 { radius } else { inner };
+            let angle = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+            Pos2::new(center.x + r * angle.cos(), center.y + r * angle.sin())
+        })
+        .collect();
+    if filled {
+        // A star is not convex: fill it as a fan of triangles from the
+        // centre, each of which is.
+        for i in 0..points.len() {
+            painter.add(egui::Shape::convex_polygon(
+                vec![center, points[i], points[(i + 1) % points.len()]],
+                color,
+                Stroke::NONE,
+            ));
+        }
+    }
+    painter.add(egui::Shape::closed_line(
+        points,
+        Stroke::new(1.3_f32, color),
+    ));
 }
 
 /// The profile dialog ("Customize your profile", or "Add a profile"): a

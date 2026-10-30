@@ -1,8 +1,11 @@
 //! Named user actions and the pure `dispatch` that applies them.
 
+use std::path::PathBuf;
+
 use url::Url;
 
-use crate::bookmarks::Bookmark;
+use crate::bookmarks::{Bookmark, Bookmarks};
+use crate::bookmarks_html;
 use crate::event::PendingTab;
 use crate::extension::ExtensionSource;
 use crate::model::{Browser, Folder, FolderId, LoadState, Tab, TabId, Window, WindowId};
@@ -116,6 +119,59 @@ pub enum Command {
     /// Ask the user for the group to bookmark these tabs in.
     PromptBookmarkTabs(Vec<TabId>),
     PromptRenameFolder(FolderId),
+    /// The toolbar's star, or `Ctrl+D`: bookmark `tab`'s page in the
+    /// last-used group when it is not bookmarked yet, then open the
+    /// bookmark popover for it (to name it, move it to another group,
+    /// or remove it).
+    ToggleBookmark(TabId),
+    /// Open the bookmark popover in `window` for `url`, which is
+    /// bookmarked already (a chip's "Edit…").
+    PromptEditBookmark {
+        window: WindowId,
+        url: Url,
+    },
+    /// The popover's answer: the bookmark of `url` is titled `title` and
+    /// sits in `group` (made if new; empty means the bar).
+    EditBookmark {
+        url: Url,
+        title: String,
+        group: String,
+    },
+    RemoveBookmark(Url),
+    /// Ask for a new name for the bookmark group.
+    PromptRenameBookmarkGroup {
+        window: WindowId,
+        group: String,
+    },
+    RenameBookmarkGroup {
+        group: String,
+        name: String,
+    },
+    /// Ask before deleting the group and its bookmarks.
+    PromptDeleteBookmarkGroup {
+        window: WindowId,
+        group: String,
+    },
+    DeleteBookmarkGroup(String),
+    /// Reorder a group (the bar's chips are dragged): the bookmark at
+    /// `from` moves to sit at `to`, an index into the group as it is.
+    MoveBookmark {
+        group: String,
+        from: usize,
+        to: usize,
+    },
+    /// Show or hide the bookmarks bar.
+    ToggleBookmarksBar,
+    /// Ask the user for a bookmarks file to import, or where to export.
+    PickBookmarksFile(BookmarksFile),
+    /// Merge the bookmarks of an HTML bookmarks file (`text`); links
+    /// outside any folder go to a group named after `source` (the file).
+    ImportBookmarks {
+        text: String,
+        source: String,
+    },
+    /// Write every bookmark to an HTML bookmarks file at `path`.
+    ExportBookmarks(PathBuf),
     NextTab(WindowId),
     PreviousTab(WindowId),
     /// Activate the tab at `index` in `window`'s strip; nothing if there
@@ -241,6 +297,31 @@ pub enum PageCommand {
     Inspect,
 }
 
+impl Command {
+    /// Whether this command writes the bookmarks: the shell reads shared
+    /// bookmarks again first, so another browser's additions survive.
+    pub fn changes_bookmarks(&self) -> bool {
+        matches!(
+            self,
+            Command::BookmarkTabs { .. }
+                | Command::ToggleBookmark(_)
+                | Command::EditBookmark { .. }
+                | Command::RemoveBookmark(_)
+                | Command::RenameBookmarkGroup { .. }
+                | Command::DeleteBookmarkGroup(_)
+                | Command::MoveBookmark { .. }
+                | Command::ImportBookmarks { .. }
+        )
+    }
+}
+
+/// Which way a bookmarks file goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BookmarksFile {
+    Import,
+    Export,
+}
+
 /// What the profile dialog edits: the profile's name, colour and
 /// avatar, and what it takes from the default profile. `share_bookmarks`
 /// is a lasting setting (the profile reads and writes the default
@@ -301,6 +382,25 @@ pub enum Prompt {
         profile: String,
         name: String,
         current: bool,
+    },
+    /// The bookmark popover under the star: the bookmark of `url`, its
+    /// `title` and `group` as they are, the existing `groups` to pick
+    /// from, and whether the star just `added` it ("Bookmark added"
+    /// rather than "Edit bookmark").
+    Bookmark {
+        url: Url,
+        title: String,
+        group: String,
+        groups: Vec<String>,
+        added: bool,
+    },
+    RenameBookmarkGroup {
+        group: String,
+    },
+    /// Confirm deleting the group and its `count` bookmarks.
+    DeleteBookmarkGroup {
+        group: String,
+        count: usize,
     },
 }
 
@@ -396,6 +496,11 @@ pub enum EngineAction {
     SaveSettings,
     /// The bookmarks changed: persist them.
     SaveBookmarks,
+    /// Show the system's file dialog for a bookmarks file; the answer is
+    /// `Command::ImportBookmarks` or `Command::ExportBookmarks`.
+    PickFile(BookmarksFile),
+    /// Write the bookmarks as an HTML bookmarks file at `path`.
+    ExportBookmarks(PathBuf),
     /// The history changed: persist it (the shell may wait a moment and
     /// save once for a run of changes).
     SaveHistory,
@@ -643,6 +748,108 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
                 },
             }]
         }
+        Command::ToggleBookmark(tab) => toggle_bookmark(browser, *tab),
+        Command::PromptEditBookmark { window, url } => {
+            let Some((group, bookmark)) = browser.bookmarks.find(url) else {
+                return Vec::new();
+            };
+            vec![EngineAction::ShowPrompt {
+                window: *window,
+                prompt: Prompt::Bookmark {
+                    url: url.clone(),
+                    title: bookmark.title.clone(),
+                    group: group.to_string(),
+                    groups: browser.bookmarks.group_names(),
+                    added: false,
+                },
+            }]
+        }
+        Command::EditBookmark { url, title, group } => {
+            browser.bookmarks.update(url, title, group);
+            let mut actions = vec![EngineAction::SaveBookmarks];
+            let group = match group.trim() {
+                "" => Bookmarks::BAR,
+                name => name,
+            };
+            if browser.settings.last_bookmark_group != group {
+                browser.settings.last_bookmark_group = group.to_string();
+                actions.push(EngineAction::SaveSettings);
+            }
+            actions
+        }
+        Command::RemoveBookmark(url) => {
+            if browser.bookmarks.remove(url) {
+                vec![EngineAction::SaveBookmarks]
+            } else {
+                Vec::new()
+            }
+        }
+        Command::PromptRenameBookmarkGroup { window, group } => {
+            if browser.bookmarks.group(group).is_none() {
+                return Vec::new();
+            }
+            vec![EngineAction::ShowPrompt {
+                window: *window,
+                prompt: Prompt::RenameBookmarkGroup {
+                    group: group.clone(),
+                },
+            }]
+        }
+        Command::RenameBookmarkGroup { group, name } => {
+            if !browser.bookmarks.rename_group(group, name) {
+                return Vec::new();
+            }
+            let mut actions = vec![EngineAction::SaveBookmarks];
+            if browser.settings.last_bookmark_group == *group {
+                browser.settings.last_bookmark_group = name.trim().to_string();
+                actions.push(EngineAction::SaveSettings);
+            }
+            actions
+        }
+        Command::PromptDeleteBookmarkGroup { window, group } => {
+            let Some(g) = browser.bookmarks.group(group) else {
+                return Vec::new();
+            };
+            vec![EngineAction::ShowPrompt {
+                window: *window,
+                prompt: Prompt::DeleteBookmarkGroup {
+                    group: group.clone(),
+                    count: g.bookmarks.len(),
+                },
+            }]
+        }
+        Command::DeleteBookmarkGroup(group) => {
+            if browser.bookmarks.delete_group(group) {
+                vec![EngineAction::SaveBookmarks]
+            } else {
+                Vec::new()
+            }
+        }
+        Command::MoveBookmark { group, from, to } => {
+            if browser.bookmarks.move_within(group, *from, *to) {
+                vec![EngineAction::SaveBookmarks]
+            } else {
+                Vec::new()
+            }
+        }
+        Command::ToggleBookmarksBar => {
+            browser.settings.show_bookmarks_bar = !browser.settings.show_bookmarks_bar;
+            vec![EngineAction::SaveSettings]
+        }
+        Command::PickBookmarksFile(which) => vec![EngineAction::PickFile(*which)],
+        Command::ImportBookmarks { text, source } => {
+            let loose = match source.trim() {
+                "" => "Imported".to_string(),
+                name => format!("Imported from {name}"),
+            };
+            let imported = bookmarks_html::import(text, &loose);
+            if browser.bookmarks.merge(imported) > 0 {
+                vec![EngineAction::SaveBookmarks]
+            } else {
+                Vec::new()
+            }
+        }
+        Command::ExportBookmarks(path) => vec![EngineAction::ExportBookmarks(path.clone())],
         Command::PromptRenameFolder(folder) => {
             let Some(window) = browser.window_of_folder(*folder) else {
                 return Vec::new();
@@ -929,8 +1136,58 @@ fn move_tabs_to_folder(browser: &mut Browser, tabs: &[TabId], target: &FolderTar
     w.prune_folders();
 }
 
+/// The star's command: bookmark `tab`'s page in the last-used group
+/// unless it is bookmarked already, then ask the popover to show it.
+/// Pages with nothing to bookmark (`about:blank`) are left alone.
+fn toggle_bookmark(browser: &mut Browser, tab: TabId) -> Vec<EngineAction> {
+    let Some(window) = browser.window_of_tab(tab) else {
+        return Vec::new();
+    };
+    let t = browser.tab(tab).expect("window_of_tab");
+    if !Bookmarks::bookmarkable(&t.url) {
+        return Vec::new();
+    }
+    let url = t.url.clone();
+    let page_title = t.display_title().to_string();
+    let mut actions = Vec::new();
+    let (group, added) = match browser.bookmarks.find(&url) {
+        Some((group, _)) => (group.to_string(), false),
+        None => {
+            let group = match browser.settings.last_bookmark_group.trim() {
+                "" => Bookmarks::BAR.to_string(),
+                name => name.to_string(),
+            };
+            browser.bookmarks.add(
+                &group,
+                vec![Bookmark {
+                    title: page_title.clone(),
+                    url: url.clone(),
+                }],
+            );
+            actions.push(EngineAction::SaveBookmarks);
+            (group, true)
+        }
+    };
+    let title = browser
+        .bookmarks
+        .find(&url)
+        .map(|(_, b)| b.title.clone())
+        .unwrap_or(page_title);
+    actions.push(EngineAction::ShowPrompt {
+        window,
+        prompt: Prompt::Bookmark {
+            url,
+            title,
+            group,
+            groups: browser.bookmarks.group_names(),
+            added,
+        },
+    });
+    actions
+}
+
 /// Bookmark the pages of `tabs` (those that exist) in `group`, which is
-/// made if new; an empty name means "Bookmarks".
+/// made if new; an empty name means the bar.
 fn bookmark_tabs(browser: &mut Browser, tabs: &[TabId], group: &str) -> Vec<EngineAction> {
     let bookmarks: Vec<Bookmark> = tabs
         .iter()
@@ -944,7 +1201,7 @@ fn bookmark_tabs(browser: &mut Browser, tabs: &[TabId], group: &str) -> Vec<Engi
         return Vec::new();
     }
     let group = match group.trim() {
-        "" => "Bookmarks",
+        "" => Bookmarks::BAR,
         name => name,
     };
     browser.bookmarks.add(group, bookmarks);
@@ -2453,6 +2710,262 @@ mod tests {
     }
 
     /// A window with `n` tabs; returns the browser, the window, and the tab ids.
+    #[test]
+    fn the_star_adds_to_the_last_group_once_and_then_edits() {
+        let (mut b, window, tab) = one_window();
+        b.tab_mut(tab).unwrap().title = "A page".to_string();
+        let actions = dispatch(&mut b, &Command::ToggleBookmark(tab));
+        let prompt = Prompt::Bookmark {
+            url: url("https://a.example/"),
+            title: "A page".to_string(),
+            group: Bookmarks::BAR.to_string(),
+            groups: vec![Bookmarks::BAR.to_string()],
+            added: true,
+        };
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::SaveBookmarks,
+                EngineAction::ShowPrompt {
+                    window,
+                    prompt: prompt.clone()
+                }
+            ]
+        );
+        assert!(b.bookmarks.contains(&url("https://a.example/")));
+        // Bookmarked already: only the popover, saying "edit".
+        let again = dispatch(&mut b, &Command::ToggleBookmark(tab));
+        assert_eq!(again.len(), 1);
+        assert!(matches!(
+            &again[0],
+            EngineAction::ShowPrompt {
+                prompt: Prompt::Bookmark { added: false, .. },
+                ..
+            }
+        ));
+        // The last group the user picked is where the next star goes.
+        b.settings.last_bookmark_group = "Work".to_string();
+        dispatch(
+            &mut b,
+            &Command::Navigate {
+                tab,
+                url: url("https://b.example/"),
+            },
+        );
+        dispatch(&mut b, &Command::ToggleBookmark(tab));
+        assert_eq!(
+            b.bookmarks.find(&url("https://b.example/")).unwrap().0,
+            "Work"
+        );
+        // Nothing to bookmark on a blank page.
+        dispatch(
+            &mut b,
+            &Command::Navigate {
+                tab,
+                url: url("about:blank"),
+            },
+        );
+        assert!(dispatch(&mut b, &Command::ToggleBookmark(tab)).is_empty());
+    }
+
+    #[test]
+    fn editing_a_bookmark_moves_it_and_remembers_the_group() {
+        let (mut b, _, tab) = one_window();
+        dispatch(&mut b, &Command::ToggleBookmark(tab));
+        let actions = dispatch(
+            &mut b,
+            &Command::EditBookmark {
+                url: url("https://a.example/"),
+                title: "Renamed".to_string(),
+                group: "Work".to_string(),
+            },
+        );
+        assert_eq!(
+            actions,
+            vec![EngineAction::SaveBookmarks, EngineAction::SaveSettings]
+        );
+        let (group, bookmark) = b.bookmarks.find(&url("https://a.example/")).unwrap();
+        assert_eq!((group, bookmark.title.as_str()), ("Work", "Renamed"));
+        assert_eq!(b.settings.last_bookmark_group, "Work");
+        // The same group again: the settings are left alone.
+        let actions = dispatch(
+            &mut b,
+            &Command::EditBookmark {
+                url: url("https://a.example/"),
+                title: "Renamed again".to_string(),
+                group: "Work".to_string(),
+            },
+        );
+        assert_eq!(actions, vec![EngineAction::SaveBookmarks]);
+        assert_eq!(
+            dispatch(&mut b, &Command::RemoveBookmark(url("https://a.example/"))),
+            vec![EngineAction::SaveBookmarks]
+        );
+        assert!(dispatch(&mut b, &Command::RemoveBookmark(url("https://a.example/"))).is_empty());
+        // A chip's Edit… for a page that is not bookmarked asks nothing.
+        let (_, window, _) = one_window();
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::PromptEditBookmark {
+                    window,
+                    url: url("https://a.example/")
+                }
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn groups_are_renamed_deleted_and_reordered_through_prompts() {
+        let (mut b, window, tab) = one_window();
+        b.settings.last_bookmark_group = "Work".to_string();
+        dispatch(&mut b, &Command::ToggleBookmark(tab));
+        assert_eq!(
+            dispatch(
+                &mut b,
+                &Command::PromptRenameBookmarkGroup {
+                    window,
+                    group: "Work".to_string()
+                }
+            ),
+            vec![EngineAction::ShowPrompt {
+                window,
+                prompt: Prompt::RenameBookmarkGroup {
+                    group: "Work".to_string()
+                }
+            }]
+        );
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::PromptRenameBookmarkGroup {
+                    window,
+                    group: "Nope".to_string()
+                }
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            dispatch(
+                &mut b,
+                &Command::RenameBookmarkGroup {
+                    group: "Work".to_string(),
+                    name: "Office".to_string()
+                }
+            ),
+            vec![EngineAction::SaveBookmarks, EngineAction::SaveSettings]
+        );
+        assert_eq!(b.settings.last_bookmark_group, "Office");
+        assert_eq!(
+            dispatch(
+                &mut b,
+                &Command::PromptDeleteBookmarkGroup {
+                    window,
+                    group: "Office".to_string()
+                }
+            ),
+            vec![EngineAction::ShowPrompt {
+                window,
+                prompt: Prompt::DeleteBookmarkGroup {
+                    group: "Office".to_string(),
+                    count: 1
+                }
+            }]
+        );
+        b.bookmarks.add(
+            "Office",
+            vec![Bookmark {
+                title: "B".to_string(),
+                url: url("https://b.example/"),
+            }],
+        );
+        assert_eq!(
+            dispatch(
+                &mut b,
+                &Command::MoveBookmark {
+                    group: "Office".to_string(),
+                    from: 1,
+                    to: 0
+                }
+            ),
+            vec![EngineAction::SaveBookmarks]
+        );
+        assert_eq!(b.bookmarks.group("Office").unwrap().bookmarks[0].title, "B");
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::MoveBookmark {
+                    group: "Office".to_string(),
+                    from: 0,
+                    to: 1
+                }
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            dispatch(&mut b, &Command::DeleteBookmarkGroup("Office".to_string())),
+            vec![EngineAction::SaveBookmarks]
+        );
+        assert!(b.bookmarks.is_empty());
+    }
+
+    #[test]
+    fn the_bar_toggles_and_files_import_and_export() {
+        let mut b = browser();
+        assert!(!b.settings.show_bookmarks_bar);
+        assert_eq!(
+            dispatch(&mut b, &Command::ToggleBookmarksBar),
+            vec![EngineAction::SaveSettings]
+        );
+        assert!(b.settings.show_bookmarks_bar);
+        assert_eq!(
+            dispatch(&mut b, &Command::PickBookmarksFile(BookmarksFile::Import)),
+            vec![EngineAction::PickFile(BookmarksFile::Import)]
+        );
+        let html = "<DL><p><DT><A HREF=\"https://x.example/\">X</A></DL>";
+        assert_eq!(
+            dispatch(
+                &mut b,
+                &Command::ImportBookmarks {
+                    text: html.to_string(),
+                    source: "chrome.html".to_string()
+                }
+            ),
+            vec![EngineAction::SaveBookmarks]
+        );
+        assert_eq!(
+            b.bookmarks.find(&url("https://x.example/")).unwrap().0,
+            "Imported from chrome.html"
+        );
+        // Importing the same file again adds nothing and saves nothing.
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::ImportBookmarks {
+                    text: html.to_string(),
+                    source: "chrome.html".to_string()
+                }
+            )
+            .is_empty()
+        );
+        let path = PathBuf::from("out.html");
+        assert_eq!(
+            dispatch(&mut b, &Command::ExportBookmarks(path.clone())),
+            vec![EngineAction::ExportBookmarks(path)]
+        );
+        assert!(Command::ToggleBookmark(TabId(1)).changes_bookmarks());
+        assert!(
+            Command::ImportBookmarks {
+                text: String::new(),
+                source: String::new()
+            }
+            .changes_bookmarks()
+        );
+        assert!(!Command::ToggleBookmarksBar.changes_bookmarks());
+        assert!(!Command::PickBookmarksFile(BookmarksFile::Export).changes_bookmarks());
+    }
+
     fn window_with_tabs(n: usize) -> (Browser, WindowId, Vec<TabId>) {
         let (mut b, window, first) = one_window();
         let mut tabs = vec![first];
@@ -2667,7 +3180,7 @@ mod tests {
                 group: String::new(),
             },
         );
-        assert!(b.bookmarks.group("Bookmarks").is_some());
+        assert!(b.bookmarks.group(Bookmarks::BAR).is_some());
 
         // Opening the group makes a tab per page, the last one active.
         let before = order(&b, window).len();
