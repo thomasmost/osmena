@@ -6,6 +6,31 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- Downloads. `Browser::downloads` (`Downloads`, `Download`,
+  `DownloadId`, `DownloadState`; `downloads.toml` in the profile,
+  `Profile::downloads_path`, the newest 200 finished ones kept) is fed
+  by `EngineEvent::DownloadUpdated` (the engine's id and a
+  `DownloadReport`), folded by `apply`, which asks `SaveDownloads` only
+  when a state changes. `Command::{ToggleDownloads, CancelDownload,
+  PauseDownload, ResumeDownload, RetryDownload, OpenDownload,
+  RevealDownload, RemoveDownload, ClearDownloads, OpenDownloadsFolder,
+  PickDownloadsDirectory, SetDownloadsDirectory, ForceQuit}`;
+  `CommandKind::Downloads` (`Ctrl+J`; `Cmd+Shift+J` on macOS);
+  `EngineAction::{ToggleDownloads, CancelDownload, PauseDownload,
+  ResumeDownload, StartDownload, OpenPath, RevealPath,
+  OpenDownloadsFolder, SaveDownloads, PickFolder}`;
+  `Prompt::QuitWithDownloads` (quitting, or closing the last window or
+  tab, with downloads going asks first; `Browser::quit_confirmed`).
+  `Settings::downloads` (`DownloadSettings`: the directory, `None` for
+  the system's Downloads folder, and `ask_where_to_save`), shown in a
+  Downloads section of the settings window with the system's folder
+  dialog. The engine contract: `EngineInfo::downloads`,
+  `Engine::{configure_downloads, cancel_download, pause_download,
+  resume_download}` (`DownloadPolicy`), `TabHost::start_download`, all
+  defaulted. The chrome: a downloads button at the toolbar's right end
+  with a progress ring and a popover (`ChromeContext::downloads`); the
+  ☰ menu's Downloads entry and the macOS Window menu's.
+  `download::{describe_bytes, describe_download, system_downloads_dir}`.
 - Page zoom. `Tab::zoom` (percent) is set by `Command::{ZoomIn,
   ZoomOut, ZoomReset, SetZoom}` (`CommandKind::{ZoomIn, ZoomOut,
   ZoomReset}`: `Ctrl+Equal` or `Ctrl+NumpadAdd`, `Ctrl+Minus` or
@@ -80,8 +105,11 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
-- `EngineInfo` has a new field, `find`; `menus::window_menu` takes
-  `can_find` and `MenuBarInput` has `can_find`.
+- `EngineInfo` has new fields, `find` and `downloads`;
+  `menus::window_menu` takes `can_find` and `can_download` and
+  `MenuBarInput` has both; `SettingsWindow::handle_event` takes whether
+  the engine downloads. An engine that reported a download's progress
+  as status text should report `EngineEvent::DownloadUpdated` instead.
 - `menus::window_menu` and `MenuBarInput` take a `BookmarksMenu` (the
   bookmarks and whether the bar is shown) in place of `&Bookmarks`; the
   Bookmarks submenu is always enabled, since it holds the actions.

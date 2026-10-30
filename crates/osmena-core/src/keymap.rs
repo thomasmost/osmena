@@ -140,6 +140,7 @@ pub enum CommandKind {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    Downloads,
     BookmarkPage,
     ToggleBookmarksBar,
     NewWindow,
@@ -152,7 +153,7 @@ pub enum CommandKind {
 impl CommandKind {
     /// Every kind, in the order the settings window lists them. Used to
     /// check that the defaults bind each one and to write the keymap file.
-    pub const ALL: [CommandKind; 33] = [
+    pub const ALL: [CommandKind; 34] = [
         CommandKind::NewTab,
         CommandKind::CloseTab,
         CommandKind::ReopenClosedTab,
@@ -179,6 +180,7 @@ impl CommandKind {
         CommandKind::ZoomIn,
         CommandKind::ZoomOut,
         CommandKind::ZoomReset,
+        CommandKind::Downloads,
         CommandKind::BookmarkPage,
         CommandKind::ToggleBookmarksBar,
         CommandKind::NewWindow,
@@ -210,6 +212,7 @@ impl CommandKind {
             CommandKind::ZoomIn => "zoom-in".to_string(),
             CommandKind::ZoomOut => "zoom-out".to_string(),
             CommandKind::ZoomReset => "zoom-reset".to_string(),
+            CommandKind::Downloads => "downloads".to_string(),
             CommandKind::BookmarkPage => "bookmark-page".to_string(),
             CommandKind::ToggleBookmarksBar => "toggle-bookmarks-bar".to_string(),
             CommandKind::NewWindow => "new-window".to_string(),
@@ -247,6 +250,7 @@ impl CommandKind {
             CommandKind::ZoomIn => "Zoom in".to_string(),
             CommandKind::ZoomOut => "Zoom out".to_string(),
             CommandKind::ZoomReset => "Actual size".to_string(),
+            CommandKind::Downloads => "Downloads".to_string(),
             CommandKind::BookmarkPage => "Bookmark this page".to_string(),
             CommandKind::ToggleBookmarksBar => "Show bookmarks bar".to_string(),
             CommandKind::NewWindow => "New window".to_string(),
@@ -281,6 +285,7 @@ impl CommandKind {
             CommandKind::ZoomIn => Command::ZoomIn(tab),
             CommandKind::ZoomOut => Command::ZoomOut(tab),
             CommandKind::ZoomReset => Command::ZoomReset(tab),
+            CommandKind::Downloads => Command::ToggleDownloads(window),
             CommandKind::BookmarkPage => Command::ToggleBookmark(tab),
             CommandKind::ToggleBookmarksBar => Command::ToggleBookmarksBar,
             CommandKind::NewWindow => Command::NewWindow,
@@ -405,6 +410,7 @@ impl Keymap {
         bind(primary, Code::KeyQ, CommandKind::Quit);
         match platform {
             Platform::MacOs => {
+                bind(shift, Code::KeyJ, CommandKind::Downloads);
                 bind(shift, Code::BracketRight, CommandKind::NextTab);
                 bind(shift, Code::BracketLeft, CommandKind::PreviousTab);
                 // Not Cmd+Arrow: those move the caret to line start and
@@ -419,6 +425,7 @@ impl Keymap {
                 );
             }
             Platform::Windows => {
+                bind(primary, Code::KeyJ, CommandKind::Downloads);
                 bind(primary, Code::F4, CommandKind::CloseTab);
                 bind(primary, Code::PageDown, CommandKind::NextTab);
                 bind(primary, Code::PageUp, CommandKind::PreviousTab);

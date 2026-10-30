@@ -20,6 +20,8 @@ use osmena_core::{
 };
 use url::{ParseError, Url};
 
+use osmena_core::download::{DownloadState, Downloads, describe_download};
+
 use crate::menus::bookmark_label;
 use crate::theme;
 
@@ -77,6 +79,11 @@ const BOOKMARK_POPOVER_WIDTH: f32 = 340.0;
 /// corner.
 const FIND_FIELD_WIDTH: f32 = 220.0;
 const FIND_BAR_INSET: f32 = 12.0;
+/// The downloads popover: its width, how many rows it shows before
+/// scrolling, and the widest file name drawn in a row.
+const DOWNLOADS_POPOVER_WIDTH: f32 = 400.0;
+const DOWNLOADS_LIST_HEIGHT: f32 = 380.0;
+const DOWNLOAD_NAME_MAX_CHARS: usize = 44;
 /// The toolbar's avatar button: the disc inside it, and the discs the
 /// profile dialog offers.
 const AVATAR_RADIUS: f32 = 10.0;
@@ -247,6 +254,10 @@ pub struct ChromeState {
     /// Whether the find bar was drawn last frame, so opening it syncs the
     /// field from the model.
     find_shown: bool,
+    /// The downloads popover is open under the toolbar's button.
+    pub downloads_open: bool,
+    /// Where the downloads button was in the last frame.
+    downloads_rect: Option<Rect>,
 }
 
 /// The address bar's suggestions: what the user typed (the field shows
@@ -325,7 +336,8 @@ impl ChromeState {
             Prompt::MoveToFolder { suggested, .. } => suggested.clone(),
             Prompt::BookmarkTabs { .. }
             | Prompt::DeleteProfile { .. }
-            | Prompt::DeleteBookmarkGroup { .. } => String::new(),
+            | Prompt::DeleteBookmarkGroup { .. }
+            | Prompt::QuitWithDownloads { .. } => String::new(),
             Prompt::RenameFolder { name, .. } => name.clone(),
             Prompt::Profile { form, .. } => form.name.clone(),
             Prompt::Bookmark { title, .. } => title.clone(),
@@ -482,6 +494,9 @@ pub struct ChromeContext<'a> {
     /// The default zoom level (`Settings::page_zoom`): the zoom chip
     /// shows when the page's differs.
     pub page_zoom: u16,
+    /// What is being and was downloaded: the toolbar button and its
+    /// popover, when the engine downloads (`EngineInfo::downloads`).
+    pub downloads: &'a Downloads,
 }
 
 /// Something the chrome asks of the native window, recorded while drawing
@@ -760,6 +775,15 @@ pub fn draw(
                     {
                         commands.push(Command::InstallUpdate);
                     }
+                    state.downloads_rect = None;
+                    if engine.downloads && !context.downloads.is_empty() {
+                        let button = downloads_button(ui, &palette, window, context.downloads)
+                            .on_hover_text(hint(keymap, CommandKind::Downloads, "Downloads"));
+                        state.downloads_rect = Some(button.rect);
+                        if button.clicked() {
+                            state.downloads_open = !state.downloads_open;
+                        }
+                    }
                     if engine.extensions.is_some() {
                         let puzzle =
                             puzzle_button(ui, &palette, window).on_hover_text("Extensions");
@@ -881,6 +905,7 @@ pub fn draw(
         });
 
     commands.extend(find_bar(ui, window, state, keymap));
+    commands.extend(draw_downloads(ui, window, context, state));
 
     if show_bookmarks_bar {
         let bar_frame = Frame::new().fill(palette.toolbar).inner_margin(Margin {
@@ -1816,6 +1841,7 @@ fn draw_prompt(
         Some(Prompt::DeleteProfile { .. }) => return draw_delete_profile_prompt(ui, state),
         Some(Prompt::Bookmark { .. }) => return draw_bookmark_prompt(ui, state),
         Some(Prompt::DeleteBookmarkGroup { .. }) => return draw_delete_group_prompt(ui, state),
+        Some(Prompt::QuitWithDownloads { .. }) => return draw_quit_prompt(ui, state),
         Some(_) => {}
     }
     let Some(prompt) = state.prompt.as_mut() else {
@@ -1840,7 +1866,8 @@ fn draw_prompt(
             Prompt::Profile { .. }
             | Prompt::DeleteProfile { .. }
             | Prompt::Bookmark { .. }
-            | Prompt::DeleteBookmarkGroup { .. } => return Vec::new(),
+            | Prompt::DeleteBookmarkGroup { .. }
+            | Prompt::QuitWithDownloads { .. } => return Vec::new(),
         };
     let mut answered = false;
     let mut cancelled = false;
@@ -1958,7 +1985,8 @@ fn draw_prompt(
         Prompt::Profile { .. }
         | Prompt::DeleteProfile { .. }
         | Prompt::Bookmark { .. }
-        | Prompt::DeleteBookmarkGroup { .. } => Vec::new(),
+        | Prompt::DeleteBookmarkGroup { .. }
+        | Prompt::QuitWithDownloads { .. } => Vec::new(),
     }
 }
 
@@ -2350,6 +2378,299 @@ fn draw_delete_group_prompt(ui: &mut Ui, state: &mut ChromeState) -> Vec<Command
         }
     }
     Vec::new()
+}
+
+/// "Downloads are still going. Quit anyway?", answered with
+/// `Command::ForceQuit`.
+fn draw_quit_prompt(ui: &mut Ui, state: &mut ChromeState) -> Vec<Command> {
+    let Some(prompt) = state.prompt.as_ref() else {
+        return Vec::new();
+    };
+    let Prompt::QuitWithDownloads { count } = &prompt.prompt else {
+        return Vec::new();
+    };
+    let mut confirmed = false;
+    let mut cancelled = false;
+    egui::Window::new("Quit")
+        .id(Id::new("chrome-prompt"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_TOP, Vec2::new(0.0, 80.0))
+        .show(ui.ctx(), |ui| {
+            ui.set_min_width(320.0);
+            ui.set_max_width(420.0);
+            let what = if *count == 1 {
+                "A download is still going".to_string()
+            } else {
+                format!("{count} downloads are still going")
+            };
+            ui.label(format!("{what}. Quitting cancels it. Quit anyway?"));
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                let danger = ui.visuals().error_fg_color;
+                if ui
+                    .add(Button::new(RichText::new("Quit").color(danger)))
+                    .clicked()
+                {
+                    confirmed = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancelled = true;
+                }
+            });
+            if ui.input(|i| i.key_pressed(Key::Escape)) {
+                cancelled = true;
+            }
+        });
+    if cancelled || confirmed {
+        state.prompt = None;
+        if confirmed {
+            return vec![Command::ForceQuit];
+        }
+    }
+    Vec::new()
+}
+
+/// The toolbar's downloads button: an arrow into a tray, with a ring
+/// around it that fills as the downloads in progress do.
+fn downloads_button(
+    ui: &mut Ui,
+    palette: &Palette,
+    window: &Window,
+    downloads: &Downloads,
+) -> egui::Response {
+    let id = Id::new(("downloads", window.id));
+    let (rect, response, _) = icon_button_rect(ui, palette, id);
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let ink = ui.visuals().text_color();
+        let weak = ui.visuals().weak_text_color();
+        let c = rect.center();
+        // The arrow.
+        let stroke = Stroke::new(1.6_f32, ink);
+        painter.line_segment(
+            [Pos2::new(c.x, c.y - 6.0), Pos2::new(c.x, c.y + 2.5)],
+            stroke,
+        );
+        painter.line_segment(
+            [Pos2::new(c.x - 3.5, c.y - 1.0), Pos2::new(c.x, c.y + 2.5)],
+            stroke,
+        );
+        painter.line_segment(
+            [Pos2::new(c.x + 3.5, c.y - 1.0), Pos2::new(c.x, c.y + 2.5)],
+            stroke,
+        );
+        // The tray.
+        painter.line_segment(
+            [
+                Pos2::new(c.x - 6.0, c.y + 6.0),
+                Pos2::new(c.x + 6.0, c.y + 6.0),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                Pos2::new(c.x - 6.0, c.y + 3.5),
+                Pos2::new(c.x - 6.0, c.y + 6.0),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                Pos2::new(c.x + 6.0, c.y + 3.5),
+                Pos2::new(c.x + 6.0, c.y + 6.0),
+            ],
+            stroke,
+        );
+        // The ring, while anything is going.
+        if downloads.active() > 0 {
+            let radius = ACTION_SIZE / 2.0 - 1.0;
+            painter.circle_stroke(c, radius, Stroke::new(1.5_f32, weak));
+            if let Some(progress) = downloads.active_progress() {
+                let steps = 48;
+                let end = (progress * steps as f32).round() as usize;
+                if end > 0 {
+                    let points: Vec<Pos2> = (0..=end.min(steps))
+                        .map(|i| {
+                            let angle = -std::f32::consts::FRAC_PI_2
+                                + i as f32 / steps as f32 * std::f32::consts::TAU;
+                            Pos2::new(c.x + radius * angle.cos(), c.y + radius * angle.sin())
+                        })
+                        .collect();
+                    painter.add(egui::Shape::line(points, Stroke::new(2.0_f32, ink)));
+                }
+            }
+        }
+    }
+    response
+}
+
+/// The downloads popover under the toolbar's button: a row per
+/// download, newest first, with what fits its state (pause, resume and
+/// cancel while it goes; open and show in folder when done; retry
+/// otherwise; forget), and "Clear all" and "Open folder" below. Escape,
+/// ×, and a click outside close it.
+fn draw_downloads(
+    ui: &mut Ui,
+    window: &Window,
+    context: &ChromeContext<'_>,
+    state: &mut ChromeState,
+) -> Vec<Command> {
+    if !state.downloads_open {
+        return Vec::new();
+    }
+    let downloads = context.downloads;
+    if downloads.is_empty() || !context.engine.downloads {
+        state.downloads_open = false;
+        return Vec::new();
+    }
+    let ctx = ui.ctx().clone();
+    let content = ctx.content_rect();
+    let position = match state.downloads_rect {
+        Some(rect) => Pos2::new(
+            (rect.right() - DOWNLOADS_POPOVER_WIDTH).max(content.left() + 8.0),
+            rect.bottom() + 6.0,
+        ),
+        None => Pos2::new(
+            content.center().x - DOWNLOADS_POPOVER_WIDTH / 2.0,
+            content.top() + 80.0,
+        ),
+    };
+    let mut commands = Vec::new();
+    let mut close = false;
+    let shown = egui::Window::new("Downloads")
+        .id(Id::new("downloads-popover"))
+        .title_bar(false)
+        .collapsible(false)
+        .resizable(false)
+        .fixed_pos(position)
+        .default_width(DOWNLOADS_POPOVER_WIDTH)
+        .show(&ctx, |ui| {
+            ui.set_min_width(DOWNLOADS_POPOVER_WIDTH - 24.0);
+            ui.set_max_width(DOWNLOADS_POPOVER_WIDTH - 24.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Downloads").family(FontFamily::Name(theme::MEDIUM.into())));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("×").on_hover_text("Close (Esc)").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical()
+                .max_height(DOWNLOADS_LIST_HEIGHT)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for download in downloads.recent() {
+                        download_row(ui, window, download, &mut commands);
+                    }
+                });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let finished = downloads.items().iter().any(|d| !d.state.is_active());
+                if ui
+                    .add_enabled(finished, Button::new("Clear all"))
+                    .on_hover_text("Forget the finished downloads")
+                    .clicked()
+                {
+                    commands.push(Command::ClearDownloads);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Open folder").clicked() {
+                        commands.push(Command::OpenDownloadsFolder);
+                    }
+                });
+            });
+            if ui.input(|i| i.key_pressed(Key::Escape)) {
+                close = true;
+            }
+        });
+    let button = state.downloads_rect;
+    let pressed_outside = ctx.input(|i| {
+        i.pointer.any_pressed()
+            && i.pointer.interact_pos().is_some_and(|p| {
+                !shown.as_ref().is_some_and(|s| s.response.rect.contains(p))
+                    && !button.is_some_and(|b| b.contains(p))
+            })
+    });
+    if pressed_outside {
+        close = true;
+    }
+    if close {
+        state.downloads_open = false;
+    }
+    commands
+}
+
+/// One download in the popover: its name over its state, a progress bar
+/// while it goes, and the buttons for its state at the right.
+fn download_row(
+    ui: &mut Ui,
+    window: &Window,
+    download: &osmena_core::Download,
+    commands: &mut Vec<Command>,
+) {
+    let id = download.id;
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.set_width(DOWNLOADS_POPOVER_WIDTH - 24.0 - 150.0);
+            let name = truncate(&download.name, DOWNLOAD_NAME_MAX_CHARS);
+            let name_label = ui.add(egui::Label::new(RichText::new(name).strong()).truncate());
+            if download.state == DownloadState::Complete && name_label.clicked() {
+                commands.push(Command::OpenDownload(id));
+            }
+            ui.label(RichText::new(describe_download(download)).small().weak());
+            if download.state.is_active()
+                && let Some(progress) = download.progress()
+            {
+                ui.add(egui::ProgressBar::new(progress).desired_height(4.0));
+            }
+        });
+        ui.with_layout(
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| match &download.state {
+                DownloadState::InProgress => {
+                    if ui.small_button("Cancel").clicked() {
+                        commands.push(Command::CancelDownload(id));
+                    }
+                    if ui.small_button("Pause").clicked() {
+                        commands.push(Command::PauseDownload(id));
+                    }
+                }
+                DownloadState::Paused => {
+                    if ui.small_button("Cancel").clicked() {
+                        commands.push(Command::CancelDownload(id));
+                    }
+                    if ui.small_button("Resume").clicked() {
+                        commands.push(Command::ResumeDownload(id));
+                    }
+                }
+                DownloadState::Complete => {
+                    if ui.small_button("×").on_hover_text("Forget").clicked() {
+                        commands.push(Command::RemoveDownload(id));
+                    }
+                    if ui.small_button("Show in folder").clicked() {
+                        commands.push(Command::RevealDownload(id));
+                    }
+                    if ui.small_button("Open").clicked() {
+                        commands.push(Command::OpenDownload(id));
+                    }
+                }
+                DownloadState::Cancelled | DownloadState::Interrupted(_) => {
+                    if ui.small_button("×").on_hover_text("Forget").clicked() {
+                        commands.push(Command::RemoveDownload(id));
+                    }
+                    if ui.small_button("Retry").clicked() {
+                        commands.push(Command::RetryDownload {
+                            window: window.id,
+                            id,
+                        });
+                    }
+                }
+            },
+        );
+    });
+    ui.separator();
 }
 
 /// The bookmarks bar under the toolbar: the bar group's bookmarks as

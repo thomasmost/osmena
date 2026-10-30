@@ -23,6 +23,7 @@ use osmena_core::{
 use osmena_engine::{
     BlitRect, Engine, EngineError, PagePaint, PhysicalSize, ScreenRect, Surface, TabHost,
 };
+use url::Url;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
@@ -231,6 +232,15 @@ impl<E: Engine> BrowserWindow<E> {
 
     pub fn set_zoom(&self, tab: TabId, percent: u16) {
         self.host.set_zoom(tab, percent);
+    }
+
+    pub fn toggle_downloads(&mut self) {
+        self.chrome.downloads_open = !self.chrome.downloads_open;
+        self.window.request_redraw();
+    }
+
+    pub fn start_download(&self, tab: TabId, url: Url) {
+        self.host.start_download(tab, url);
     }
 
     pub fn stop_finding(&self, tab: TabId, clear_selection: bool) {
@@ -667,7 +677,10 @@ impl<E: Engine> BrowserWindow<E> {
             }
             WindowEvent::KeyboardInput { event: key, .. } => {
                 let key_input = keyutils::key_input_from_winit(key, self.modifiers);
-                let egui_wants_keyboard = self.egui.egui_ctx.egui_wants_keyboard_input();
+                // The downloads popover has no field to hold the focus,
+                // but its Escape is egui's all the same.
+                let egui_wants_keyboard =
+                    self.egui.egui_ctx.egui_wants_keyboard_input() || self.chrome.downloads_open;
                 let stroke = KeyStroke {
                     code: key_input.code,
                     modifiers: key_input.modifiers,
@@ -867,6 +880,7 @@ impl<E: Engine> BrowserWindow<E> {
                 show_bookmarks_bar: browser.settings.show_bookmarks_bar,
                 site_icons,
                 page_zoom: browser.settings.page_zoom,
+                downloads: &browser.downloads,
             };
             commands = chrome::draw(ui, model, &context, chrome_state, keymap);
             let rect = ui.available_rect_before_wrap();
@@ -1022,6 +1036,7 @@ impl<E: Engine> BrowserWindow<E> {
                     keymap,
                     !browser.closed_tabs.is_empty(),
                     self.engine_info.find,
+                    self.engine_info.downloads,
                     menus::BookmarksMenu {
                         bookmarks: &browser.bookmarks,
                         bar_shown: browser.settings.show_bookmarks_bar,

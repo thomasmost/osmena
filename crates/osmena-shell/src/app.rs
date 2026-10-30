@@ -9,9 +9,9 @@ use osmena_chrome::fatal::report_fatal;
 use osmena_chrome::{icon, menus, native_menu};
 use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
-    Bookmarks, BookmarksFile, Brand, Browser, Command, CommandKind, EngineAction, EngineEvent,
-    EngineInfo, ExtensionSource, InstalledExtensions, Keymap, PageCommand, Profile, TabId,
-    UpdateStatus, WindowId, apply, bookmarks_html, dispatch,
+    Bookmarks, BookmarksFile, Brand, Browser, Command, CommandKind, DownloadPolicy, EngineAction,
+    EngineEvent, EngineInfo, ExtensionSource, InstalledExtensions, Keymap, PageCommand, Profile,
+    TabId, UpdateStatus, WindowId, apply, bookmarks_html, dispatch,
 };
 use osmena_engine::{Engine, TabHost, Waker};
 use url::Url;
@@ -431,6 +431,7 @@ impl<E: Engine> App<E> {
             keymap: &self.keymap,
             can_reopen: !self.browser.closed_tabs.is_empty(),
             can_find: self.engine_info.find,
+            can_download: self.engine_info.downloads,
             bookmarks: menus::BookmarksMenu {
                 bookmarks: &self.browser.bookmarks,
                 bar_shown: self.browser.settings.show_bookmarks_bar,
@@ -667,6 +668,62 @@ impl<E: Engine> App<E> {
                 let path = self.browser.profile.zoom_path();
                 if let Err(e) = self.browser.zoom.save(&path) {
                     log::error!("cannot save the zoom levels to {}: {e}", path.display());
+                }
+            }
+            EngineAction::ToggleDownloads(window) => {
+                if let Some(w) = self.window_for_core_id(window) {
+                    w.toggle_downloads();
+                }
+            }
+            EngineAction::CancelDownload(id) => {
+                if let Some(engine) = &self.engine {
+                    engine.cancel_download(id);
+                }
+            }
+            EngineAction::PauseDownload(id) => {
+                if let Some(engine) = &self.engine {
+                    engine.pause_download(id);
+                }
+            }
+            EngineAction::ResumeDownload(id) => {
+                if let Some(engine) = &self.engine {
+                    engine.resume_download(id);
+                }
+            }
+            EngineAction::StartDownload { tab, url } => {
+                if let Some(w) = self.window_for_tab(tab) {
+                    w.start_download(tab, url);
+                }
+            }
+            EngineAction::OpenPath(path) => {
+                if let Err(e) = open_path(&path) {
+                    self.report_error(format!("cannot open {}: {e}", path.display()), event_loop);
+                }
+            }
+            EngineAction::RevealPath(path) => {
+                if let Err(e) = reveal_path(&path) {
+                    self.report_error(format!("cannot show {}: {e}", path.display()), event_loop);
+                }
+            }
+            EngineAction::OpenDownloadsFolder => {
+                let dir = self.download_policy().directory;
+                let _ = std::fs::create_dir_all(&dir);
+                if let Err(e) = open_path(&dir) {
+                    self.report_error(format!("cannot open {}: {e}", dir.display()), event_loop);
+                }
+            }
+            EngineAction::SaveDownloads => {
+                self.save_downloads();
+                self.redraw_all();
+            }
+            EngineAction::PickFolder => {
+                let dialog = rfd::FileDialog::new().set_title("Downloads folder");
+                let dialog = match &self.browser.settings.downloads.directory {
+                    Some(dir) => dialog.set_directory(dir),
+                    None => dialog,
+                };
+                if let Some(dir) = dialog.pick_folder() {
+                    self.run_commands(vec![Command::SetDownloadsDirectory(Some(dir))], event_loop);
                 }
             }
             EngineAction::SetFullscreen { window, fullscreen } => {
@@ -995,8 +1052,42 @@ impl<E: Engine> App<E> {
 
     /// Settings changed in the settings window: persist them and apply
     /// what the open windows show.
+    /// Where downloads go: the setting, else the system's Downloads
+    /// folder, else a folder in the profile.
+    fn download_policy(&self) -> DownloadPolicy {
+        let settings = &self.browser.settings.downloads;
+        let directory = settings
+            .directory
+            .clone()
+            .or_else(osmena_core::system_downloads_dir)
+            .unwrap_or_else(|| {
+                self.browser
+                    .profile
+                    .downloads_path()
+                    .parent()
+                    .map(|p| p.join("downloads"))
+                    .unwrap_or_else(std::env::temp_dir)
+            });
+        DownloadPolicy {
+            directory,
+            ask: settings.ask_where_to_save,
+        }
+    }
+
+    fn save_downloads(&self) {
+        let path = self.browser.profile.downloads_path();
+        if let Err(e) = self.browser.downloads.save(&path) {
+            log::error!("cannot save the downloads list to {}: {e}", path.display());
+        }
+    }
+
     fn settings_changed(&mut self) {
         self.save_settings();
+        if self.engine_info.downloads
+            && let Some(engine) = &self.engine
+        {
+            engine.configure_downloads(self.download_policy());
+        }
         // A new default zoom reaches the pages without a level of their
         // own.
         let zoomed = osmena_core::command::apply_default_zoom(&mut self.browser);
@@ -1081,6 +1172,52 @@ fn bookmarked_hosts(bookmarks: &Bookmarks) -> impl Iterator<Item = String> + '_ 
     bookmarks.all().filter_map(|b| Bookmarks::site_key(&b.url))
 }
 
+/// Open a file (or folder) with the system's default application.
+fn open_path(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let mut command = {
+        let mut c = std::process::Command::new("explorer");
+        c.arg(path);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut c = std::process::Command::new("open");
+        c.arg(path);
+        c
+    };
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let mut command = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path);
+        c
+    };
+    command.spawn().map(|_| ())
+}
+
+/// Show a file selected in the system's file manager.
+fn reveal_path(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let mut command = {
+        let mut c = std::process::Command::new("explorer");
+        c.arg(format!("/select,{}", path.display()));
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    };
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let mut command = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path.parent().unwrap_or(path));
+        c
+    };
+    command.spawn().map(|_| ())
+}
+
 fn tab_of(event: &EngineEvent) -> Option<TabId> {
     match event {
         EngineEvent::UrlChanged { tab, .. }
@@ -1100,7 +1237,8 @@ fn tab_of(event: &EngineEvent) -> Option<TabId> {
         EngineEvent::CursorChanged { .. }
         | EngineEvent::ClipboardImage(_)
         | EngineEvent::EngineError(_)
-        | EngineEvent::ExtensionsChanged(_) => None,
+        | EngineEvent::ExtensionsChanged(_)
+        | EngineEvent::DownloadUpdated { .. } => None,
     }
 }
 
@@ -1112,7 +1250,12 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
             };
             let waker: Arc<dyn Waker> = self.waker.clone();
             match start_engine(&self.browser.profile.engine_dir, waker) {
-                Ok(engine) => self.engine = Some(engine),
+                Ok(engine) => {
+                    if self.engine_info.downloads {
+                        engine.configure_downloads(self.download_policy());
+                    }
+                    self.engine = Some(engine);
+                }
                 Err(e) => {
                     report_fatal(
                         self.brand,
@@ -1177,6 +1320,7 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
                 self.engine_info.extensions.as_ref(),
                 &self.browser.update,
                 self.brand.can_update(),
+                self.engine_info.downloads,
             );
             let commands = sw.take_commands();
             match outcome {
@@ -1301,6 +1445,14 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.exiting = true;
         self.save_history();
+        // What was still downloading is cut short with the engine.
+        if self
+            .browser
+            .downloads
+            .interrupt_active("The browser closed", osmena_core::history::unix_now())
+        {
+            self.save_downloads();
+        }
         self.close_settings_window();
         self.windows.clear();
         self.engine = None;

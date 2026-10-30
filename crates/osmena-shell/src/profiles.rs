@@ -123,6 +123,7 @@ mod tests {
         data_dir: "engine",
         supports_stop: true,
         find: false,
+        downloads: false,
         wheel_line_px: 40.0,
         extensions: None,
         page_tools: PageTools::NONE,

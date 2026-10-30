@@ -6,6 +6,7 @@ use url::Url;
 
 use crate::bookmarks::{Bookmark, Bookmarks};
 use crate::bookmarks_html;
+use crate::download::{Download, DownloadId, DownloadState};
 use crate::event::PendingTab;
 use crate::extension::ExtensionSource;
 use crate::model::{
@@ -199,6 +200,33 @@ pub enum Command {
         tab: TabId,
         percent: u16,
     },
+    /// Show or hide `window`'s downloads popover (`Ctrl+J`).
+    ToggleDownloads(WindowId),
+    CancelDownload(DownloadId),
+    PauseDownload(DownloadId),
+    ResumeDownload(DownloadId),
+    /// Download the file again from its address, in `window`'s active
+    /// tab, in place of the old entry.
+    RetryDownload {
+        window: WindowId,
+        id: DownloadId,
+    },
+    /// Open the finished file with its default application.
+    OpenDownload(DownloadId),
+    /// Show the finished file in the system's file manager.
+    RevealDownload(DownloadId),
+    /// Forget a download that is not going.
+    RemoveDownload(DownloadId),
+    /// Forget every download that is not going.
+    ClearDownloads,
+    OpenDownloadsFolder,
+    /// Ask for the downloads directory with the system's folder dialog.
+    PickDownloadsDirectory,
+    /// Downloads go to `directory` from now on (`None`: the system's
+    /// Downloads folder).
+    SetDownloadsDirectory(Option<PathBuf>),
+    /// Quit although downloads are going (the confirmation's answer).
+    ForceQuit,
     NextTab(WindowId),
     PreviousTab(WindowId),
     /// Activate the tab at `index` in `window`'s strip; nothing if there
@@ -429,6 +457,10 @@ pub enum Prompt {
         group: String,
         count: usize,
     },
+    /// `count` downloads are still going: quit anyway?
+    QuitWithDownloads {
+        count: usize,
+    },
 }
 
 /// What the application must do after [`dispatch`] (or [`crate::apply`])
@@ -554,6 +586,29 @@ pub enum EngineAction {
     },
     /// The sites' zoom levels changed: persist them.
     SaveZoom,
+    /// Show or hide `window`'s downloads popover.
+    ToggleDownloads(WindowId),
+    /// To the engine, by its own id for the download.
+    CancelDownload(u32),
+    PauseDownload(u32),
+    ResumeDownload(u32),
+    /// Download `url` in `tab` (a retry).
+    StartDownload {
+        tab: TabId,
+        url: Url,
+    },
+    /// Open the file with its default application.
+    OpenPath(PathBuf),
+    /// Show the file in the system's file manager.
+    RevealPath(PathBuf),
+    /// Open the downloads directory in the file manager.
+    OpenDownloadsFolder,
+    /// The downloads list changed in a way worth keeping (a state, not
+    /// progress): persist it.
+    SaveDownloads,
+    /// Show the system's folder dialog for the downloads directory; the
+    /// answer is `Command::SetDownloadsDirectory`.
+    PickFolder,
     /// The history changed: persist it (the shell may wait a moment and
     /// save once for a run of changes).
     SaveHistory,
@@ -971,6 +1026,82 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             set_zoom(browser, *tab, default)
         }
         Command::SetZoom { tab, percent } => set_zoom(browser, *tab, *percent),
+        Command::ToggleDownloads(window) => {
+            if browser.window(*window).is_some() {
+                vec![EngineAction::ToggleDownloads(*window)]
+            } else {
+                Vec::new()
+            }
+        }
+        Command::CancelDownload(id) => engine_download(
+            browser,
+            *id,
+            |d| d.state.is_active(),
+            EngineAction::CancelDownload,
+        ),
+        Command::PauseDownload(id) => engine_download(
+            browser,
+            *id,
+            |d| d.state == DownloadState::InProgress,
+            EngineAction::PauseDownload,
+        ),
+        Command::ResumeDownload(id) => engine_download(
+            browser,
+            *id,
+            |d| d.state == DownloadState::Paused,
+            EngineAction::ResumeDownload,
+        ),
+        Command::RetryDownload { window, id } => {
+            let Some(tab) = browser.window(*window).map(|w| w.active) else {
+                return Vec::new();
+            };
+            let Some(url) = browser
+                .downloads
+                .get(*id)
+                .filter(|d| !d.state.is_active())
+                .map(|d| d.url.clone())
+            else {
+                return Vec::new();
+            };
+            browser.downloads.remove(*id);
+            vec![
+                EngineAction::SaveDownloads,
+                EngineAction::StartDownload { tab, url },
+            ]
+        }
+        Command::OpenDownload(id) => finished_path(browser, *id)
+            .map(|path| vec![EngineAction::OpenPath(path)])
+            .unwrap_or_default(),
+        Command::RevealDownload(id) => finished_path(browser, *id)
+            .map(|path| vec![EngineAction::RevealPath(path)])
+            .unwrap_or_default(),
+        Command::RemoveDownload(id) => {
+            if browser.downloads.remove(*id) {
+                vec![EngineAction::SaveDownloads]
+            } else {
+                Vec::new()
+            }
+        }
+        Command::ClearDownloads => {
+            if browser.downloads.clear_finished() {
+                vec![EngineAction::SaveDownloads]
+            } else {
+                Vec::new()
+            }
+        }
+        Command::OpenDownloadsFolder => vec![EngineAction::OpenDownloadsFolder],
+        Command::PickDownloadsDirectory => vec![EngineAction::PickFolder],
+        Command::SetDownloadsDirectory(directory) => {
+            if browser.settings.downloads.directory == *directory {
+                return Vec::new();
+            }
+            browser.settings.downloads.directory = directory.clone();
+            vec![EngineAction::SaveSettings]
+        }
+        Command::ForceQuit => {
+            browser.quit_confirmed = true;
+            vec![EngineAction::Quit]
+        }
         Command::PromptRenameFolder(folder) => {
             let Some(window) = browser.window_of_folder(*folder) else {
                 return Vec::new();
@@ -1060,6 +1191,12 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             open_window(browser, url)
         }
         Command::CloseWindow(window) => {
+            if browser.windows.len() == 1
+                && browser.window(*window).is_some()
+                && let Some(ask) = quit_guard(browser, Some(*window))
+            {
+                return ask;
+            }
             let tabs: Vec<TabId> = browser
                 .window(*window)
                 .map(|w| w.tabs.iter().map(|t| t.id).collect())
@@ -1156,8 +1293,46 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
         Command::ContextMenuClosed(tab) => {
             pass_through(browser, *tab, EngineAction::ContextMenuClosed(*tab))
         }
-        Command::Quit => vec![EngineAction::Quit],
+        Command::Quit => quit_guard(browser, None).unwrap_or_else(|| vec![EngineAction::Quit]),
     }
+}
+
+/// Pass a download command on to the engine when the download is in a
+/// state it applies to and the engine still knows it.
+fn engine_download(
+    browser: &Browser,
+    id: DownloadId,
+    applies: impl Fn(&Download) -> bool,
+    action: fn(u32) -> EngineAction,
+) -> Vec<EngineAction> {
+    match browser.downloads.get(id) {
+        Some(d) if applies(d) => d.engine_id.map(action).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The file of a finished download, to open or reveal.
+fn finished_path(browser: &Browser, id: DownloadId) -> Option<PathBuf> {
+    let d = browser.downloads.get(id)?;
+    if d.state != DownloadState::Complete {
+        return None;
+    }
+    d.path.clone()
+}
+
+/// Quitting (or closing the last window or tab) with downloads going
+/// asks first, in `window` or the first one; the prompt's answer is
+/// `Command::ForceQuit`. `None` when nothing stands in the way.
+fn quit_guard(browser: &Browser, window: Option<WindowId>) -> Option<Vec<EngineAction>> {
+    let count = browser.downloads.active();
+    if count == 0 || browser.quit_confirmed {
+        return None;
+    }
+    let window = window.or_else(|| browser.windows.first().map(|w| w.id))?;
+    Some(vec![EngineAction::ShowPrompt {
+        window,
+        prompt: Prompt::QuitWithDownloads { count },
+    }])
 }
 
 /// Pin or unpin `extension` in the settings. Returns true if the settings
@@ -1529,6 +1704,13 @@ pub(crate) fn close_tab(browser: &mut Browser, tab: TabId) -> Vec<EngineAction> 
     let Some(window_id) = browser.window_of_tab(tab) else {
         return Vec::new();
     };
+    // The last tab of the last window: closing it quits.
+    if browser.windows.len() == 1
+        && browser.windows[0].tabs.len() == 1
+        && let Some(ask) = quit_guard(browser, Some(window_id))
+    {
+        return ask;
+    }
     let mut actions = vec![EngineAction::CloseTab(tab)];
     let new_active = {
         let w = browser
@@ -3199,6 +3381,114 @@ mod tests {
         );
         assert!(!Command::ToggleBookmarksBar.changes_bookmarks());
         assert!(!Command::PickBookmarksFile(BookmarksFile::Export).changes_bookmarks());
+    }
+
+    fn download_report(name: &str, state: DownloadState) -> crate::download::DownloadReport {
+        crate::download::DownloadReport {
+            name: name.to_string(),
+            url: url("https://x.example/f.zip"),
+            path: Some(PathBuf::from("C:/dl/f.zip")),
+            received: 5,
+            total: Some(10),
+            speed: 0,
+            state,
+        }
+    }
+
+    #[test]
+    fn downloads_are_controlled_through_the_engine_id_and_opened_when_done() {
+        let (mut b, window, tab) = one_window();
+        let actions = crate::apply(
+            &mut b,
+            &crate::EngineEvent::DownloadUpdated {
+                id: 42,
+                report: download_report("f.zip", DownloadState::InProgress),
+            },
+        );
+        assert_eq!(actions, vec![EngineAction::SaveDownloads]);
+        let id = b.downloads.items()[0].id;
+        assert_eq!(
+            dispatch(&mut b, &Command::ToggleDownloads(window)),
+            vec![EngineAction::ToggleDownloads(window)]
+        );
+        assert_eq!(
+            dispatch(&mut b, &Command::PauseDownload(id)),
+            vec![EngineAction::PauseDownload(42)]
+        );
+        // Not paused yet (the engine has not said so): nothing to resume.
+        assert!(dispatch(&mut b, &Command::ResumeDownload(id)).is_empty());
+        assert!(dispatch(&mut b, &Command::OpenDownload(id)).is_empty());
+        assert!(dispatch(&mut b, &Command::RemoveDownload(id)).is_empty());
+        // Quitting asks while it goes; the answer quits.
+        assert_eq!(
+            dispatch(&mut b, &Command::Quit),
+            vec![EngineAction::ShowPrompt {
+                window,
+                prompt: Prompt::QuitWithDownloads { count: 1 }
+            }]
+        );
+        assert!(matches!(
+            dispatch(&mut b, &Command::CloseTab(tab))[0],
+            EngineAction::ShowPrompt { .. }
+        ));
+        assert!(matches!(
+            dispatch(&mut b, &Command::CloseWindow(window))[0],
+            EngineAction::ShowPrompt { .. }
+        ));
+        assert_eq!(
+            dispatch(&mut b, &Command::ForceQuit),
+            vec![EngineAction::Quit]
+        );
+        assert_eq!(dispatch(&mut b, &Command::Quit), vec![EngineAction::Quit]);
+        b.quit_confirmed = false;
+        crate::apply(
+            &mut b,
+            &crate::EngineEvent::DownloadUpdated {
+                id: 42,
+                report: download_report("f.zip", DownloadState::Complete),
+            },
+        );
+        assert_eq!(dispatch(&mut b, &Command::Quit), vec![EngineAction::Quit]);
+        assert_eq!(
+            dispatch(&mut b, &Command::OpenDownload(id)),
+            vec![EngineAction::OpenPath(PathBuf::from("C:/dl/f.zip"))]
+        );
+        assert_eq!(
+            dispatch(&mut b, &Command::RevealDownload(id)),
+            vec![EngineAction::RevealPath(PathBuf::from("C:/dl/f.zip"))]
+        );
+        assert!(dispatch(&mut b, &Command::CancelDownload(id)).is_empty());
+        // A retry drops the entry and downloads the address again.
+        assert_eq!(
+            dispatch(&mut b, &Command::RetryDownload { window, id }),
+            vec![
+                EngineAction::SaveDownloads,
+                EngineAction::StartDownload {
+                    tab,
+                    url: url("https://x.example/f.zip")
+                }
+            ]
+        );
+        assert!(b.downloads.is_empty());
+        assert!(dispatch(&mut b, &Command::ClearDownloads).is_empty());
+        assert_eq!(
+            dispatch(
+                &mut b,
+                &Command::SetDownloadsDirectory(Some(PathBuf::from("D:/dl")))
+            ),
+            vec![EngineAction::SaveSettings]
+        );
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::SetDownloadsDirectory(Some(PathBuf::from("D:/dl")))
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            dispatch(&mut b, &Command::PickDownloadsDirectory),
+            vec![EngineAction::PickFolder]
+        );
     }
 
     #[test]

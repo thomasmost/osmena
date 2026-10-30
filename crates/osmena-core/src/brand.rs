@@ -150,6 +150,10 @@ pub struct EngineInfo {
     /// `TabHost::find`). The bar's shortcut and menu entries are disabled
     /// when it cannot.
     pub find: bool,
+    /// Whether the engine downloads files and reports them
+    /// (`EngineEvent::DownloadUpdated`, `Engine::configure_downloads`).
+    /// The downloads button and its entries are left out otherwise.
+    pub downloads: bool,
     /// Pixels one wheel notch scrolls, when the platform reports the
     /// wheel in lines. Engines scroll different distances per notch.
     pub wheel_line_px: f32,
@@ -186,6 +190,7 @@ pub(crate) mod test_support {
         data_dir: "engine",
         supports_stop: true,
         find: true,
+        downloads: true,
         wheel_line_px: 40.0,
         extensions: None,
         page_tools: PageTools::ALL,

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::bookmarks::Bookmarks;
+use crate::download::Downloads;
 use crate::extension::Extension;
 use crate::history::History;
 use crate::profile::{DEFAULT_PROFILE_NAME, Profile, ProfileEntry};
@@ -354,6 +355,10 @@ pub struct Browser {
     pub update: UpdateStatus,
     /// The zoom levels of sites that differ from the default.
     pub zoom: SiteZoom,
+    /// What is being, and was, downloaded.
+    pub downloads: Downloads,
+    /// The user confirmed quitting with downloads still going.
+    pub quit_confirmed: bool,
     next_window_id: u64,
     next_tab_id: u64,
     next_folder_id: u64,
@@ -376,6 +381,8 @@ impl Browser {
             profiles: Vec::new(),
             update: UpdateStatus::Idle,
             zoom: SiteZoom::default(),
+            downloads: Downloads::default(),
+            quit_confirmed: false,
             next_window_id: 1,
             next_tab_id: 1,
             next_folder_id: 1,

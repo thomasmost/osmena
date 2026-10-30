@@ -4,6 +4,7 @@
 use url::Url;
 
 use crate::command::{EngineAction, close_tab, open_window};
+use crate::download::DownloadReport;
 use crate::extension::Extension;
 use crate::model::{Browser, Favicon, LoadState, RgbaImage, Tab, TabId};
 
@@ -210,6 +211,11 @@ pub enum EngineEvent {
         total: u32,
         final_update: bool,
     },
+    /// A download the engine knows as `id` started or changed.
+    DownloadUpdated {
+        id: u32,
+        report: DownloadReport,
+    },
 }
 
 /// Fold an engine event into the model. Returns follow-up actions; only
@@ -281,6 +287,17 @@ pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
         EngineEvent::FaviconChanged { tab, favicon } => {
             with_tab(browser, *tab, |t| t.favicon = Some(favicon.clone()));
             Vec::new()
+        }
+        EngineEvent::DownloadUpdated { id, report } => {
+            let (_, changed) =
+                browser
+                    .downloads
+                    .update(*id, report.clone(), crate::history::unix_now());
+            if changed {
+                vec![EngineAction::SaveDownloads]
+            } else {
+                Vec::new()
+            }
         }
         EngineEvent::FindResult {
             tab,

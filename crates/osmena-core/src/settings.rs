@@ -54,6 +54,18 @@ pub struct Settings {
     /// The zoom level, in percent, of sites without one of their own
     /// (`crate::zoom`).
     pub page_zoom: u16,
+    /// Where downloads go and whether to ask for each file.
+    pub downloads: DownloadSettings,
+}
+
+/// Downloads (`[downloads]` in `settings.toml`): the directory they go
+/// to (`None`: the system's Downloads folder) and whether to ask where
+/// to save each file.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DownloadSettings {
+    pub directory: Option<PathBuf>,
+    pub ask_where_to_save: bool,
 }
 
 impl Default for Settings {
@@ -71,6 +83,7 @@ impl Default for Settings {
             show_bookmarks_bar: false,
             last_bookmark_group: String::new(),
             page_zoom: 100,
+            downloads: DownloadSettings::default(),
         }
     }
 }
@@ -423,6 +436,10 @@ mod tests {
             show_bookmarks_bar: true,
             last_bookmark_group: "Work".to_string(),
             page_zoom: 110,
+            downloads: DownloadSettings {
+                directory: Some(PathBuf::from("D:/files")),
+                ask_where_to_save: true,
+            },
         };
         let text = s.to_toml().unwrap();
         assert!(text.contains("check_for_updates = false"), "{text}");

@@ -13,6 +13,7 @@ pub mod bookmarks;
 pub mod bookmarks_html;
 pub mod brand;
 pub mod command;
+pub mod download;
 pub mod event;
 pub mod extension;
 pub mod history;
@@ -30,6 +31,10 @@ pub use brand::{Brand, EngineInfo, ExtensionSupport, PageTools};
 pub use command::{
     BookmarksFile, Command, EngineAction, FolderTarget, PageCommand, ProfileForm, Prompt, dispatch,
 };
+pub use download::{
+    Download, DownloadId, DownloadPolicy, DownloadReport, DownloadState, Downloads, DownloadsError,
+    describe_bytes, describe_download, system_downloads_dir,
+};
 pub use event::{
     Cursor, EditState, EngineEvent, Media, MediaKind, Misspelling, PageContext, PendingTab, apply,
 };
@@ -44,7 +49,9 @@ pub use model::{
     Window, WindowId, site_key,
 };
 pub use profile::{Avatar, Profile, ProfileEntry, ProfileError};
-pub use settings::{ChromeColor, ProfileSettings, SearchSettings, Settings, SettingsError};
+pub use settings::{
+    ChromeColor, DownloadSettings, ProfileSettings, SearchSettings, Settings, SettingsError,
+};
 pub use suggest::{Suggestion, SuggestionSource, suggestions};
 pub use update::{Asset, AvailableUpdate, BuildId, Manifest, UpdateSource, UpdateStatus};
 pub use zoom::{SiteZoom, ZOOM_MAX, ZOOM_MIN, ZOOM_STEPS, ZoomError, next_step};

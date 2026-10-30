@@ -84,6 +84,9 @@ pub struct MenuBarInput<'a> {
     /// Whether the engine searches pages (`EngineInfo::find`): the Edit
     /// menu's Find entries are disabled otherwise.
     pub can_find: bool,
+    /// Whether the engine downloads (`EngineInfo::downloads`): the
+    /// Window menu's Downloads entry is disabled otherwise.
+    pub can_download: bool,
     pub bookmarks: BookmarksMenu<'a>,
     pub history: &'a History,
     /// The current profile: its directory name and its display name.
@@ -186,6 +189,7 @@ pub fn window_menu(
     keymap: &Keymap,
     can_reopen: bool,
     can_find: bool,
+    can_download: bool,
     bookmarks: BookmarksMenu<'_>,
     updates: UpdateMenu<'_>,
 ) -> Vec<MenuEntry> {
@@ -199,6 +203,10 @@ pub fn window_menu(
     if let MenuEntry::Item { enabled, label, .. } = &mut find {
         *enabled = can_find;
         label.push('…');
+    }
+    let mut downloads = bound(CommandKind::Downloads);
+    if let MenuEntry::Item { enabled, .. } = &mut downloads {
+        *enabled = can_download;
     }
     vec![
         bound(CommandKind::NewTab),
@@ -222,6 +230,7 @@ pub fn window_menu(
                 bound(CommandKind::ZoomReset),
             ],
         },
+        downloads,
         MenuEntry::Separator,
         updates.entry(),
         bound(CommandKind::OpenSettings),
@@ -453,6 +462,7 @@ pub fn menu_bar(input: &MenuBarInput<'_>) -> Vec<MenuEntry> {
         keymap,
         can_reopen,
         can_find,
+        can_download,
         bookmarks,
         history,
         profile,
@@ -666,6 +676,8 @@ pub fn menu_bar(input: &MenuBarInput<'_>) -> Vec<MenuEntry> {
             vec![
                 system("Minimize".to_string(), SystemItem::Minimize),
                 system("Zoom".to_string(), SystemItem::Zoom),
+                MenuEntry::Separator,
+                bound(CommandKind::Downloads, "Downloads", can_download),
                 MenuEntry::Separator,
                 system(
                     "Bring All to Front".to_string(),
@@ -1464,7 +1476,15 @@ mod tests {
     fn window_menu_carries_the_keymap_chords_and_commands() {
         let w = window_with(1);
         let keymap = Keymap::defaults(Platform::Windows);
-        let entries = window_menu(&w, &keymap, true, true, no_bookmarks(), idle_updates());
+        let entries = window_menu(
+            &w,
+            &keymap,
+            true,
+            true,
+            true,
+            no_bookmarks(),
+            idle_updates(),
+        );
         assert_eq!(
             labels(&entries),
             vec![
@@ -1477,6 +1497,7 @@ mod tests {
                 "Bookmarks",
                 "Full screen",
                 "Zoom (100%)",
+                "Downloads",
                 "-",
                 "Check for updates…",
                 "Settings",
@@ -1488,13 +1509,22 @@ mod tests {
         assert_eq!(
             enabled(&entries),
             vec![
-                true, true, true, true, true, true, true, true, true, true, true, true, true, true
+                true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+                true
             ]
         );
         let MenuEntry::Submenu { entries: zoom, .. } = &entries[8] else {
             panic!("zoom is a submenu");
         };
         assert_eq!(labels(zoom), vec!["Zoom in", "Zoom out", "Actual size"]);
+        assert!(matches!(
+            &entries[9],
+            MenuEntry::Item {
+                command: Command::ToggleDownloads(WindowId(1)),
+                chord: Some(_),
+                ..
+            }
+        ));
         assert!(matches!(
             &zoom[2],
             MenuEntry::Item {
@@ -1512,10 +1542,19 @@ mod tests {
             }
         ));
         // An engine that cannot search: the entry stays, disabled.
-        let without = window_menu(&w, &keymap, true, false, no_bookmarks(), idle_updates());
+        let without = window_menu(
+            &w,
+            &keymap,
+            true,
+            false,
+            false,
+            no_bookmarks(),
+            idle_updates(),
+        );
         assert!(!enabled(&without)[4]);
+        assert!(!enabled(&without)[9]);
         assert!(matches!(
-            &entries[10],
+            &entries[11],
             MenuEntry::Item {
                 command: Command::CheckForUpdates,
                 ..
@@ -1541,7 +1580,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            &entries[13],
+            &entries[14],
             MenuEntry::Item {
                 command: Command::Quit,
                 ..
@@ -1556,6 +1595,7 @@ mod tests {
             &w,
             &Keymap::defaults(Platform::Windows),
             false,
+            true,
             true,
             no_bookmarks(),
             idle_updates(),
@@ -1594,7 +1634,15 @@ mod tests {
     fn the_bookmarks_submenu_holds_the_actions_and_the_bar_switch() {
         let w = window_with(2);
         let keymap = Keymap::defaults(Platform::Windows);
-        let entries = window_menu(&w, &keymap, true, true, no_bookmarks(), idle_updates());
+        let entries = window_menu(
+            &w,
+            &keymap,
+            true,
+            true,
+            true,
+            no_bookmarks(),
+            idle_updates(),
+        );
         let MenuEntry::Submenu { entries: menu, .. } = &entries[6] else {
             panic!("bookmarks is a submenu");
         };
@@ -1646,7 +1694,15 @@ mod tests {
         // A blank page cannot be bookmarked.
         let mut blank = window_with(1);
         blank.tabs[0].url = Url::parse("about:blank").unwrap();
-        let entries = window_menu(&blank, &keymap, true, true, no_bookmarks(), idle_updates());
+        let entries = window_menu(
+            &blank,
+            &keymap,
+            true,
+            true,
+            true,
+            no_bookmarks(),
+            idle_updates(),
+        );
         let MenuEntry::Submenu { entries: menu, .. } = &entries[6] else {
             panic!("bookmarks is a submenu");
         };
@@ -1808,6 +1864,7 @@ mod tests {
         let entries = window_menu(
             &w,
             &Keymap::defaults(Platform::Windows),
+            true,
             true,
             true,
             BookmarksMenu {
@@ -2491,6 +2548,7 @@ mod page_menu_tests {
             keymap,
             can_reopen: false,
             can_find: true,
+            can_download: true,
             bookmarks: BookmarksMenu {
                 bookmarks,
                 bar_shown: false,

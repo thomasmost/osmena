@@ -5,11 +5,11 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-10-30 (page zoom per site; find in page: the bar,
-the engine contract and the result event; bookmarks: the star and its
-popover, the bookmarks bar, the Bookmarks menu with import and export,
-merged suggestions, the favicon cache; before that updates over the
-air)._
+_Last updated: 2026-10-30 (downloads: the list, the button and popover,
+the engine contract; page zoom per site; find in page; bookmarks: the
+star and its popover, the bookmarks bar, the Bookmarks menu with import
+and export, merged suggestions, the favicon cache; before that updates
+over the air)._
 
 ## Architecture
 
@@ -98,6 +98,20 @@ No engine is needed; the workspace builds in under a minute.
   directly, so bookmarks and history rank together. Site favicons are
   the shell's (`favicons.rs`, `Profile::favicons_dir`), handed to the
   chrome as `ChromeContext::site_icons` by host (`Bookmarks::site_key`).
+- **Downloads are the engine's work and the model's list.** The engine
+  saves the file where `Engine::configure_downloads` said (the shell
+  resolves `Settings::downloads` to a `DownloadPolicy` at engine start
+  and on every settings change) and reports every change as
+  `EngineEvent::DownloadUpdated` under its own id; `apply` upserts
+  `Browser::downloads` by that id and asks `SaveDownloads` only when a
+  state changes (progress is not worth a write). Commands name the
+  model's `DownloadId`; `dispatch` maps them to the engine's id
+  (`engine_download`) and only while the state fits. Opening and
+  revealing files is the shell's (`open_path`, `reveal_path`), as is
+  the folder dialog. `quit_guard` in `dispatch` turns Quit, the last
+  window's close and the last tab's close into `Prompt::QuitWithDownloads`
+  while anything is going; `ForceQuit` is the answer. On exit the shell
+  marks what was going as interrupted and writes the list.
 - **Zoom is per site, kept by the model, applied by the engine.**
   `Tab::zoom` is the level; `set_zoom` in `command.rs` changes every
   tab on the host at once and records the site in `Browser::zoom`
@@ -271,6 +285,17 @@ No engine is needed; the workspace builds in under a minute.
   adds; the shared behaviour is documented here only.
 
 ## Status and handoff (2026-10-19)
+
+Added 2026-10-30 (fourth): downloads (see Conventions). Verified:
+`cargo test` (the list's upserts, trimming and TOML, the commands, the
+quit guard), clippy, fmt, and a scripted run of Nautilus on Windows: a
+release asset served as an attachment lands in the configured
+directory under its name, a second copy as "latest (2).toml", the
+toolbar button appears, Ctrl+J opens the popover with both rows and
+their sizes, `downloads.toml` records both as complete. Not verified:
+pause, resume and cancel on a long download, the quit prompt, Open and
+Show in folder (they spawn the system's programs), the folder dialog,
+macOS.
 
 Added 2026-10-30 (later still): page zoom (see Conventions). Verified:
 `cargo test` (the steps, the site table, the fan-out over a host, the

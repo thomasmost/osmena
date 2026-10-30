@@ -595,6 +595,11 @@ impl Profile {
         self.dir.join("zoom.toml")
     }
 
+    /// The downloads list.
+    pub fn downloads_path(&self) -> PathBuf {
+        self.dir.join("downloads.toml")
+    }
+
     /// The installed extensions, as the engine last reported them
     /// ([`InstalledExtensions`]): what another profile copies from.
     ///

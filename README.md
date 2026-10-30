@@ -168,6 +168,20 @@ The engine contract, in `osmena-engine`:
   and a click lists the tabs; expanded (from its menu), its tabs follow
   it. The chip's menu also renames, ungroups, or closes the folder.
   Folders are not kept across launches.
+- **Downloads**, when the engine downloads (`EngineInfo::downloads`).
+  A file goes to the downloads directory (the system's Downloads folder,
+  or the one Settings names) under its suggested name, made unique, or
+  the system's save dialog asks when "Ask where to save each file" is
+  on. A button appears at the toolbar's right end while the list is not
+  empty, with a ring that fills as the downloads in progress do; it
+  (or `Ctrl+J`, `Cmd+Shift+J` on macOS, or the ☰ menu's Downloads)
+  opens a popover listing them newest first with their size, progress
+  and speed, and the buttons for each one's state: Pause, Resume and
+  Cancel while it goes, Open and Show in folder when done, Retry after
+  a failure, and × to forget; "Clear all" and "Open folder" below.
+  Quitting with a download going asks first. The list is
+  `downloads.toml` in the profile (the newest 200 finished ones); what
+  was still going when the browser closed is marked interrupted.
 - **Page zoom.** `Ctrl+Plus` (`Ctrl+Equal`, or the numpad's plus),
   `Ctrl+Minus` and `Ctrl+0` (`Cmd` on macOS), `Ctrl` with the wheel over
   the page, the ☰ menu's Zoom submenu or the macOS View menu zoom the
@@ -267,9 +281,9 @@ The engine contract, in `osmena-engine`:
 - **Settings** (`settings.toml`): homepage, new-tab URL, the search
   provider, a chrome colour per profile, the title bar switch, the
   pinned extensions, the restore flag, the bookmarks bar switch and the
-  group the last bookmark went to, the default page zoom, and
-  `[profile]` (name, avatar, shared bookmarks, extensions to copy at the
-  next start).
+  group the last bookmark went to, the default page zoom, `[downloads]`
+  (the directory and whether to ask each time), and `[profile]` (name,
+  avatar, shared bookmarks, extensions to copy at the next start).
 
 ## Updates
 

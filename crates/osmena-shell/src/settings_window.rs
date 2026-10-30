@@ -196,6 +196,7 @@ impl<S: Surface> SettingsWindow<S> {
         support: Option<&ExtensionSupport>,
         update: &UpdateStatus,
         can_update: bool,
+        can_download: bool,
     ) -> SettingsOutcome {
         match event {
             WindowEvent::CloseRequested => {
@@ -218,7 +219,8 @@ impl<S: Surface> SettingsWindow<S> {
                     status: update,
                     can_update,
                 };
-                let activity = self.frame(settings, keymap, extensions, support, updates);
+                let activity =
+                    self.frame(settings, keymap, extensions, support, updates, can_download);
                 let (dirty, outcome) = after_frame(self.dirty, activity);
                 self.dirty = dirty;
                 return outcome;
@@ -312,6 +314,7 @@ impl<S: Surface> SettingsWindow<S> {
         extensions: &[Extension],
         support: Option<&ExtensionSupport>,
         updates: UpdatesSection<'_>,
+        can_download: bool,
     ) -> FormActivity {
         let mut activity = FormActivity::default();
         let mut update_commands = Vec::new();
@@ -342,6 +345,7 @@ impl<S: Surface> SettingsWindow<S> {
                 extensions_section.as_mut(),
                 updates,
                 &mut update_commands,
+                can_download,
             );
         });
         // The extensions section borrowed `commands`; it is done with it.
@@ -508,6 +512,7 @@ fn draw_settings(
     extensions: Option<&mut ExtensionsSection<'_>>,
     updates: UpdatesSection<'_>,
     update_commands: &mut Vec<Command>,
+    can_download: bool,
 ) -> FormActivity {
     let mut activity = FormActivity::default();
     egui::CentralPanel::default().show_inside(ui, |ui| {
@@ -521,6 +526,10 @@ fn draw_settings(
                 ui.heading("Bookmarks");
                 ui.add_space(8.0);
                 draw_bookmarks(ui, settings, &mut activity, update_commands);
+                ui.add_space(20.0);
+                ui.heading("Downloads");
+                ui.add_space(8.0);
+                draw_downloads(ui, settings, &mut activity, update_commands, can_download);
                 ui.add_space(20.0);
                 ui.heading("Updates");
                 ui.add_space(8.0);
@@ -697,6 +706,57 @@ fn draw_general(ui: &mut egui::Ui, settings: &mut Settings, activity: &mut FormA
                 activity.edited = true;
                 activity.committed = true;
             }
+            ui.end_row();
+        });
+}
+
+/// Where downloads go and whether to ask each time; the folder dialog is
+/// the app's (`Command::PickDownloadsDirectory`). An engine that does
+/// not download says so instead.
+fn draw_downloads(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    activity: &mut FormActivity,
+    commands: &mut Vec<Command>,
+    can_download: bool,
+) {
+    if !can_download {
+        ui.label(
+            egui::RichText::new("This browser's engine does not download files.")
+                .small()
+                .weak(),
+        );
+        return;
+    }
+    egui::Grid::new("downloads-grid")
+        .num_columns(2)
+        .spacing([12.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Save files to");
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    let shown = match &settings.downloads.directory {
+                        Some(dir) => dir.display().to_string(),
+                        None => "The system's Downloads folder".to_string(),
+                    };
+                    ui.label(shown);
+                    if ui.button("Choose…").clicked() {
+                        commands.push(Command::PickDownloadsDirectory);
+                    }
+                    if settings.downloads.directory.is_some() && ui.button("Use default").clicked()
+                    {
+                        commands.push(Command::SetDownloadsDirectory(None));
+                    }
+                });
+                let ask = ui.checkbox(
+                    &mut settings.downloads.ask_where_to_save,
+                    "Ask where to save each file",
+                );
+                if ask.changed() {
+                    activity.edited = true;
+                    activity.committed = true;
+                }
+            });
             ui.end_row();
         });
 }

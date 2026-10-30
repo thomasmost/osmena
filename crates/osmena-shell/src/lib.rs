@@ -35,8 +35,8 @@ use osmena_chrome::fatal::report_fatal;
 use osmena_core::command::open_window;
 use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
-    Bookmarks, Brand, Browser, Command, EngineInfo, History, Keymap, Platform, Profile, Settings,
-    SiteZoom, dispatch,
+    Bookmarks, Brand, Browser, Command, Downloads, EngineInfo, History, Keymap, Platform, Profile,
+    Settings, SiteZoom, dispatch,
 };
 use osmena_engine::{Engine, EngineError, Waker};
 use url::Url;
@@ -182,9 +182,21 @@ pub fn run<E: Engine>(launch: Launch<E>) -> ExitCode {
             SiteZoom::default()
         }
     };
+    // And the downloads list.
+    let downloads = match Downloads::load(&profile.downloads_path()) {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!(
+                "{e} (in {}); starting with no downloads",
+                profile.downloads_path().display()
+            );
+            Downloads::default()
+        }
+    };
     browser.bookmarks = bookmarks;
     browser.history = history;
     browser.zoom = zoom;
+    browser.downloads = downloads;
     let first: Url = urls.first().cloned().unwrap_or_else(|| browser.homepage());
     let mut actions = open_window(&mut browser, first);
     let window = browser.windows[0].id;

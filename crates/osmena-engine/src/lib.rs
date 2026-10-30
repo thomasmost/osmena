@@ -31,6 +31,8 @@ pub use crate::glutin::GlutinSurface;
 /// Wakes the application's event loop from any thread. An engine calls
 /// this when it has work for the main thread; the shell then calls
 /// [`Engine::spin`].
+pub use osmena_core::DownloadPolicy;
+
 pub trait Waker: Send + Sync + 'static {
     fn wake(&self);
 }
@@ -188,6 +190,9 @@ pub trait TabHost {
     /// model keeps the level per site and asks again after every
     /// navigation to another site. Default: nothing.
     fn set_zoom(&self, _tab: TabId, _percent: u16) {}
+    /// Download `url` from `tab`'s page (a retry of a failed download).
+    /// Default: nothing.
+    fn start_download(&self, _tab: TabId, _url: Url) {}
 }
 
 /// One engine instance, one per process. The shell builds it through a
@@ -230,4 +235,14 @@ pub trait Engine: 'static {
     fn set_extension_enabled(&self, _extension: &str, _enabled: bool) {}
     /// Remove an installed extension. Default: nothing.
     fn uninstall_extension(&self, _extension: &str) {}
+    /// Where downloads go and whether to ask for each file: sent once
+    /// the engine is up and whenever the setting changes. An engine whose
+    /// `EngineInfo::downloads` is false never receives it, nor the three
+    /// below. The engine reports every download it runs with
+    /// `EngineEvent::DownloadUpdated`, under an id of its own, which the
+    /// commands below name. Default: nothing.
+    fn configure_downloads(&self, _policy: DownloadPolicy) {}
+    fn cancel_download(&self, _id: u32) {}
+    fn pause_download(&self, _id: u32) {}
+    fn resume_download(&self, _id: u32) {}
 }
