@@ -200,7 +200,9 @@ The engine contract, in `osmena-engine`:
   the other profiles (each starts a browser for it: a profile is a
   process), "Add Profile…" and "Delete Profile". The dialog asks for
   the name, the theme colour and the avatar (the name's initial, or a
-  glyph from two palettes: sea creatures, then an assorted set) and,
+  flat monochrome glyph from three tabs: sea creatures, the 24 most
+  used emoji, and an assorted set; the colour is one of seven hues, each
+  in a pastel, a middle and a deep shade) and,
   for any profile but the default one, whether to share
   the default profile's bookmarks (one list both keep) and whether to
   copy its extensions (installed here, then independent; only when

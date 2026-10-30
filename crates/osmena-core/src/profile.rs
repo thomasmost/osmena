@@ -93,6 +93,42 @@ pub enum Avatar {
     Fish,
     TropicalFish,
     Blowfish,
+    Shark,
+    Seal,
+    Otter,
+    Squid,
+    Jellyfish,
+    Crab,
+    Lobster,
+    Shrimp,
+    Oyster,
+    Coral,
+    Crocodile,
+    Merperson,
+    TearsOfJoy,
+    RedHeart,
+    RollingOnTheFloor,
+    ThumbsUp,
+    LoudlyCrying,
+    FoldedHands,
+    BlowingAKiss,
+    SmilingWithHearts,
+    HeartEyes,
+    SmilingEyes,
+    PartyPopper,
+    Beaming,
+    TwoHearts,
+    Pleading,
+    SweatSmile,
+    Fire,
+    Smiling,
+    Facepalm,
+    HeartSuit,
+    Shrug,
+    EyeRoll,
+    Laughing,
+    Hug,
+    Wink,
 }
 
 /// A named group of avatars, as the profile dialog shows them: a heading
@@ -104,24 +140,66 @@ pub struct AvatarPalette {
 }
 
 impl Avatar {
-    /// The dialog's palettes, in order: the sea creatures first, then the
-    /// assorted set. [`Avatar::Initial`] belongs to neither; the dialog
-    /// offers it ahead of them. An avatar may appear in more than one
-    /// palette.
-    pub const PALETTES: [AvatarPalette; 2] = [
+    /// The dialog's palettes, one tab each, in order: the sea creatures,
+    /// the 24 most used emoji (Unicode's frequency ranking, most used
+    /// first), then the assorted set. [`Avatar::Initial`] belongs to
+    /// none; the dialog offers it above the tabs. An avatar may appear in
+    /// more than one palette.
+    pub const PALETTES: [AvatarPalette; 3] = [
         AvatarPalette {
             name: "Sea creatures",
             avatars: &[
                 Avatar::Whale,
                 Avatar::SpoutingWhale,
                 Avatar::Dolphin,
+                Avatar::Shark,
+                Avatar::Seal,
+                Avatar::Otter,
                 Avatar::Octopus,
-                Avatar::Shell,
+                Avatar::Squid,
+                Avatar::Jellyfish,
+                Avatar::Crab,
+                Avatar::Lobster,
+                Avatar::Shrimp,
                 Avatar::Fish,
                 Avatar::TropicalFish,
                 Avatar::Blowfish,
                 Avatar::Turtle,
                 Avatar::Penguin,
+                Avatar::Crocodile,
+                Avatar::Shell,
+                Avatar::Oyster,
+                Avatar::Coral,
+                Avatar::Merperson,
+            ],
+        },
+        AvatarPalette {
+            name: "Emoji",
+            avatars: &[
+                Avatar::TearsOfJoy,
+                Avatar::RedHeart,
+                Avatar::RollingOnTheFloor,
+                Avatar::ThumbsUp,
+                Avatar::LoudlyCrying,
+                Avatar::FoldedHands,
+                Avatar::BlowingAKiss,
+                Avatar::SmilingWithHearts,
+                Avatar::HeartEyes,
+                Avatar::SmilingEyes,
+                Avatar::PartyPopper,
+                Avatar::Beaming,
+                Avatar::TwoHearts,
+                Avatar::Pleading,
+                Avatar::SweatSmile,
+                Avatar::Fire,
+                Avatar::Smiling,
+                Avatar::Facepalm,
+                Avatar::HeartSuit,
+                Avatar::Shrug,
+                Avatar::EyeRoll,
+                Avatar::Laughing,
+                Avatar::Hug,
+                Avatar::Wink,
             ],
         },
         AvatarPalette {
@@ -156,7 +234,7 @@ impl Avatar {
     ];
 
     /// Every avatar once: the initial, then every glyph.
-    pub const ALL: [Avatar; 30] = [
+    pub const ALL: [Avatar; 66] = [
         Avatar::Initial,
         Avatar::Cat,
         Avatar::Panda,
@@ -187,6 +265,42 @@ impl Avatar {
         Avatar::Fish,
         Avatar::TropicalFish,
         Avatar::Blowfish,
+        Avatar::Shark,
+        Avatar::Seal,
+        Avatar::Otter,
+        Avatar::Squid,
+        Avatar::Jellyfish,
+        Avatar::Crab,
+        Avatar::Lobster,
+        Avatar::Shrimp,
+        Avatar::Oyster,
+        Avatar::Coral,
+        Avatar::Crocodile,
+        Avatar::Merperson,
+        Avatar::TearsOfJoy,
+        Avatar::RedHeart,
+        Avatar::RollingOnTheFloor,
+        Avatar::ThumbsUp,
+        Avatar::LoudlyCrying,
+        Avatar::FoldedHands,
+        Avatar::BlowingAKiss,
+        Avatar::SmilingWithHearts,
+        Avatar::HeartEyes,
+        Avatar::SmilingEyes,
+        Avatar::PartyPopper,
+        Avatar::Beaming,
+        Avatar::TwoHearts,
+        Avatar::Pleading,
+        Avatar::SweatSmile,
+        Avatar::Fire,
+        Avatar::Smiling,
+        Avatar::Facepalm,
+        Avatar::HeartSuit,
+        Avatar::Shrug,
+        Avatar::EyeRoll,
+        Avatar::Laughing,
+        Avatar::Hug,
+        Avatar::Wink,
     ];
 
     pub fn label(self) -> &'static str {
@@ -221,13 +335,49 @@ impl Avatar {
             Avatar::Fish => "Fish",
             Avatar::TropicalFish => "Tropical fish",
             Avatar::Blowfish => "Blowfish",
+            Avatar::Shark => "Shark",
+            Avatar::Seal => "Seal",
+            Avatar::Otter => "Otter",
+            Avatar::Squid => "Squid",
+            Avatar::Jellyfish => "Jellyfish",
+            Avatar::Crab => "Crab",
+            Avatar::Lobster => "Lobster",
+            Avatar::Shrimp => "Shrimp",
+            Avatar::Oyster => "Oyster",
+            Avatar::Coral => "Coral",
+            Avatar::Crocodile => "Crocodile",
+            Avatar::Merperson => "Merperson",
+            Avatar::TearsOfJoy => "Tears of joy",
+            Avatar::RedHeart => "Red heart",
+            Avatar::RollingOnTheFloor => "Rolling on the floor",
+            Avatar::ThumbsUp => "Thumbs up",
+            Avatar::LoudlyCrying => "Loudly crying",
+            Avatar::FoldedHands => "Folded hands",
+            Avatar::BlowingAKiss => "Blowing a kiss",
+            Avatar::SmilingWithHearts => "Smiling with hearts",
+            Avatar::HeartEyes => "Heart eyes",
+            Avatar::SmilingEyes => "Smiling eyes",
+            Avatar::PartyPopper => "Party popper",
+            Avatar::Beaming => "Beaming",
+            Avatar::TwoHearts => "Two hearts",
+            Avatar::Pleading => "Pleading",
+            Avatar::SweatSmile => "Sweat smile",
+            Avatar::Fire => "Fire",
+            Avatar::Smiling => "Smiling",
+            Avatar::Facepalm => "Facepalm",
+            Avatar::HeartSuit => "Heart suit",
+            Avatar::Shrug => "Shrug",
+            Avatar::EyeRoll => "Eye roll",
+            Avatar::Laughing => "Laughing",
+            Avatar::Hug => "Hug",
+            Avatar::Wink => "Wink",
         }
     }
 
     /// The glyph drawn for the avatar, or `None` for [`Avatar::Initial`],
-    /// which draws the name's first letter. Each is one code point of a
-    /// monochrome emoji font (no variation selector), so the chrome's
-    /// fallback fonts have it.
+    /// which draws the name's first letter. Each is one code point (no
+    /// variation selector) of the monochrome emoji font the chrome
+    /// bundles for avatars; a new glyph must be added to that font too.
     pub fn glyph(self) -> Option<&'static str> {
         Some(match self {
             Avatar::Initial => return None,
@@ -260,6 +410,42 @@ impl Avatar {
             Avatar::Fish => "\u{1F41F}",
             Avatar::TropicalFish => "\u{1F420}",
             Avatar::Blowfish => "\u{1F421}",
+            Avatar::Shark => "\u{1F988}",
+            Avatar::Seal => "\u{1F9AD}",
+            Avatar::Otter => "\u{1F9A6}",
+            Avatar::Squid => "\u{1F991}",
+            Avatar::Jellyfish => "\u{1FABC}",
+            Avatar::Crab => "\u{1F980}",
+            Avatar::Lobster => "\u{1F99E}",
+            Avatar::Shrimp => "\u{1F990}",
+            Avatar::Oyster => "\u{1F9AA}",
+            Avatar::Coral => "\u{1FAB8}",
+            Avatar::Crocodile => "\u{1F40A}",
+            Avatar::Merperson => "\u{1F9DC}",
+            Avatar::TearsOfJoy => "\u{1F602}",
+            Avatar::RedHeart => "\u{2764}",
+            Avatar::RollingOnTheFloor => "\u{1F923}",
+            Avatar::ThumbsUp => "\u{1F44D}",
+            Avatar::LoudlyCrying => "\u{1F62D}",
+            Avatar::FoldedHands => "\u{1F64F}",
+            Avatar::BlowingAKiss => "\u{1F618}",
+            Avatar::SmilingWithHearts => "\u{1F970}",
+            Avatar::HeartEyes => "\u{1F60D}",
+            Avatar::SmilingEyes => "\u{1F60A}",
+            Avatar::PartyPopper => "\u{1F389}",
+            Avatar::Beaming => "\u{1F601}",
+            Avatar::TwoHearts => "\u{1F495}",
+            Avatar::Pleading => "\u{1F97A}",
+            Avatar::SweatSmile => "\u{1F605}",
+            Avatar::Fire => "\u{1F525}",
+            Avatar::Smiling => "\u{263A}",
+            Avatar::Facepalm => "\u{1F926}",
+            Avatar::HeartSuit => "\u{2665}",
+            Avatar::Shrug => "\u{1F937}",
+            Avatar::EyeRoll => "\u{1F644}",
+            Avatar::Laughing => "\u{1F606}",
+            Avatar::Hug => "\u{1F917}",
+            Avatar::Wink => "\u{1F609}",
         })
     }
 
@@ -671,7 +857,7 @@ mod tests {
 
     #[test]
     fn every_avatar_has_a_label_and_the_initial_draws_the_first_letter() {
-        assert_eq!(Avatar::ALL.len(), 30);
+        assert_eq!(Avatar::ALL.len(), 66);
         for (i, avatar) in Avatar::ALL.iter().enumerate() {
             assert!(!avatar.label().is_empty());
             if let Some(glyph) = avatar.glyph() {
@@ -687,9 +873,12 @@ mod tests {
 
     #[test]
     fn the_palettes_hold_every_glyph_and_the_sea_creatures_come_first() {
-        let [sea, assorted] = Avatar::PALETTES;
+        let [sea, emoji, assorted] = Avatar::PALETTES;
         assert_eq!(sea.name, "Sea creatures");
-        assert_eq!(sea.avatars.len(), 10);
+        assert_eq!(sea.avatars.len(), 22);
+        assert_eq!(emoji.name, "Emoji");
+        assert_eq!(emoji.avatars.len(), 24);
+        assert_eq!(emoji.avatars[0], Avatar::TearsOfJoy);
         assert_eq!(assorted.name, "Assorted");
         assert_eq!(assorted.avatars.len(), 24);
         for palette in Avatar::PALETTES {

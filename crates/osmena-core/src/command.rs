@@ -815,11 +815,16 @@ fn save_profile(browser: &mut Browser, form: &ProfileForm) -> Vec<EngineAction> 
     actions
 }
 
-/// The swatch after `color` in the settings window's order, wrapping.
+/// The same shade of the next hue after `color`'s, wrapping: a new
+/// profile looks like a sibling of the current one, not a copy.
 fn next_color(color: ChromeColor) -> ChromeColor {
-    let all = ChromeColor::ALL;
-    let at = all.iter().position(|c| *c == color).unwrap_or(0);
-    all[(at + 1) % all.len()]
+    let families = ChromeColor::FAMILIES;
+    let (family, shade) = families
+        .iter()
+        .enumerate()
+        .find_map(|(f, shades)| shades.iter().position(|c| *c == color).map(|s| (f, s)))
+        .unwrap_or((0, 0));
+    families[(family + 1) % families.len()][shade]
 }
 
 fn set_pinned(browser: &mut Browser, extension: &str, pinned: bool) -> bool {
@@ -2818,6 +2823,7 @@ mod tests {
             vec![EngineAction::SaveSettings]
         );
         assert!(!b.settings.profile.share_bookmarks);
-        assert_eq!(next_color(ChromeColor::Graphite), ChromeColor::Shell);
+        assert_eq!(next_color(ChromeColor::Graphite), ChromeColor::Abyss);
+        assert_eq!(next_color(ChromeColor::Peach), ChromeColor::Shell);
     }
 }

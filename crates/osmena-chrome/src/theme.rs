@@ -5,7 +5,10 @@
 //! The face is Inter (SIL Open Font License, `assets/fonts`), a
 //! geometric UI face with even metrics at small sizes; egui's own fonts
 //! stay behind it as fallbacks for the glyphs it lacks (emoji, the
-//! toolbar's arrows). Inputs are pills with generous side padding;
+//! toolbar's arrows). Profile avatars are drawn from their own family
+//! ([`AVATARS`]): a subset of the current monochrome Noto Emoji (also
+//! OFL), which has the newer emoji egui's older copy lacks. Inputs are
+//! pills with generous side padding;
 //! widgets round at 8 px, like the tabs.
 
 use std::sync::Arc;
@@ -28,6 +31,16 @@ pub const PILL: u8 = 20;
 /// The family of the medium weight, for headings.
 pub const MEDIUM: &str = "Inter-Medium";
 
+/// The family the profile avatars' glyphs are drawn in.
+///
+/// Its font, `assets/fonts/NotoEmoji-Avatars.ttf`, is Google Fonts'
+/// `NotoEmoji[wght].ttf` (version 3.002) pinned to weight 400 and cut
+/// down to the glyphs of `osmena_core::Avatar` with fontTools
+/// (`varLib.instancer`, then `subset` with no layout features). A new
+/// avatar's code point goes into a new cut; a test checks the font has
+/// every avatar.
+pub const AVATARS: &str = "Avatars";
+
 /// Install the fonts and the style on `ctx`.
 pub fn install(ctx: &Context) {
     ctx.set_fonts(fonts());
@@ -48,6 +61,12 @@ fn fonts() -> FontDefinitions {
             "../assets/fonts/Inter-Medium.ttf"
         ))),
     );
+    fonts.font_data.insert(
+        AVATARS.to_owned(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../assets/fonts/NotoEmoji-Avatars.ttf"
+        ))),
+    );
     let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
     proportional.insert(0, "Inter".to_owned());
     let mut medium = proportional.clone();
@@ -55,6 +74,13 @@ fn fonts() -> FontDefinitions {
     fonts
         .families
         .insert(FontFamily::Name(MEDIUM.into()), medium);
+    // The proportional faces behind it only lend the family a
+    // replacement glyph; every avatar is in the cut itself.
+    let mut avatars = vec![AVATARS.to_owned()];
+    avatars.extend(fonts.families[&FontFamily::Proportional].iter().cloned());
+    fonts
+        .families
+        .insert(FontFamily::Name(AVATARS.into()), avatars);
     fonts
 }
 
@@ -123,6 +149,29 @@ mod tests {
         assert_eq!(&medium[1..], &proportional[1..]);
         assert!(fonts.font_data.contains_key("Inter"));
         assert!(fonts.font_data.contains_key(MEDIUM));
+    }
+
+    #[test]
+    fn the_avatar_font_has_every_avatar_glyph() {
+        let mut definitions = fonts();
+        assert_eq!(
+            definitions.families[&FontFamily::Name(AVATARS.into())][0],
+            AVATARS
+        );
+        // The cut alone, without the fallbacks behind it.
+        definitions
+            .families
+            .insert(FontFamily::Name("cut".into()), vec![AVATARS.to_owned()]);
+        let mut fonts = egui::epaint::text::Fonts::new(Default::default(), definitions);
+        let font = FontId::new(16.0, FontFamily::Name("cut".into()));
+        for avatar in osmena_core::Avatar::ALL {
+            if let Some(glyph) = avatar.glyph() {
+                assert!(fonts.has_glyphs(&font, glyph), "{avatar:?} {glyph}");
+            }
+        }
+        // The flamingo is in Noto Emoji but no avatar: the cut is a cut.
+        let flamingo = char::from_u32(0x1F9A9).unwrap();
+        assert!(!fonts.has_glyph(&font, flamingo));
     }
 
     #[test]

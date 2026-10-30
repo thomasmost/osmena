@@ -14,11 +14,11 @@ All notable changes to the osmena crates. The crates version together.
   by name (each starts a browser for it), "Add Profile…", and a "Delete
   Profile" submenu. "Edit…" and "Add Profile…" open the profile dialog
   over the page: the name ("Name your <brand> profile"), the theme
-  colour (the chrome colour swatches), the avatar (the initial, or a
-  glyph from the chrome's emoji fallback font, offered in two
-  palettes: "Sea creatures", ten of them, then "Assorted", 24;
-  `Avatar::PALETTES`, `AvatarPalette`, and the new `Avatar::{
-  SpoutingWhale, Dolphin, Fish, TropicalFish, Blowfish}`) and, for a
+  colour (the chrome colour grid), the avatar (the initial, or a
+  flat monochrome glyph offered in three tabs: "Sea creatures", 22 of
+  them, "Emoji", the 24 most used emoji in Unicode's frequency
+  ranking, and "Assorted", 24; `Avatar::PALETTES`, `AvatarPalette`)
+  and, for a
   profile other than the default one, "Share bookmarks with the Default
   profile" (the profile reads and writes the default profile's
   `bookmarks.toml`; turning it off keeps a copy) and, when the engine
@@ -38,7 +38,7 @@ All notable changes to the osmena crates. The crates version together.
   SaveProfile, CreateProfile, DeleteProfile}`, `Prompt::{Profile,
   DeleteProfile}`, `EngineAction::{CreateProfile, DeleteProfile,
   SwitchBookmarks, CopyExtensionsFromDefault}`, `menus::profiles_menu`,
-  `MenuRequest::Profiles`, `chrome::{paint_avatar, swatch_row}`, and
+  `MenuRequest::Profiles`, `chrome::{paint_avatar, swatch_grid}`, and
   `extensions.toml` in the profile, the installed extensions as the
   engine last reported them, which is what another profile copies.
 - A browser window's title names the profile when it is not the
@@ -50,6 +50,19 @@ All notable changes to the osmena crates. The crates version together.
 - The `Shell` chrome colour, a warm sand, light enough that the strip's
   text turns dark; and `Brand::chrome_color`, the swatch a fresh profile
   of that brand starts with (a required field: every brand chooses).
+- The chrome colours are seven hues in three shades each, a pastel, the
+  middle shade and a deeper, more natural one (`ChromeColor::FAMILIES`):
+  Shell, Driftwood, Walnut; Mist, Slate, Graphite; Lagoon, Ocean, Abyss;
+  Mint, Forest, Pine; Lavender, Plum, Aubergine; Blush, Rose, Wine;
+  Peach, Amber, Umber. The eight earlier names keep their colours. The
+  settings window and the profile dialog show them as a grid
+  (`chrome::swatch_grid`, which replaces `swatch_row`), a hue per
+  column; a new profile starts on the current colour's shade of the
+  next hue.
+- Avatars are drawn from a font of their own, `theme::AVATARS`: the
+  current monochrome Noto Emoji (SIL Open Font License, bundled in
+  `osmena-chrome/assets/fonts`), cut down to the avatars' glyphs, since
+  egui's older copy lacks the newer emoji.
 - The macOS menu bar: the application menu (About, Settings…,
   Services, Hide, Hide Others, Show All, Quit), File, Edit, View,
   History (Back, Forward, Home, Reopen Closed Tab, the ten most

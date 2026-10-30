@@ -589,7 +589,7 @@ fn draw_general(ui: &mut egui::Ui, settings: &mut Settings, activity: &mut FormA
 
             ui.label("Chrome colour");
             ui.vertical(|ui| {
-                if chrome::swatch_row(ui, &mut settings.chrome_color) {
+                if chrome::swatch_grid(ui, &mut settings.chrome_color) {
                     activity.edited = true;
                     activity.committed = true;
                 }

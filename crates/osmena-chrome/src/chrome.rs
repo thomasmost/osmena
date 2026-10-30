@@ -64,6 +64,10 @@ const AVATAR_CHOICE_RADIUS: f32 = 16.0;
 const AVATAR_PREVIEW_RADIUS: f32 = 28.0;
 /// How many avatars per row in the profile dialog.
 const AVATAR_COLUMNS: usize = 6;
+/// Between the avatars of the profile dialog, and between its swatches.
+const AVATAR_SPACING: f32 = 6.0;
+const SWATCH_SIZE: f32 = 26.0;
+const SWATCH_SPACING: f32 = 4.0;
 
 /// The shades the chrome paints with, all derived from the profile's
 /// [`ChromeColor`]: the tab strip is the swatch at its top and fades to
@@ -234,6 +238,8 @@ struct PromptState {
     text: String,
     existing: Option<usize>,
     form: ProfileForm,
+    /// The profile dialog's avatar tab, an index into `Avatar::PALETTES`.
+    avatar_tab: usize,
     /// The text field takes focus on the first frame.
     focus: bool,
 }
@@ -279,11 +285,13 @@ impl ChromeState {
             Prompt::Profile { form, .. } => form.clone(),
             _ => ProfileForm::default(),
         };
+        let avatar_tab = avatar_tab_for(form.avatar);
         self.prompt = Some(PromptState {
             prompt,
             text,
             existing: None,
             form,
+            avatar_tab,
             focus: true,
         });
         self.open_folder = None;
@@ -1814,7 +1822,7 @@ fn draw_profile_prompt(
             }
             ui.add_space(8.0);
             ui.label("Theme colour");
-            swatch_row(ui, &mut form.color);
+            swatch_grid(ui, &mut form.color);
             ui.add_space(8.0);
             ui.label("Avatar");
             ui.horizontal(|ui| {
@@ -1831,30 +1839,53 @@ fn draw_profile_prompt(
                 }
                 ui.label(RichText::new("The name's initial").weak());
             });
-            for palette in Avatar::PALETTES {
-                ui.add_space(4.0);
-                ui.label(RichText::new(palette.name).small().weak());
-                egui::Grid::new(("profile-avatars", palette.name))
-                    .spacing([6.0, 6.0])
-                    .show(ui, |ui| {
-                        for (i, avatar) in palette.avatars.iter().enumerate() {
-                            if avatar_choice(
-                                ui,
-                                *avatar,
-                                form.avatar == *avatar,
-                                form.color,
-                                &prompt.text,
-                            )
-                            .clicked()
-                            {
-                                form.avatar = *avatar;
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                for (i, palette) in Avatar::PALETTES.iter().enumerate() {
+                    if ui
+                        .selectable_label(prompt.avatar_tab == i, palette.name)
+                        .clicked()
+                    {
+                        prompt.avatar_tab = i;
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            // Every tab takes the room of the longest, so the buttons
+            // below stay put when the tab changes.
+            let choice = AVATAR_CHOICE_RADIUS * 2.0 + 6.0;
+            let rows = Avatar::PALETTES
+                .iter()
+                .map(|p| p.avatars.len().div_ceil(AVATAR_COLUMNS))
+                .max()
+                .unwrap_or(1) as f32;
+            let palette = Avatar::PALETTES[prompt.avatar_tab.min(Avatar::PALETTES.len() - 1)];
+            ui.allocate_ui(
+                Vec2::new(ui.available_width(), rows * (choice + AVATAR_SPACING)),
+                |ui| {
+                    ui.set_min_height(rows * (choice + AVATAR_SPACING) - AVATAR_SPACING);
+                    egui::Grid::new(("profile-avatars", palette.name))
+                        .spacing([AVATAR_SPACING, AVATAR_SPACING])
+                        .show(ui, |ui| {
+                            for (i, avatar) in palette.avatars.iter().enumerate() {
+                                if avatar_choice(
+                                    ui,
+                                    *avatar,
+                                    form.avatar == *avatar,
+                                    form.color,
+                                    &prompt.text,
+                                )
+                                .clicked()
+                                {
+                                    form.avatar = *avatar;
+                                }
+                                if (i + 1) % AVATAR_COLUMNS == 0 {
+                                    ui.end_row();
+                                }
                             }
-                            if (i + 1) % AVATAR_COLUMNS == 0 {
-                                ui.end_row();
-                            }
-                        }
-                    });
-            }
+                        });
+                },
+            );
             if takes_from_default {
                 ui.add_space(8.0);
                 ui.checkbox(
@@ -1982,35 +2013,51 @@ fn draw_delete_profile_prompt(ui: &mut Ui, state: &mut ChromeState) -> Vec<Comma
     Vec::new()
 }
 
-/// A row of the chrome colours, the selected one outlined; a click
-/// selects. Returns true when the selection changed.
-pub fn swatch_row(ui: &mut Ui, selected: &mut ChromeColor) -> bool {
+/// The theme colour picker: a column per hue of `ChromeColor::FAMILIES`,
+/// pastel on top, the deep shade at the bottom. Returns whether the
+/// user picked another swatch.
+pub fn swatch_grid(ui: &mut Ui, selected: &mut ChromeColor) -> bool {
     let mut changed = false;
-    ui.horizontal(|ui| {
-        for color in ChromeColor::ALL {
-            let [r, g, b] = color.rgb();
-            let is_selected = *selected == color;
-            let stroke = if is_selected {
-                Stroke::new(2.0_f32, ui.visuals().strong_text_color())
-            } else {
-                Stroke::new(1.0_f32, Color32::from_black_alpha(40))
-            };
-            let swatch = ui
-                .add(
-                    Button::new("")
-                        .fill(Color32::from_rgb(r, g, b))
-                        .stroke(stroke)
-                        .corner_radius(theme::CORNER)
-                        .min_size(Vec2::splat(26.0)),
-                )
-                .on_hover_text(color.label());
-            if swatch.clicked() && !is_selected {
-                *selected = color;
-                changed = true;
+    egui::Grid::new(ui.next_auto_id())
+        .spacing([SWATCH_SPACING, SWATCH_SPACING])
+        .show(ui, |ui| {
+            for shade in 0..3 {
+                for family in ChromeColor::FAMILIES {
+                    let color = family[shade];
+                    let [r, g, b] = color.rgb();
+                    let is_selected = *selected == color;
+                    let stroke = if is_selected {
+                        Stroke::new(2.0_f32, ui.visuals().strong_text_color())
+                    } else {
+                        Stroke::new(1.0_f32, Color32::from_black_alpha(40))
+                    };
+                    let swatch = ui
+                        .add(
+                            Button::new("")
+                                .fill(Color32::from_rgb(r, g, b))
+                                .stroke(stroke)
+                                .corner_radius(theme::CORNER)
+                                .min_size(Vec2::splat(SWATCH_SIZE)),
+                        )
+                        .on_hover_text(color.label());
+                    if swatch.clicked() && !is_selected {
+                        *selected = color;
+                        changed = true;
+                    }
+                }
+                ui.end_row();
             }
-        }
-    });
+        });
     changed
+}
+
+/// The profile dialog's first tab for `avatar`: the first palette that
+/// offers it, or the first palette for the initial.
+fn avatar_tab_for(avatar: Avatar) -> usize {
+    Avatar::PALETTES
+        .iter()
+        .position(|p| p.avatars.contains(&avatar))
+        .unwrap_or(0)
 }
 
 /// A profile's avatar: a disc of `color` with the avatar's glyph, or the
@@ -2040,7 +2087,7 @@ pub fn paint_avatar(
     // The emoji font's glyphs are drawn a little smaller than their size
     // says, so they get more of it than a letter does.
     let font = if avatar.glyph().is_some() {
-        egui::FontId::proportional(radius * 1.3)
+        egui::FontId::new(radius * 1.3, egui::FontFamily::Name(theme::AVATARS.into()))
     } else {
         egui::FontId::new(radius * 1.15, egui::FontFamily::Name(theme::MEDIUM.into()))
     };
@@ -2727,6 +2774,16 @@ mod tests {
         assert_eq!(palette.strip_at(2.0), palette.toolbar);
     }
     use keyboard_types::Modifiers;
+
+    #[test]
+    fn the_profile_dialog_opens_on_the_current_avatars_tab() {
+        assert_eq!(avatar_tab_for(Avatar::Initial), 0);
+        assert_eq!(avatar_tab_for(Avatar::Crab), 0);
+        // In the sea creatures and the assorted set: the first wins.
+        assert_eq!(avatar_tab_for(Avatar::Whale), 0);
+        assert_eq!(avatar_tab_for(Avatar::Wink), 1);
+        assert_eq!(avatar_tab_for(Avatar::Rocket), 2);
+    }
 
     #[test]
     fn full_urls_pass_through() {

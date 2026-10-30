@@ -5,10 +5,10 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-10-26 (profiles: name, colour, avatar, the Profiles
-menu behind the toolbar's avatar and in the menu bar, the profile
-dialog, adding and deleting profiles, shared bookmarks and copied
-extensions; before that the theme and the macOS menu bar)._
+_Last updated: 2026-10-29 (the avatar font and the colour families;
+before that profiles: name, colour, avatar, the Profiles menu behind
+the toolbar's avatar and in the menu bar, the profile dialog, adding
+and deleting profiles, shared bookmarks and copied extensions)._
 
 ## Architecture
 
@@ -56,7 +56,12 @@ No engine is needed; the workspace builds in under a minute.
   (`INPUT_MARGIN`) and the pill fields (`pill_fields`) are set there
   once per egui context (`install`, called by both windows). A new
   field takes `INPUT_MARGIN`; a new colour goes through `Palette`, which
-  picks dark or light text by the swatch's luminance.
+  picks dark or light text by the swatch's luminance. A new swatch
+  joins a hue of `ChromeColor::FAMILIES` (pastel, middle, deep; a test
+  checks they darken in that order). Avatar glyphs come from
+  `theme::AVATARS` only, a cut of Noto Emoji: a new avatar needs its
+  code point added to that cut (the recipe is on `AVATARS`; a test
+  fails otherwise).
 - **Every user action is a `Command`.** New chrome controls and shortcuts
   add a `Command` (and a `CommandKind` if it needs a hotkey), never a
   direct engine call. A new `CommandKind` needs a `name` (stable: it is
@@ -333,6 +338,21 @@ font covers (crab, shark, squid, jellyfish, seal, and the other newer
 sea emoji are not in it; check the font's cmap before adding a glyph).
 Verified: `cargo test`, clippy, fmt, and a scripted run in Nautilus on
 Windows (the dialog with both palettes, a pick). Not verified: macOS.
+
+Added 2026-10-29: the avatars come in three tabs (`Avatar::PALETTES`:
+"Sea creatures", 22, with shark, seal, otter, squid, jellyfish, crab,
+lobster, shrimp, oyster, coral, crocodile and merperson new; "Emoji",
+the 24 most used in Unicode's frequency ranking; "Assorted"), each
+tab as tall as the longest so the buttons stay put, opening on the
+current avatar's tab. They are drawn from their own font,
+`assets/fonts/NotoEmoji-Avatars.ttf` (46 KB: Google Fonts' current
+`NotoEmoji[wght]` at weight 400, subset to the 65 avatar glyphs with
+fontTools), because egui's NotoEmoji is old enough to lack most of
+them. The chrome colours are seven hues of three shades
+(`ChromeColor::FAMILIES`, 21 swatches, the eight old names unchanged),
+drawn by `chrome::swatch_grid` in both the settings window and the
+dialog. Verified: `cargo test`, clippy, fmt; Nautilus builds against
+it.
 
 Known and left alone: a native menu (`native_menu`, `TrackPopupMenu` on
 Windows) blocks inside the event loop, so pages freeze under any

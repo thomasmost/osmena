@@ -148,39 +148,99 @@ pub enum ChromeColor {
     /// A warm sand, like the inside of a shell: light, so the text on
     /// the strip is dark.
     Shell,
+    Driftwood,
+    Walnut,
+    Mist,
     #[default]
     Slate,
-    Ocean,
-    Forest,
-    Plum,
-    Rose,
-    Amber,
     Graphite,
+    Lagoon,
+    Ocean,
+    Abyss,
+    Mint,
+    Forest,
+    Pine,
+    Lavender,
+    Plum,
+    Aubergine,
+    Blush,
+    Rose,
+    Wine,
+    Peach,
+    Amber,
+    Umber,
 }
 
 impl ChromeColor {
-    /// Every swatch, in the order the settings window shows them.
-    pub const ALL: [ChromeColor; 8] = [
+    /// The swatches by hue, each from its pastel through the middle
+    /// shade to a deeper, more natural one: what the colour picker lays
+    /// out as a grid, a hue per column.
+    pub const FAMILIES: [[ChromeColor; 3]; 7] = [
+        [
+            ChromeColor::Shell,
+            ChromeColor::Driftwood,
+            ChromeColor::Walnut,
+        ],
+        [ChromeColor::Mist, ChromeColor::Slate, ChromeColor::Graphite],
+        [ChromeColor::Lagoon, ChromeColor::Ocean, ChromeColor::Abyss],
+        [ChromeColor::Mint, ChromeColor::Forest, ChromeColor::Pine],
+        [
+            ChromeColor::Lavender,
+            ChromeColor::Plum,
+            ChromeColor::Aubergine,
+        ],
+        [ChromeColor::Blush, ChromeColor::Rose, ChromeColor::Wine],
+        [ChromeColor::Peach, ChromeColor::Amber, ChromeColor::Umber],
+    ];
+
+    /// Every swatch, hue by hue, pastel first.
+    pub const ALL: [ChromeColor; 21] = [
         ChromeColor::Shell,
+        ChromeColor::Driftwood,
+        ChromeColor::Walnut,
+        ChromeColor::Mist,
         ChromeColor::Slate,
-        ChromeColor::Ocean,
-        ChromeColor::Forest,
-        ChromeColor::Plum,
-        ChromeColor::Rose,
-        ChromeColor::Amber,
         ChromeColor::Graphite,
+        ChromeColor::Lagoon,
+        ChromeColor::Ocean,
+        ChromeColor::Abyss,
+        ChromeColor::Mint,
+        ChromeColor::Forest,
+        ChromeColor::Pine,
+        ChromeColor::Lavender,
+        ChromeColor::Plum,
+        ChromeColor::Aubergine,
+        ChromeColor::Blush,
+        ChromeColor::Rose,
+        ChromeColor::Wine,
+        ChromeColor::Peach,
+        ChromeColor::Amber,
+        ChromeColor::Umber,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
             ChromeColor::Shell => "Shell",
+            ChromeColor::Driftwood => "Driftwood",
+            ChromeColor::Walnut => "Walnut",
+            ChromeColor::Mist => "Mist",
             ChromeColor::Slate => "Slate",
-            ChromeColor::Ocean => "Ocean",
-            ChromeColor::Forest => "Forest",
-            ChromeColor::Plum => "Plum",
-            ChromeColor::Rose => "Rose",
-            ChromeColor::Amber => "Amber",
             ChromeColor::Graphite => "Graphite",
+            ChromeColor::Lagoon => "Lagoon",
+            ChromeColor::Ocean => "Ocean",
+            ChromeColor::Abyss => "Abyss",
+            ChromeColor::Mint => "Mint",
+            ChromeColor::Forest => "Forest",
+            ChromeColor::Pine => "Pine",
+            ChromeColor::Lavender => "Lavender",
+            ChromeColor::Plum => "Plum",
+            ChromeColor::Aubergine => "Aubergine",
+            ChromeColor::Blush => "Blush",
+            ChromeColor::Rose => "Rose",
+            ChromeColor::Wine => "Wine",
+            ChromeColor::Peach => "Peach",
+            ChromeColor::Amber => "Amber",
+            ChromeColor::Umber => "Umber",
         }
     }
 
@@ -189,13 +249,26 @@ impl ChromeColor {
     pub fn rgb(self) -> [u8; 3] {
         match self {
             ChromeColor::Shell => [229, 214, 194],
+            ChromeColor::Driftwood => [156, 130, 102],
+            ChromeColor::Walnut => [92, 66, 48],
+            ChromeColor::Mist => [208, 215, 226],
             ChromeColor::Slate => [71, 85, 105],
-            ChromeColor::Ocean => [14, 110, 140],
-            ChromeColor::Forest => [31, 112, 72],
-            ChromeColor::Plum => [96, 60, 142],
-            ChromeColor::Rose => [168, 36, 86],
-            ChromeColor::Amber => [166, 86, 12],
             ChromeColor::Graphite => [40, 41, 46],
+            ChromeColor::Lagoon => [184, 222, 230],
+            ChromeColor::Ocean => [14, 110, 140],
+            ChromeColor::Abyss => [12, 56, 76],
+            ChromeColor::Mint => [196, 228, 204],
+            ChromeColor::Forest => [31, 112, 72],
+            ChromeColor::Pine => [22, 66, 46],
+            ChromeColor::Lavender => [218, 206, 238],
+            ChromeColor::Plum => [96, 60, 142],
+            ChromeColor::Aubergine => [58, 36, 82],
+            ChromeColor::Blush => [244, 208, 220],
+            ChromeColor::Rose => [168, 36, 86],
+            ChromeColor::Wine => [100, 26, 50],
+            ChromeColor::Peach => [250, 218, 188],
+            ChromeColor::Amber => [166, 86, 12],
+            ChromeColor::Umber => [102, 56, 22],
         }
     }
 }
@@ -346,8 +419,37 @@ mod tests {
             Settings::parse("chrome_color = \"neon\"\n"),
             Err(SettingsError::Parse(_))
         ));
-        assert_eq!(ChromeColor::ALL.len(), 8);
+        assert_eq!(ChromeColor::ALL.len(), 21);
         assert_eq!(ChromeColor::default(), ChromeColor::Slate);
+    }
+
+    #[test]
+    fn the_families_are_every_swatch_once_from_light_to_dark() {
+        let flat: Vec<ChromeColor> = ChromeColor::FAMILIES.iter().flatten().copied().collect();
+        assert_eq!(flat, ChromeColor::ALL);
+        // The colours saved before the families keep their place in the
+        // middle (Shell and Graphite at the ends of theirs).
+        for color in [
+            ChromeColor::Slate,
+            ChromeColor::Ocean,
+            ChromeColor::Forest,
+            ChromeColor::Plum,
+            ChromeColor::Rose,
+            ChromeColor::Amber,
+        ] {
+            assert!(
+                ChromeColor::FAMILIES.iter().any(|f| f[1] == color),
+                "{color:?}"
+            );
+        }
+        let luma = |c: ChromeColor| {
+            let [r, g, b] = c.rgb();
+            0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b)
+        };
+        for [pastel, middle, deep] in ChromeColor::FAMILIES {
+            assert!(luma(pastel) > luma(middle), "{pastel:?}");
+            assert!(luma(middle) > luma(deep), "{deep:?}");
+        }
     }
 
     #[test]
