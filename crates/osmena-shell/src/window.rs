@@ -705,8 +705,11 @@ impl<E: Engine> BrowserWindow<E> {
                 let key_input = keyutils::key_input_from_winit(key, self.modifiers);
                 // The downloads popover has no field to hold the focus,
                 // but its Escape is egui's all the same.
-                let egui_wants_keyboard =
-                    self.egui.egui_ctx.egui_wants_keyboard_input() || self.chrome.downloads_open;
+                // The downloads popover and the Launch Panel take every
+                // key while open (Escape closes them), focus or not.
+                let egui_wants_keyboard = self.egui.egui_ctx.egui_wants_keyboard_input()
+                    || self.chrome.downloads_open
+                    || self.chrome.has_launcher();
                 let stroke = KeyStroke {
                     code: key_input.code,
                     modifiers: key_input.modifiers,
@@ -908,6 +911,9 @@ impl<E: Engine> BrowserWindow<E> {
                 page_zoom: browser.settings.page_zoom,
                 downloads: &browser.downloads,
                 restore_offer: browser.crashed_session.is_some(),
+                launch: &browser.launch,
+                launch_settings: &browser.settings.launch,
+                search: &browser.settings.search,
             };
             commands = chrome::draw(ui, model, &context, chrome_state, keymap);
             let rect = ui.available_rect_before_wrap();

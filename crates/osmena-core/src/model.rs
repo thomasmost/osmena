@@ -10,6 +10,7 @@ use crate::bookmarks::Bookmarks;
 use crate::download::Downloads;
 use crate::extension::Extension;
 use crate::history::History;
+use crate::launch::LaunchData;
 use crate::profile::{DEFAULT_PROFILE_NAME, Profile, ProfileEntry};
 use crate::session::Session;
 use crate::settings::Settings;
@@ -367,6 +368,8 @@ pub struct Browser {
     /// The last run ended without a clean exit and left this session,
     /// which the chrome offers to restore until answered.
     pub crashed_session: Option<Session>,
+    /// What the shell fetched for the Launch Panel's tiles.
+    pub launch: LaunchData,
     next_window_id: u64,
     next_tab_id: u64,
     next_folder_id: u64,
@@ -392,6 +395,7 @@ impl Browser {
             downloads: Downloads::default(),
             quit_confirmed: false,
             crashed_session: None,
+            launch: LaunchData::default(),
             next_window_id: 1,
             next_tab_id: 1,
             next_folder_id: 1,

@@ -9,12 +9,16 @@ use crate::bookmarks_html;
 use crate::download::{Download, DownloadId, DownloadState};
 use crate::event::PendingTab;
 use crate::extension::ExtensionSource;
+use crate::history::unix_now;
+use crate::launch::{
+    DRIVE_LIFETIME, DriveState, Fetched, Place, Units, WEATHER_LIFETIME, WidgetKind,
+};
 use crate::model::{
     Browser, FindState, Folder, FolderId, LoadState, Tab, TabId, Window, WindowId, site_key,
 };
 use crate::profile::{Avatar, DEFAULT_PROFILE_NAME};
 use crate::session::{Session, WindowGeometry};
-use crate::settings::ChromeColor;
+use crate::settings::{ChromeColor, UrlTemplate};
 use crate::update::{AvailableUpdate, UpdateStatus};
 use crate::zoom::{ZOOM_MAX, ZOOM_MIN, next_step};
 
@@ -322,6 +326,44 @@ pub enum Command {
     /// (which was dispatched first): the engine may let go of what it
     /// held for it.
     ContextMenuClosed(TabId),
+    /// A question typed into the Launch Panel's field of `kind`
+    /// (`AskClaude` or `AskChatGpt`): open that template's URL for
+    /// `query` in a new tab of `window`.
+    AskInNewTab {
+        window: WindowId,
+        kind: WidgetKind,
+        query: String,
+    },
+    /// Put a tile of the Launch Panel at `index` among the others
+    /// (0 first; the count of the others last).
+    MoveWidget {
+        kind: WidgetKind,
+        index: usize,
+    },
+    /// Take a tile off the Launch Panel.
+    RemoveWidget(WidgetKind),
+    /// The default tiles in the default order again.
+    RestoreWidgets,
+    /// Keep a host off the "Most visited" tile.
+    HideTopSite(String),
+    /// The address bar's search engine (the Launch Settings' choice).
+    SetSearch(UrlTemplate),
+    /// The URL template of a question tile.
+    SetAskTemplate {
+        kind: WidgetKind,
+        template: UrlTemplate,
+    },
+    /// Find places named `query` for the weather tile.
+    LookUpPlace(String),
+    /// The weather tile's place; `None` asks for one again.
+    SetWeatherPlace(Option<Place>),
+    SetWeatherUnits(Units),
+    /// Sign in to Google for the Drive tile, through a tab of `window`.
+    ConnectGoogle(WindowId),
+    /// Forget the Google account.
+    DisconnectGoogle,
+    /// Fetch the tiles' data again now (a tile's Retry).
+    RefreshLaunch,
     Quit,
 }
 
@@ -658,6 +700,26 @@ pub enum EngineAction {
     },
     /// The context menu of `tab`'s page closed.
     ContextMenuClosed(TabId),
+    /// Find places named this for the weather tile; answered with
+    /// `LaunchUpdate::Places`.
+    LookUpPlace(String),
+    /// Fetch today's weather at `place`; answered with
+    /// `LaunchUpdate::Weather`.
+    FetchWeather {
+        place: Place,
+        units: Units,
+    },
+    /// Start the Google sign-in: open the consent page in a new tab of
+    /// `window` and wait for the redirect; answered with
+    /// `LaunchUpdate::GoogleConnected`.
+    BeginGoogleSignIn {
+        window: WindowId,
+    },
+    /// Revoke and remove the Google token.
+    ForgetGoogle,
+    /// Fetch the Drive files the user opened last; answered with
+    /// `LaunchUpdate::DriveFiles`.
+    FetchDriveRecent,
     Quit,
 }
 
@@ -667,7 +729,9 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
         Command::NewTab { window, url } => match url {
             Some(url) => new_tab(browser, *window, url.clone()),
             None if browser.window(*window).is_some() => {
-                vec![EngineAction::ShowLauncher { window: *window }]
+                let mut actions = vec![EngineAction::ShowLauncher { window: *window }];
+                actions.extend(launch_fetches(browser, false));
+                actions
             }
             None => Vec::new(),
         },
@@ -1310,6 +1374,83 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             Some(url) => new_tab(browser, *window, url),
             None => Vec::new(),
         },
+        Command::AskInNewTab {
+            window,
+            kind,
+            query,
+        } => match browser
+            .settings
+            .launch
+            .ask_template(*kind)
+            .and_then(|t| t.url_for(query))
+        {
+            Some(url) => new_tab(browser, *window, url),
+            None => Vec::new(),
+        },
+        Command::MoveWidget { kind, index } => {
+            save_if(browser.settings.launch.move_widget(*kind, *index))
+        }
+        Command::RemoveWidget(kind) => save_if(browser.settings.launch.remove_widget(*kind)),
+        Command::RestoreWidgets => save_if(browser.settings.launch.restore_widgets()),
+        Command::HideTopSite(host) => save_if(browser.settings.launch.hide_site(host)),
+        Command::SetSearch(template) => {
+            if browser.settings.search == *template {
+                return Vec::new();
+            }
+            browser.settings.search = template.clone();
+            vec![EngineAction::SaveSettings]
+        }
+        Command::SetAskTemplate { kind, template } => {
+            match browser.settings.launch.ask_template_mut(*kind) {
+                Some(current) if current != template => {
+                    *current = template.clone();
+                    vec![EngineAction::SaveSettings]
+                }
+                _ => Vec::new(),
+            }
+        }
+        Command::LookUpPlace(query) => {
+            let query = query.trim();
+            if query.is_empty() {
+                return Vec::new();
+            }
+            browser.launch.places = Fetched::Loading;
+            vec![EngineAction::LookUpPlace(query.to_string())]
+        }
+        Command::SetWeatherPlace(place) => {
+            browser.settings.launch.weather.location = place.clone();
+            browser.launch.places = Fetched::Empty;
+            browser.launch.weather = Fetched::Empty;
+            let mut actions = vec![EngineAction::SaveSettings];
+            actions.extend(launch_fetches(browser, true));
+            actions
+        }
+        Command::SetWeatherUnits(units) => {
+            if browser.settings.launch.weather.units == *units {
+                return Vec::new();
+            }
+            browser.settings.launch.weather.units = *units;
+            browser.launch.weather = Fetched::Empty;
+            let mut actions = vec![EngineAction::SaveSettings];
+            actions.extend(launch_fetches(browser, true));
+            actions
+        }
+        Command::ConnectGoogle(window) => {
+            if browser.launch.drive != DriveState::Disconnected || browser.window(*window).is_none()
+            {
+                return Vec::new();
+            }
+            browser.launch.drive = DriveState::Connecting;
+            vec![EngineAction::BeginGoogleSignIn { window: *window }]
+        }
+        Command::DisconnectGoogle => match browser.launch.drive {
+            DriveState::Unavailable | DriveState::Disconnected => Vec::new(),
+            _ => {
+                browser.launch.drive = DriveState::Disconnected;
+                vec![EngineAction::ForgetGoogle]
+            }
+        },
+        Command::RefreshLaunch => launch_fetches(browser, true),
         Command::NewBackgroundTab { opener, url } => new_background_tab(browser, *opener, url),
         Command::OpenInNewWindow(url) => open_window(browser, url.clone()),
         Command::CopyText(text) => vec![EngineAction::CopyText(text.clone())],
@@ -2085,6 +2226,48 @@ fn close_window(browser: &mut Browser, window: WindowId) -> Vec<EngineAction> {
     actions.push(EngineAction::CloseWindow(window));
     if browser.windows.is_empty() {
         actions.push(EngineAction::Quit);
+    }
+    actions
+}
+
+/// `SaveSettings` when a setting changed, nothing otherwise.
+fn save_if(changed: bool) -> Vec<EngineAction> {
+    if changed {
+        vec![EngineAction::SaveSettings]
+    } else {
+        Vec::new()
+    }
+}
+
+/// What the Launch Panel's tiles need fetched: the weather when a place
+/// is set and the report is older than its lifetime (or `force`), the
+/// Drive list when an account is connected and the list is older than
+/// its lifetime. A tile the user removed asks for nothing; a fetch
+/// already going is never asked for twice. The data moves to `Loading`
+/// here so the tile shows it at once.
+fn launch_fetches(browser: &mut Browser, force: bool) -> Vec<EngineAction> {
+    let now = unix_now();
+    let mut actions = Vec::new();
+    let settings = &browser.settings.launch;
+    let shown = |kind: WidgetKind| settings.widgets.contains(&kind);
+    if shown(WidgetKind::Weather)
+        && let Some(place) = &settings.weather.location
+        && browser.launch.weather != Fetched::Loading
+        && (force || browser.launch.weather.is_stale(now, WEATHER_LIFETIME))
+    {
+        actions.push(EngineAction::FetchWeather {
+            place: place.clone(),
+            units: settings.weather.units,
+        });
+        browser.launch.weather = Fetched::Loading;
+    }
+    if shown(WidgetKind::DriveRecent)
+        && let DriveState::Connected { files, .. } = &mut browser.launch.drive
+        && *files != Fetched::Loading
+        && (force || files.is_stale(now, DRIVE_LIFETIME))
+    {
+        actions.push(EngineAction::FetchDriveRecent);
+        *files = Fetched::Loading;
     }
     actions
 }
@@ -4460,5 +4643,253 @@ mod tests {
         assert!(!b.settings.profile.share_bookmarks);
         assert_eq!(next_color(ChromeColor::Graphite), ChromeColor::Abyss);
         assert_eq!(next_color(ChromeColor::Peach), ChromeColor::Shell);
+    }
+
+    fn seattle() -> Place {
+        Place {
+            name: "Seattle".to_string(),
+            latitude: 47.6,
+            longitude: -122.3,
+        }
+    }
+
+    #[test]
+    fn a_question_opens_the_template_in_a_new_tab() {
+        let (mut b, window, _) = one_window();
+        let actions = dispatch(
+            &mut b,
+            &Command::AskInNewTab {
+                window,
+                kind: WidgetKind::AskClaude,
+                query: "why is the sky blue?".to_string(),
+            },
+        );
+        assert!(matches!(
+            actions.as_slice(),
+            [EngineAction::Hide(_), EngineAction::CreateTab { url, .. }]
+                if url.as_str() == "https://claude.ai/new?q=why+is+the+sky+blue%3F"
+        ));
+        // Not a question tile, or a blank question: nothing.
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::AskInNewTab {
+                    window,
+                    kind: WidgetKind::Weather,
+                    query: "x".to_string(),
+                },
+            )
+            .is_empty()
+        );
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::AskInNewTab {
+                    window,
+                    kind: WidgetKind::AskChatGpt,
+                    query: " ".to_string(),
+                },
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn widget_commands_save_the_settings_when_they_change_them() {
+        let (mut b, _, _) = one_window();
+        assert_eq!(
+            dispatch(
+                &mut b,
+                &Command::MoveWidget {
+                    kind: WidgetKind::TopSites,
+                    index: 0
+                }
+            ),
+            vec![EngineAction::SaveSettings]
+        );
+        assert_eq!(b.settings.launch.widgets[0], WidgetKind::TopSites);
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::MoveWidget {
+                    kind: WidgetKind::TopSites,
+                    index: 0
+                }
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            dispatch(&mut b, &Command::RemoveWidget(WidgetKind::AskChatGpt)),
+            vec![EngineAction::SaveSettings]
+        );
+        assert!(dispatch(&mut b, &Command::RemoveWidget(WidgetKind::AskChatGpt)).is_empty());
+        assert_eq!(
+            dispatch(&mut b, &Command::RestoreWidgets),
+            vec![EngineAction::SaveSettings]
+        );
+        assert_eq!(b.settings.launch.widgets, WidgetKind::ALL);
+        assert_eq!(
+            dispatch(&mut b, &Command::HideTopSite("News.Example".into())),
+            vec![EngineAction::SaveSettings]
+        );
+        assert_eq!(b.settings.launch.hidden_sites, vec!["news.example"]);
+        let ddg = UrlTemplate::preset(1);
+        assert_eq!(
+            dispatch(&mut b, &Command::SetSearch(ddg.clone())),
+            vec![EngineAction::SaveSettings]
+        );
+        assert!(dispatch(&mut b, &Command::SetSearch(ddg)).is_empty());
+        let t = UrlTemplate::new("Claude", "https://claude.ai/new?q={query}&x=1");
+        assert_eq!(
+            dispatch(
+                &mut b,
+                &Command::SetAskTemplate {
+                    kind: WidgetKind::AskClaude,
+                    template: t.clone()
+                }
+            ),
+            vec![EngineAction::SaveSettings]
+        );
+        assert_eq!(b.settings.launch.ask_claude, t);
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::SetAskTemplate {
+                    kind: WidgetKind::TopSites,
+                    template: t
+                }
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_launcher_fetches_stale_weather_and_drive_but_not_fresh_or_loading() {
+        let (mut b, window, _) = one_window();
+        let open = Command::NewTab { window, url: None };
+        // No place, no account: the launcher alone.
+        assert_eq!(
+            dispatch(&mut b, &open),
+            vec![EngineAction::ShowLauncher { window }]
+        );
+        // A place and a connected account with nothing fetched yet.
+        b.settings.launch.weather.location = Some(seattle());
+        b.launch.drive = DriveState::Connected {
+            account: "me@example.com".into(),
+            files: Fetched::Empty,
+        };
+        assert_eq!(
+            dispatch(&mut b, &open),
+            vec![
+                EngineAction::ShowLauncher { window },
+                EngineAction::FetchWeather {
+                    place: seattle(),
+                    units: Units::Celsius
+                },
+                EngineAction::FetchDriveRecent,
+            ]
+        );
+        assert_eq!(b.launch.weather, Fetched::Loading);
+        // Loading: not asked again.
+        assert_eq!(
+            dispatch(&mut b, &open),
+            vec![EngineAction::ShowLauncher { window }]
+        );
+        // Fresh: not asked again; stale: asked.
+        let now = unix_now();
+        b.launch.weather = Fetched::Ready {
+            value: crate::launch::WeatherReport {
+                place: "Seattle".into(),
+                temperature: 12.0,
+                high: 14.0,
+                low: 8.0,
+                code: crate::launch::WeatherCode::Rain,
+                units: Units::Celsius,
+            },
+            at: now,
+        };
+        b.launch.drive = DriveState::Connected {
+            account: "me@example.com".into(),
+            files: Fetched::Ready {
+                value: Vec::new(),
+                at: now - DRIVE_LIFETIME - 1,
+            },
+        };
+        assert_eq!(
+            dispatch(&mut b, &open),
+            vec![
+                EngineAction::ShowLauncher { window },
+                EngineAction::FetchDriveRecent
+            ]
+        );
+        // A removed tile asks for nothing; Refresh forces the rest.
+        b.settings.launch.remove_widget(WidgetKind::DriveRecent);
+        assert_eq!(
+            dispatch(&mut b, &Command::RefreshLaunch),
+            vec![EngineAction::FetchWeather {
+                place: seattle(),
+                units: Units::Celsius
+            }]
+        );
+    }
+
+    #[test]
+    fn the_weather_place_flow() {
+        let (mut b, _, _) = one_window();
+        assert!(dispatch(&mut b, &Command::LookUpPlace("  ".into())).is_empty());
+        assert_eq!(
+            dispatch(&mut b, &Command::LookUpPlace(" Seattle ".into())),
+            vec![EngineAction::LookUpPlace("Seattle".into())]
+        );
+        assert_eq!(b.launch.places, Fetched::Loading);
+        assert_eq!(
+            dispatch(&mut b, &Command::SetWeatherPlace(Some(seattle()))),
+            vec![
+                EngineAction::SaveSettings,
+                EngineAction::FetchWeather {
+                    place: seattle(),
+                    units: Units::Celsius
+                }
+            ]
+        );
+        assert_eq!(b.launch.places, Fetched::Empty);
+        assert_eq!(b.settings.launch.weather.location, Some(seattle()));
+        assert_eq!(
+            dispatch(&mut b, &Command::SetWeatherUnits(Units::Fahrenheit)),
+            vec![
+                EngineAction::SaveSettings,
+                EngineAction::FetchWeather {
+                    place: seattle(),
+                    units: Units::Fahrenheit
+                }
+            ]
+        );
+        assert!(dispatch(&mut b, &Command::SetWeatherUnits(Units::Fahrenheit)).is_empty());
+        assert_eq!(
+            dispatch(&mut b, &Command::SetWeatherPlace(None)),
+            vec![EngineAction::SaveSettings]
+        );
+        assert_eq!(b.launch.weather, Fetched::Empty);
+    }
+
+    #[test]
+    fn the_google_connection_flow() {
+        let (mut b, window, _) = one_window();
+        // Unavailable: nothing happens.
+        assert!(dispatch(&mut b, &Command::ConnectGoogle(window)).is_empty());
+        b.launch.drive = DriveState::Disconnected;
+        assert_eq!(
+            dispatch(&mut b, &Command::ConnectGoogle(window)),
+            vec![EngineAction::BeginGoogleSignIn { window }]
+        );
+        assert_eq!(b.launch.drive, DriveState::Connecting);
+        // Twice: not while one is going.
+        assert!(dispatch(&mut b, &Command::ConnectGoogle(window)).is_empty());
+        assert_eq!(
+            dispatch(&mut b, &Command::DisconnectGoogle),
+            vec![EngineAction::ForgetGoogle]
+        );
+        assert_eq!(b.launch.drive, DriveState::Disconnected);
+        assert!(dispatch(&mut b, &Command::DisconnectGoogle).is_empty());
     }
 }

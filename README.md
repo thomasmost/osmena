@@ -8,7 +8,9 @@ nautilus shell's iridescent inner layer, which is also the paladin's armour.
 
 A browser built on osmena is four things:
 
-1. a `Brand` constant (name, data directory, homepage, icon);
+1. a `Brand` constant (name, data directory, homepage, icon, update
+   source, and the Google client id for the Launch Panel's Drive tile, if
+   the product has one);
 2. an `EngineInfo` constant (engine name and version, its data directory,
    what it can do);
 3. an engine crate that implements `Engine`, `TabHost`, and `Surface` from
@@ -118,14 +120,29 @@ The engine contract, in `osmena-engine`:
   setting "Use the system title bar and borders" (`system_title_bar` in
   `settings.toml`) restores the system frame; on macOS it applies to
   windows opened afterwards.
-- **A new tab asks first.** Ctrl+T and the "+" button open the
-  launcher, a large field over the window, instead of a blank page:
-  type an address or a search and press Enter, or pick a page from the
-  history's matches with Up and Down; Escape or a click outside opens
-  nothing. The same matches drop down under the address bar of an
-  existing tab as you type. The history (`history.toml` in the
-  profile) keeps every page that finished loading, with its title and
-  visit count, up to 5000 entries.
+- **A new tab asks first: the Launch Panel.** Ctrl+T and the "+"
+  button open a wide panel over the window instead of a blank page.
+  At its top, a large field: type an address or a search and press
+  Enter, or pick a page from the history and bookmark matches that
+  drop down under it; Escape or a click outside opens nothing. Under
+  the field, a mosaic of tiles: **Recent Drive files** (the five files
+  the connected Google account opened last; "Connect Google Drive"
+  signs in through Google in a tab, only in a build whose brand has a
+  Google client id), **Weather** (today's conditions, high and low at
+  a place named once on the tile; Open-Meteo, no key, fetched when the
+  panel opens and the last report is older than fifteen minutes),
+  **Ask Claude** and **Ask ChatGPT** (a question typed there opens the
+  service with it in a new tab), and **Most visited** (the five hosts
+  with the most visits, with their favicons; a close control on a row
+  hides that host). The gear at the bottom right opens the Launch
+  Settings in the panel: the search engine as presets or a custom
+  template (the same setting the address bar uses), the two question
+  templates, the weather place and units, the Google account, and the
+  tiles in edit mode, dragged to reorder and closed to remove, with
+  "Restore default widgets". The same matches drop down under the
+  address bar of an existing tab as you type. The history
+  (`history.toml` in the profile) keeps every page that finished
+  loading, with its title and visit count, up to 5000 entries.
 - **Tabs that drag.** A tab (or the selected tabs) dragged along the
   strip slides between the others, which move out of its way, and lands
   where it is let go; dropped between two tabs of a folder it joins the
@@ -294,8 +311,10 @@ The engine contract, in `osmena-engine`:
   provider, a chrome colour per profile, the title bar switch, the
   pinned extensions, the session-restore switch, the bookmarks bar switch and the
   group the last bookmark went to, the default page zoom, `[downloads]`
-  (the directory and whether to ask each time), and `[profile]` (name,
-  avatar, shared bookmarks, extensions to copy at the next start).
+  (the directory and whether to ask each time), `[launch]` (the
+  panel's widgets in order, the question templates, the weather place
+  and units, hidden sites), and `[profile]` (name, avatar, shared
+  bookmarks, extensions to copy at the next start).
 
 ## Updates
 
@@ -352,6 +371,21 @@ browser up to date removes what the updates directory holds for builds
 up to the running one. To try the flow against a local server, build
 with `OSMENA_BUILD_NUMBER=1` and start the browser with the hidden
 `--update-manifest http://127.0.0.1:8000/latest.toml`.
+
+## The Launch Panel's Google client
+
+The Drive tile signs in with OAuth 2.0 for installed apps (PKCE, a
+loopback redirect served by the shell for one request, the consent
+page in an ordinary tab). The browser's side is one field of its
+`Brand`, `google_client_id`: the id of a Google Cloud "Desktop app"
+OAuth client, which is not a secret. A brand reads it at compile time
+from an environment variable (`option_env!`) so CI stamps it from a
+repository variable and nothing is committed; `None` leaves the Drive
+tile out of the panel and the Google row out of the Launch Settings.
+The refresh token lives in the profile's `google.toml`
+(`Profile::google_path`), never shared between profiles, revoked and
+removed by Disconnect. The scopes are `drive.metadata.readonly` and
+`userinfo.email`, nothing else.
 
 ## Depending on osmena
 

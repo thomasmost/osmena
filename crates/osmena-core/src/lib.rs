@@ -19,6 +19,7 @@ pub mod extension;
 pub mod history;
 pub mod input;
 pub mod keymap;
+pub mod launch;
 pub mod model;
 pub mod profile;
 pub mod session;
@@ -45,6 +46,11 @@ pub use extension::{
 pub use history::{History, HistoryEntry, HistoryError};
 pub use input::{ButtonAction, EngineInput, KeyInput, MouseButton};
 pub use keymap::{ChordParseError, CommandKind, KeyChord, Keymap, KeymapError, Platform};
+pub use launch::{
+    DRIVE_LIFETIME, DriveFile, DriveKind, DriveState, Fetched, LaunchData, LaunchSettings,
+    LaunchUpdate, Place, TOP_SITES, TopSite, Units, WEATHER_LIFETIME, WeatherCode, WeatherReport,
+    WeatherSettings, WidgetKind, top_sites,
+};
 pub use model::{
     Browser, Favicon, FindState, Folder, FolderId, LoadState, RgbaImage, StripItem, Tab, TabId,
     Window, WindowId, site_key,
@@ -55,6 +61,7 @@ pub use session::{
 };
 pub use settings::{
     ChromeColor, DownloadSettings, ProfileSettings, SearchSettings, Settings, SettingsError,
+    UrlTemplate,
 };
 pub use suggest::{Suggestion, SuggestionSource, suggestions};
 pub use update::{Asset, AvailableUpdate, BuildId, Manifest, UpdateSource, UpdateStatus};

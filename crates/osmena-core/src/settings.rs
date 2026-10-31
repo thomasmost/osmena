@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::brand::Brand;
+use crate::launch::{LaunchSettings, Units};
 use crate::profile::{Avatar, DEFAULT_PROFILE_NAME};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -38,7 +39,7 @@ pub struct Settings {
     /// kept, so it comes back pinned if the extension does.
     pub pinned_extensions: Vec<String>,
     /// Where address-bar text that is not a URL goes.
-    pub search: SearchSettings,
+    pub search: UrlTemplate,
     /// How the profile presents itself and what it takes from the
     /// default profile.
     pub profile: ProfileSettings,
@@ -59,6 +60,8 @@ pub struct Settings {
     pub page_zoom: u16,
     /// Where downloads go and whether to ask for each file.
     pub downloads: DownloadSettings,
+    /// The Launch Panel: its widgets and what they need.
+    pub launch: LaunchSettings,
 }
 
 /// Downloads (`[downloads]` in `settings.toml`): the directory they go
@@ -80,13 +83,14 @@ impl Default for Settings {
             chrome_color: ChromeColor::default(),
             system_title_bar: false,
             pinned_extensions: Vec::new(),
-            search: SearchSettings::default(),
+            search: UrlTemplate::default(),
             profile: ProfileSettings::default(),
             check_for_updates: true,
             show_bookmarks_bar: false,
             last_bookmark_group: String::new(),
             page_zoom: 100,
             downloads: DownloadSettings::default(),
+            launch: LaunchSettings::default(),
         }
     }
 }
@@ -130,31 +134,73 @@ impl ProfileSettings {
     }
 }
 
-/// The search the address bar runs on text that is not a URL, and that
-/// the page's context menu offers for selected text (`[search]` in
-/// `settings.toml`). `url` names the provider: `{query}` in it stands
-/// for the text, form-encoded, and without the placeholder the text is
-/// appended. `name` labels the menu entry ("Search Google for …"). The
-/// default is a Google search; a browser may later offer a choice of
-/// engines, or something other than a search engine, through this one
-/// setting.
+/// A URL with a `{query}` placeholder: the search the address bar runs
+/// on text that is not a URL (`[search]` in `settings.toml`, which the
+/// page's context menu also offers for selected text), and the Launch
+/// Panel's question fields (`[launch.ask_claude]`, `[launch.ask_chatgpt]`).
+/// `url` names the service: `{query}` in it stands for the text,
+/// form-encoded, and without the placeholder the text is appended.
+/// `name` labels the menu entry ("Search Google for …") and the tile.
+/// The default is a Google search.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SearchSettings {
+pub struct UrlTemplate {
     pub name: String,
     pub url: String,
 }
 
-impl Default for SearchSettings {
-    fn default() -> SearchSettings {
-        SearchSettings {
-            name: "Google".to_string(),
-            url: "https://www.google.com/search?q={query}".to_string(),
-        }
+/// The address bar's search is a [`UrlTemplate`]; this is its older name.
+pub type SearchSettings = UrlTemplate;
+
+impl Default for UrlTemplate {
+    fn default() -> UrlTemplate {
+        UrlTemplate::google()
     }
 }
 
-impl SearchSettings {
+impl UrlTemplate {
+    pub fn new(name: &str, url: &str) -> UrlTemplate {
+        UrlTemplate {
+            name: name.to_string(),
+            url: url.to_string(),
+        }
+    }
+
+    /// The search engines the Launch Settings offer by name; a template
+    /// matching none of them is "Custom".
+    pub const SEARCH_PRESETS: [(&'static str, &'static str); 5] = [
+        ("Google", "https://www.google.com/search?q={query}"),
+        ("DuckDuckGo", "https://duckduckgo.com/?q={query}"),
+        ("Bing", "https://www.bing.com/search?q={query}"),
+        ("Brave", "https://search.brave.com/search?q={query}"),
+        ("Kagi", "https://kagi.com/search?q={query}"),
+    ];
+
+    pub fn google() -> UrlTemplate {
+        UrlTemplate::preset(0)
+    }
+
+    pub fn preset(index: usize) -> UrlTemplate {
+        let (name, url) = UrlTemplate::SEARCH_PRESETS[index];
+        UrlTemplate::new(name, url)
+    }
+
+    /// The preset this template is, if any.
+    pub fn preset_index(&self) -> Option<usize> {
+        UrlTemplate::SEARCH_PRESETS
+            .iter()
+            .position(|(name, url)| *name == self.name && *url == self.url)
+    }
+
+    /// Claude with the question in its composer.
+    pub fn claude() -> UrlTemplate {
+        UrlTemplate::new("Claude", "https://claude.ai/new?q={query}")
+    }
+
+    /// ChatGPT with the question in its composer.
+    pub fn chatgpt() -> UrlTemplate {
+        UrlTemplate::new("ChatGPT", "https://chatgpt.com/?q={query}")
+    }
     /// What `url` holds where the query goes.
     pub const PLACEHOLDER: &'static str = "{query}";
 
@@ -336,11 +382,16 @@ impl From<io::Error> for SettingsError {
 impl Settings {
     /// The defaults of a fresh profile of `brand`.
     pub fn for_brand(brand: &Brand) -> Settings {
-        Settings {
+        let mut settings = Settings {
             homepage: brand.homepage.to_string(),
             chrome_color: brand.chrome_color,
             ..Settings::default()
-        }
+        };
+        let locale = ["LC_ALL", "LC_MESSAGES", "LANG"]
+            .iter()
+            .find_map(|var| std::env::var(var).ok().filter(|v| !v.is_empty()));
+        settings.launch.weather.units = Units::for_locale(locale.as_deref());
+        settings
     }
 
     /// Parse without a brand: a missing homepage stays empty.
@@ -442,6 +493,10 @@ mod tests {
             downloads: DownloadSettings {
                 directory: Some(PathBuf::from("D:/files")),
                 ask_where_to_save: true,
+            },
+            launch: LaunchSettings {
+                widgets: vec![crate::launch::WidgetKind::Weather],
+                ..LaunchSettings::default()
             },
         };
         let text = s.to_toml().unwrap();

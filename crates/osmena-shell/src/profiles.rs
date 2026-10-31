@@ -115,6 +115,7 @@ mod tests {
         version: "0.1.0",
         build: None,
         updates: None,
+        google_client_id: None,
     };
 
     static ENGINE: EngineInfo = EngineInfo {

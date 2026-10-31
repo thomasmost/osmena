@@ -5,12 +5,10 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-10-30 (session restore with deferred tabs and the
-crash offer; downloads: the list, the button and popover, the engine
-contract; page zoom per site; find in page; bookmarks: the star and its
-popover, the bookmarks bar, the Bookmarks menu with import and export,
-merged suggestions, the favicon cache; before that updates over the
-air)._
+_Last updated: 2026-10-31 (the Launch Panel: the mosaic of tiles under
+the new-tab field, the Launch Settings, the shell's weather and Google
+fetchers; before that session restore, downloads, page zoom, find in
+page, bookmarks, updates over the air)._
 
 ## Architecture
 
@@ -187,11 +185,30 @@ No engine is needed; the workspace builds in under a minute.
   decides; what is not a URL is `Command::Search`, and `dispatch`
   resolves it with `Settings::search` (`url_for`), the one place that
   knows the provider. Nothing else builds a search URL.
-- **A new tab asks for its address first.** `Command::NewTab` without a
-  URL is `EngineAction::ShowLauncher`, never a tab; the chrome's
-  launcher (`draw_launcher`, `ChromeState::open_launcher`) answers with
-  `NewTab { url: Some(..) }` or `SearchInNewTab`, or with nothing. The
-  `new_tab_url` setting is what a new *window* opens on.
+- **A new tab asks for its address first: the Launch Panel.**
+  `Command::NewTab` without a URL is `EngineAction::ShowLauncher`,
+  never a tab; the chrome's panel (`osmena-chrome/src/launch.rs`,
+  `ChromeState::open_launcher`) answers with `NewTab { url: Some(..) }`,
+  `SearchInNewTab` or `AskInNewTab`, or with nothing. The `new_tab_url`
+  setting is what a new *window* opens on. The tiles under the field
+  are `osmena_core::launch`: `WidgetKind` names them, `Settings::launch`
+  (`LaunchSettings`) holds the order and what they need, and
+  `Browser::launch` (`LaunchData`) holds what the shell fetched, as
+  `Fetched<T>` (`Empty`, `Loading`, `Ready { at }`, `Failed`). Nothing
+  is fetched while the panel is closed: `dispatch` adds the fetch
+  actions to `ShowLauncher` (and to `RefreshLaunch`, the place and
+  units commands) only for a tile that is shown, never while a fetch
+  is going, and only when the data is older than its lifetime; the
+  data moves to `Loading` in the same step. The shell's `launch/`
+  module answers on threads through `AppEvent::Launch(LaunchUpdate)`,
+  which `LaunchData::apply` folds in. The Drive tile exists only when
+  `Brand::google_client_id` is `Some` (`DriveState::Unavailable`
+  otherwise, and `visible_widgets` drops it); the sign-in is the
+  shell's loopback listener plus a normal tab, the refresh token the
+  profile's `google.toml`. A question tile's URL is built in
+  `dispatch` from its `UrlTemplate`, like a search. The Launch
+  Settings are drawn in the panel, not the settings window; the
+  settings window's search rows edit the same `Settings::search`.
 - **A profile is a directory; its face is in its settings.** The
   directory name is the identity (`--profile <dir>`, `Profile::name`);
   the display name, avatar and colour live in that profile's
@@ -300,6 +317,26 @@ No engine is needed; the workspace builds in under a minute.
   adds; the shared behaviour is documented here only.
 
 ## Status and handoff (2026-10-19)
+
+Added 2026-10-31: the Launch Panel (see Conventions): the wide modal,
+the field's dropdown over the tiles, the five tiles, the edit mode
+with drag and remove, the Launch Settings, the Open-Meteo and Google
+fetchers, `Brand::google_client_id`. Verified: `cargo test` (the
+widget order and settings round trip, `top_sites`, the fetch policy,
+the commands, the grid and drop index, the Open-Meteo and Drive
+parsers on captured JSON, the PKCE vectors, the redirect parse, the
+account file), clippy, fmt, and scripted runs of Nautilus on Windows
+(the panel with the field focused, the matches dropping over the
+tiles, Most visited with favicons, a place lookup, the settings view).
+Not verified: the Connect click opening the consent tab (a Windows
+Firewall prompt raised by a page load sat over the test window; the
+listener's I/O has a loopback unit test), a real Google sign-in (no
+client id was registered when this shipped; `docs/LaunchPanelOps.md`
+in the parent workspace says how), the Drive list against a live
+account, Paladin by hand (type-checked), macOS (the aarch64 clippy
+pass is clean).
+Known: the panel's scroll box is sized from the screen, so a very
+short window scrolls the tiles rather than shrinking them.
 
 Added 2026-10-30 (fifth): session restore (see Conventions). Verified:
 `cargo test` (the file's round trip, the rebuild with deferred tabs

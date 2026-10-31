@@ -613,6 +613,12 @@ impl Profile {
         self.dir.join("extensions.toml")
     }
 
+    /// The Google account the Launch Panel's Drive tile is connected to:
+    /// its address and refresh token. Never shared between profiles.
+    pub fn google_path(&self) -> PathBuf {
+        self.dir.join("google.toml")
+    }
+
     /// The file a running browser leaves in the profile with its process
     /// id, so another process can tell the profile is in use.
     pub fn pid_path(&self) -> PathBuf {

@@ -6,6 +6,45 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- The Launch Panel. `Ctrl+T` and "+" open a wide modal in place of the
+  one-field launcher: the same field at the top (its matches now drop
+  down over the rest), a mosaic of tiles under it, and a gear at the
+  bottom right. The default tiles, in order: Recent Drive files (two
+  columns; the five files the connected Google account opened last),
+  Weather (today at a place the user names on the tile; Open-Meteo, no
+  key), Ask Claude and Ask ChatGPT (a question opens the service with
+  it in a new tab), Most visited (the five hosts with the most visits
+  in the history, favicons from the cache, a close control hides a
+  host). The gear flips the panel to the Launch Settings: the search
+  engine as presets (Google, DuckDuckGo, Bing, Brave, Kagi) or custom
+  (the same `Settings::search` the address bar uses), the two question
+  templates, the weather place and units, the Google account (Connect,
+  Disconnect), and the tiles in edit mode (drag to reorder, close to
+  remove, "Restore default widgets"). New in `osmena-core`:
+  `launch.rs` (`WidgetKind`, `LaunchSettings` as `[launch]` in
+  `settings.toml` with `widgets`, `ask_claude`, `ask_chatgpt`,
+  `weather`, `hidden_sites`; `top_sites`; `LaunchData` on
+  `Browser::launch` with `Fetched<T>`, `WeatherReport`, `DriveState`,
+  `DriveFile`; `LaunchUpdate` folded by `LaunchData::apply`),
+  `UrlTemplate` (the type `SearchSettings` now aliases, with
+  `SEARCH_PRESETS`, `claude()`, `chatgpt()`), `Settings::launch`,
+  `Profile::google_path`, `Command::{AskInNewTab, MoveWidget,
+  RemoveWidget, RestoreWidgets, HideTopSite, SetSearch,
+  SetAskTemplate, LookUpPlace, SetWeatherPlace, SetWeatherUnits,
+  ConnectGoogle, DisconnectGoogle, RefreshLaunch}`,
+  `EngineAction::{LookUpPlace, FetchWeather, BeginGoogleSignIn,
+  ForgetGoogle, FetchDriveRecent}` (the shell's; `ShowLauncher` now
+  comes with the fetches the open panel needs, never while one is
+  going or the data is fresh). `Brand::google_client_id:
+  Option<&'static str>` (required field): the brand's Google Cloud
+  "Desktop app" OAuth client; `None` leaves the Drive tile out. The
+  shell's `launch/` module does the fetching on threads (Open-Meteo;
+  Google OAuth 2.0 for installed apps with PKCE and a loopback
+  redirect through a normal tab, the refresh token in the profile's
+  `google.toml`, the Drive v3 files list) and answers through
+  `AppEvent::Launch`. New shell dependencies: `serde_json`, `toml`,
+  `getrandom`. Nothing changes for engines.
+
 - Session restore. `Session` (`session.rs`: `SessionWindow` with a
   `WindowGeometry`, `SessionTab`, `SessionFolder`, the closed tabs;
   `session.toml` in the profile, `Profile::session_path`) is captured

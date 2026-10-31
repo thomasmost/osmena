@@ -15,8 +15,9 @@ use keyboard_types::Code;
 use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
     Avatar, Bookmark, Bookmarks, Brand, ChromeColor, Command, CommandKind, EngineInfo, Extension,
-    Favicon, Folder, FolderId, FolderTarget, History, KeyChord, Keymap, LoadState, ProfileForm,
-    Prompt, StripItem, Suggestion, SuggestionSource, Tab, TabId, UpdateStatus, Window, suggestions,
+    Favicon, Folder, FolderId, FolderTarget, History, KeyChord, Keymap, LaunchData, LaunchSettings,
+    LoadState, ProfileForm, Prompt, StripItem, Suggestion, SuggestionSource, Tab, TabId,
+    UpdateStatus, UrlTemplate, Window, suggestions,
 };
 use url::{ParseError, Url};
 
@@ -54,9 +55,8 @@ const ACTION_ICON: f32 = 16.0;
 const FOLDER_NAME_MAX_CHARS: usize = 18;
 /// How long a tab or chip takes to slide to a new place in the strip.
 const STRIP_SLIDE_SECS: f32 = 0.12;
-/// The new-tab launcher's box: its widest, and its field's font size.
-const LAUNCHER_WIDTH: f32 = 640.0;
-const LAUNCHER_FONT_SIZE: f32 = 22.0;
+/// The Launch Panel's field's font size.
+pub(crate) const LAUNCHER_FONT_SIZE: f32 = 22.0;
 /// The widest a history match's title and address are drawn.
 const SUGGESTION_TITLE_MAX_CHARS: usize = 64;
 const SUGGESTION_URL_MAX_CHARS: usize = 90;
@@ -185,7 +185,7 @@ fn strip_background(rect: Rect, palette: &Palette) -> egui::Shape {
 }
 
 /// `a` moved `t` of the way to `b`, per channel.
-fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
+pub(crate) fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
     let mix = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
     Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
 }
@@ -232,8 +232,8 @@ pub struct ChromeState {
     open_folder: Option<FolderId>,
     /// The question being asked over the page, if any.
     prompt: Option<PromptState>,
-    /// The new-tab launcher, while it is open.
-    launcher: Option<Launcher>,
+    /// The Launch Panel, while it is open (`crate::launch`).
+    pub(crate) launcher: Option<crate::launch::Launcher>,
     /// The history's matches under the address bar.
     suggest: Suggest,
     /// Where the toolbar's star was in the last frame: the bookmark
@@ -269,18 +269,6 @@ struct Suggest {
     typed: String,
     picked: Option<usize>,
     open: bool,
-}
-
-/// The new-tab launcher: what the user typed, and the history match
-/// picked with the arrow keys, if any, whose address then stands in the
-/// field (`typed` keeps what they typed, for going back up).
-#[derive(Default)]
-struct Launcher {
-    text: String,
-    typed: String,
-    picked: Option<usize>,
-    /// The field takes focus on the first frame.
-    focus: bool,
 }
 
 /// A [`Prompt`] being answered: the typed text, and which existing
@@ -373,13 +361,10 @@ impl ChromeState {
         self.prompt.is_some()
     }
 
-    /// Open the new-tab launcher (`EngineAction::ShowLauncher`): nothing
-    /// is opened until the user answers it; see [`draw_launcher`].
+    /// Open the Launch Panel (`EngineAction::ShowLauncher`): nothing is
+    /// opened until the user answers it; see `crate::launch`.
     pub fn open_launcher(&mut self) {
-        self.launcher = Some(Launcher {
-            focus: true,
-            ..Launcher::default()
-        });
+        self.launcher = Some(crate::launch::Launcher::new());
         self.open_folder = None;
     }
 
@@ -500,6 +485,12 @@ pub struct ChromeContext<'a> {
     /// The last run ended badly and left a session: offer to restore it
     /// in a bar under the toolbar.
     pub restore_offer: bool,
+    /// What the shell fetched for the Launch Panel's tiles.
+    pub launch: &'a LaunchData,
+    /// The panel's widgets and what they need (`Settings::launch`).
+    pub launch_settings: &'a LaunchSettings,
+    /// The address bar's search engine, for the Launch Settings.
+    pub search: &'a UrlTemplate,
 }
 
 /// Something the chrome asks of the native window, recorded while drawing
@@ -948,7 +939,7 @@ pub fn draw(
     }
 
     commands.extend(draw_prompt(ui, window, context, state));
-    commands.extend(draw_launcher(ui, window, history, bookmarks, state));
+    commands.extend(crate::launch::draw_launch_panel(ui, window, context, state));
 
     // The status text floats over the bottom-left corner of the page as an
     // overlay, so showing or hiding it never resizes the page. An error
@@ -1551,145 +1542,6 @@ fn strip_folder(
     }
 }
 
-/// The new-tab launcher over the window: a dimmed backdrop and, near
-/// the top, a large field with the history's matches under it. Enter
-/// opens what was typed in a new tab (an address loads, anything else
-/// is a search) or the picked match; Up and Down pick a match, whose
-/// address then stands in the field; Escape, or a click anywhere
-/// outside the box, opens nothing.
-fn draw_launcher(
-    ui: &mut Ui,
-    window: &Window,
-    history: &History,
-    bookmarks: &Bookmarks,
-    state: &mut ChromeState,
-) -> Vec<Command> {
-    let Some(launcher) = state.launcher.as_mut() else {
-        return Vec::new();
-    };
-    let ctx = ui.ctx().clone();
-    let content = ctx.content_rect();
-    let mut commands = Vec::new();
-    let mut close = false;
-
-    // The backdrop is painted into the box's own layer, before the box,
-    // so it dims the page (which the shell paints in a middle-order
-    // layer of its own, above every middle-order area) and stays under
-    // the box whatever sequence egui keeps areas in: as an area of its
-    // own it ended up above the box once a click on it had cancelled a
-    // launcher, and every launcher after that opened dimmed. A press
-    // anywhere outside the box cancels; the page sees no pointer events
-    // while the launcher is open (`popup_open`).
-    let area_id = Id::new(("launcher", window.id));
-    ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, area_id))
-        .rect_filled(content, 0.0, Color32::from_black_alpha(96));
-
-    let matches = suggestions(history, bookmarks, &launcher.typed);
-    let width = (content.width() - 48.0).clamp(200.0, LAUNCHER_WIDTH);
-    let top_left = Pos2::new(
-        content.center().x - width / 2.0,
-        content.top() + content.height() * 0.18,
-    );
-    let shown = egui::Area::new(area_id)
-        .order(egui::Order::Foreground)
-        .fixed_pos(top_left)
-        .show(&ctx, |ui| {
-            Frame::popup(ui.style())
-                .corner_radius(12)
-                .inner_margin(Margin::same(14))
-                .show(ui, |ui| {
-                    ui.set_width(width - 28.0);
-                    let id = Id::new(("launcher-field", window.id));
-                    theme::pill_fields(ui);
-                    let field = ui.add(
-                        egui::TextEdit::singleline(&mut launcher.text)
-                            .id(id)
-                            .margin(Margin::symmetric(14, 8))
-                            .font(egui::FontId::proportional(LAUNCHER_FONT_SIZE))
-                            // The hint takes the field's font: egui lays
-                            // it out in the body size at the top-left
-                            // otherwise, small and above the caret line.
-                            .hint_text(
-                                egui::RichText::new("Search or enter address")
-                                    .font(egui::FontId::proportional(LAUNCHER_FONT_SIZE)),
-                            )
-                            .desired_width(f32::INFINITY),
-                    );
-                    if launcher.focus {
-                        launcher.focus = false;
-                        field.request_focus();
-                    }
-                    if field.changed() {
-                        launcher.typed = launcher.text.clone();
-                        launcher.picked = None;
-                    }
-                    let (down, up) = ui.input_mut(|i| {
-                        (
-                            i.consume_key(egui::Modifiers::NONE, Key::ArrowDown),
-                            i.consume_key(egui::Modifiers::NONE, Key::ArrowUp),
-                        )
-                    });
-                    if (down || up) && !matches.is_empty() {
-                        launcher.picked = step_pick(launcher.picked, matches.len(), down);
-                        launcher.text = match launcher.picked {
-                            Some(i) => matches[i].url.to_string(),
-                            None => launcher.typed.clone(),
-                        };
-                        caret_to_end(ui, id, launcher.text.chars().count());
-                    }
-                    let (escape, enter) =
-                        ui.input(|i| (i.key_pressed(Key::Escape), i.key_pressed(Key::Enter)));
-                    if escape {
-                        close = true;
-                    } else if field.lost_focus() && enter {
-                        let text = launcher.text.trim();
-                        if let Some(i) = launcher.picked {
-                            commands.push(Command::NewTab {
-                                window: window.id,
-                                url: Some(matches[i].url.clone()),
-                            });
-                        } else if let Some(url) = location_input_to_url(text) {
-                            commands.push(Command::NewTab {
-                                window: window.id,
-                                url: Some(url),
-                            });
-                        } else if !text.is_empty() {
-                            commands.push(Command::SearchInNewTab {
-                                window: window.id,
-                                query: text.to_string(),
-                            });
-                        }
-                        close = true;
-                    }
-                    if !matches.is_empty() {
-                        ui.add_space(8.0);
-                        for (i, entry) in matches.iter().enumerate() {
-                            if suggestion_row(ui, entry, launcher.picked == Some(i)).clicked() {
-                                commands.push(Command::NewTab {
-                                    window: window.id,
-                                    url: Some(entry.url.clone()),
-                                });
-                                close = true;
-                            }
-                        }
-                    }
-                });
-        });
-    let pressed_outside = ctx.input(|i| {
-        i.pointer.any_pressed()
-            && i.pointer
-                .interact_pos()
-                .is_some_and(|p| !shown.response.rect.contains(p))
-    });
-    if pressed_outside {
-        close = true;
-    }
-    if close {
-        state.launcher = None;
-    }
-    commands
-}
-
 /// The history's matches for what is typed in the address bar, dropped
 /// down under it while the field has focus and the text is the user's
 /// (not the page's address). Up and Down put a match's address in the
@@ -1763,7 +1615,7 @@ fn address_suggestions(
 /// The pick after an arrow key over `count` matches: Down from nothing
 /// picks the first and stops at the last; Up from the first picks
 /// nothing again (what the user typed).
-fn step_pick(picked: Option<usize>, count: usize, down: bool) -> Option<usize> {
+pub(crate) fn step_pick(picked: Option<usize>, count: usize, down: bool) -> Option<usize> {
     match (picked, down) {
         (None, true) => Some(0),
         (Some(i), true) => Some((i + 1).min(count.saturating_sub(1))),
@@ -1777,7 +1629,7 @@ fn step_pick(picked: Option<usize>, count: usize, down: bool) -> Option<usize> {
 /// (a dot for a page from the history), its title (or address,
 /// untitled) with the address after it, small; filled when picked or
 /// hovered. Returns the row's response (click).
-fn suggestion_row(ui: &mut Ui, entry: &Suggestion, picked: bool) -> egui::Response {
+pub(crate) fn suggestion_row(ui: &mut Ui, entry: &Suggestion, picked: bool) -> egui::Response {
     let title = entry.display_title();
     let (body, small) = (
         TextStyle::Body.resolve(ui.style()),
@@ -2980,7 +2832,7 @@ fn chip_background(ui: &Ui, palette: &Palette, rect: Rect, response: &egui::Resp
 
 /// The texture of a bookmarked site's favicon, uploaded on first use and
 /// again when the shell has a different image for the host.
-fn site_icon_texture<'a>(
+pub(crate) fn site_icon_texture<'a>(
     ui: &Ui,
     state: &'a mut ChromeState,
     host: &str,
@@ -3929,7 +3781,7 @@ fn sync_address_text(state: &mut ChromeState, tab: TabId, url: &Url) {
 
 /// Put the caret at the end of the text in the field `id`, for a text
 /// put there from outside (a picked suggestion).
-fn caret_to_end(ui: &Ui, id: Id, len: usize) {
+pub(crate) fn caret_to_end(ui: &Ui, id: Id, len: usize) {
     use egui::text::{CCursor, CCursorRange};
     use egui::text_edit::TextEditState;
     if let Some(mut edit) = TextEditState::load(ui.ctx(), id) {
@@ -4030,7 +3882,7 @@ impl CachedFavicon {
     }
 }
 
-fn truncate(text: &str, max_chars: usize) -> String {
+pub(crate) fn truncate(text: &str, max_chars: usize) -> String {
     let mut out: String = text.chars().take(max_chars).collect();
     if text.chars().count() > max_chars {
         out.push('…');

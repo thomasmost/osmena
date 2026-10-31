@@ -36,6 +36,13 @@ pub struct Brand {
     /// Where this brand's builds are announced, so the browser can check
     /// for a newer one; `None` for a browser that never checks.
     pub updates: Option<UpdateSource>,
+    /// The OAuth client id of this product's Google Cloud "Desktop app"
+    /// client, which the Launch Panel's Drive tile signs in with (an
+    /// installed app's id is not a secret: the sign-in is secured by
+    /// PKCE, not by it). `None` leaves the Drive tile out of the panel.
+    /// Browsers read it at compile time from an environment variable
+    /// (`option_env!`) so CI stamps it without committing it.
+    pub google_client_id: Option<&'static str>,
 }
 
 impl Brand {
@@ -181,6 +188,7 @@ pub(crate) mod test_support {
         updates: Some(UpdateSource {
             manifest_url: "https://updates.example/latest.toml",
         }),
+        google_client_id: Some("test-client.apps.googleusercontent.com"),
     };
 
     /// An engine for tests.

@@ -23,6 +23,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use crate::StartEngine;
 use crate::clipboard;
 use crate::favicons::FaviconCache;
+use crate::launch::LaunchFetcher;
 use crate::profiles;
 use crate::repaint;
 use crate::settings_window::{SettingsOutcome, SettingsWindow};
@@ -45,6 +46,8 @@ pub enum AppEvent {
     ExitAfter(std::time::Duration),
     Menu,
     Update(UpdateStatus),
+    /// A Launch Panel fetcher's answer (`crate::launch`).
+    Launch(osmena_core::launch::LaunchUpdate),
 }
 
 struct WinitWaker(Mutex<EventLoopProxy<AppEvent>>);
@@ -95,8 +98,11 @@ pub struct App<E: Engine> {
     updater: Option<Updater>,
     /// When the next automatic update check is due.
     update_check_due: Option<Instant>,
-    /// The favicons of visited sites on disk, for the bookmarks bar.
+    /// The favicons of visited sites on disk, for the bookmarks bar and
+    /// the Launch Panel's most visited sites.
     favicons: FaviconCache,
+    /// Fetches the Launch Panel's weather and Drive files.
+    launch: LaunchFetcher,
     /// When the windows or tabs last changed without the session being
     /// written since.
     session_dirty: Option<Instant>,
@@ -135,6 +141,12 @@ impl<E: Engine> App<E> {
         profiles::claim(&browser.profile.pid_path());
         let mut favicons = FaviconCache::new(browser.profile.favicons_dir());
         favicons.preload(bookmarked_hosts(&browser.bookmarks));
+        let launch = LaunchFetcher::new(
+            brand,
+            browser.profile.google_path(),
+            event_loop.create_proxy(),
+        );
+        browser.launch.drive = launch.initial_drive_state();
         let updater = Updater::new(
             brand,
             update_manifest,
@@ -170,6 +182,7 @@ impl<E: Engine> App<E> {
             updater,
             update_check_due: None,
             favicons,
+            launch,
             session_dirty: None,
             pending_geometry: HashMap::new(),
             session_final: false,
@@ -288,6 +301,18 @@ impl<E: Engine> App<E> {
             _ => {}
         }
         self.browser.update = status;
+        self.redraw_all();
+    }
+
+    /// A Launch Panel fetcher answered: fold it in and redraw, so an
+    /// open panel shows it.
+    fn launch_reported(&mut self, update: osmena_core::launch::LaunchUpdate) {
+        if let osmena_core::launch::LaunchUpdate::GoogleConnected(Ok(account)) = &update {
+            log::info!("Google Drive connected as {account}");
+        }
+        self.browser
+            .launch
+            .apply(update, osmena_core::history::unix_now());
         self.redraw_all();
     }
 
@@ -952,10 +977,40 @@ impl<E: Engine> App<E> {
                 }
             }
             EngineAction::ShowLauncher { window } => {
+                // The most visited sites' icons, read from disk the way
+                // the bookmarked sites' are.
+                let hosts: Vec<String> = osmena_core::launch::top_sites(
+                    &self.browser.history,
+                    &self.browser.settings.launch.hidden_sites,
+                    osmena_core::launch::TOP_SITES,
+                )
+                .into_iter()
+                .map(|s| s.host)
+                .collect();
+                self.favicons.preload(hosts.into_iter());
                 if let Some(w) = self.window_for_core_id(window) {
                     w.open_launcher();
                 }
             }
+            EngineAction::LookUpPlace(query) => self.launch.look_up_place(query),
+            EngineAction::FetchWeather { place, units } => self.launch.fetch_weather(place, units),
+            EngineAction::BeginGoogleSignIn { window } => match self.launch.begin_sign_in() {
+                Ok(url) => self.run_commands(
+                    vec![Command::NewTab {
+                        window,
+                        url: Some(url),
+                    }],
+                    event_loop,
+                ),
+                Err(e) => {
+                    log::warn!("Google sign-in: {e}");
+                    self.launch_reported(osmena_core::launch::LaunchUpdate::GoogleConnected(Err(
+                        e,
+                    )));
+                }
+            },
+            EngineAction::ForgetGoogle => self.launch.forget(),
+            EngineAction::FetchDriveRecent => self.launch.fetch_drive_recent(),
             EngineAction::OpenExtensionAction { window, extension } => {
                 let tab = self.browser.window(window).map(|w| w.active);
                 if let (Some(tab), Some(w)) = (tab, self.window_for_core_id(window)) {
@@ -1496,6 +1551,7 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
                 self.pump(event_loop);
             }
             AppEvent::Update(status) => self.update_reported(status),
+            AppEvent::Launch(update) => self.launch_reported(update),
             AppEvent::ExitAfter(delay) => {
                 // What a smoke test reads: did the pages load.
                 let tabs: Vec<String> = self
