@@ -185,6 +185,12 @@ impl<E: Engine> BrowserWindow<E> {
         self.window.has_focus()
     }
 
+    /// Bring the native window to the front with the keyboard (a link
+    /// another app handed over opened in it).
+    pub fn bring_to_front(&self) {
+        self.window.focus_window();
+    }
+
     /// Whether a text field of the chrome (the address bar, the launcher,
     /// a prompt) has the keyboard, so an editing command from the menu
     /// bar is its rather than the page's.
@@ -911,6 +917,7 @@ impl<E: Engine> BrowserWindow<E> {
                 page_zoom: browser.settings.page_zoom,
                 downloads: &browser.downloads,
                 restore_offer: browser.crashed_session.is_some(),
+                default_browser_offer: browser.offers_default_browser(),
                 launch: &browser.launch,
                 launch_settings: &browser.settings.launch,
                 search: &browser.settings.search,

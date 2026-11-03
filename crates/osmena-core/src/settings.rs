@@ -62,6 +62,10 @@ pub struct Settings {
     pub downloads: DownloadSettings,
     /// The Launch Panel: its widgets and what they need.
     pub launch: LaunchSettings,
+    /// Offer, in a bar under the toolbar, to make this browser the
+    /// system's default for web links when it is not. "Don't ask again"
+    /// turns it off.
+    pub check_default_browser: bool,
 }
 
 /// Downloads (`[downloads]` in `settings.toml`): the directory they go
@@ -91,6 +95,7 @@ impl Default for Settings {
             page_zoom: 100,
             downloads: DownloadSettings::default(),
             launch: LaunchSettings::default(),
+            check_default_browser: true,
         }
     }
 }
@@ -487,6 +492,7 @@ mod tests {
                 copy_extensions: false,
             },
             check_for_updates: false,
+            check_default_browser: false,
             show_bookmarks_bar: true,
             last_bookmark_group: "Work".to_string(),
             page_zoom: 110,

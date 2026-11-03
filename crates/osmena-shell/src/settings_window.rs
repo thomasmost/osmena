@@ -12,8 +12,8 @@ use osmena_chrome::input::{self, KeyRoute};
 use osmena_chrome::keyboard_types::{Code, Modifiers};
 use osmena_chrome::{icon, keyutils, theme};
 use osmena_core::{
-    BookmarksFile, Brand, Command, CommandKind, Extension, ExtensionSource, ExtensionSupport,
-    KeyChord, Keymap, Platform, Settings, UpdateStatus,
+    BookmarksFile, Brand, Command, CommandKind, DefaultBrowser, Extension, ExtensionSource,
+    ExtensionSupport, KeyChord, Keymap, Platform, Settings, UpdateStatus,
 };
 use osmena_engine::{Engine, EngineError, PhysicalSize, Surface};
 use winit::dpi::LogicalSize;
@@ -185,7 +185,8 @@ impl<S: Surface> SettingsWindow<S> {
     /// extensions section, shown only when the engine has extensions.
     /// `update` and `can_update` feed the Updates section: where the
     /// browser is with updates, and whether this build can update
-    /// itself at all.
+    /// itself at all. `default_browser` feeds the Default browser
+    /// section, shown only where the system has one to choose.
     #[allow(clippy::too_many_arguments)]
     pub fn handle_event(
         &mut self,
@@ -197,6 +198,7 @@ impl<S: Surface> SettingsWindow<S> {
         update: &UpdateStatus,
         can_update: bool,
         can_download: bool,
+        default_browser: DefaultBrowser,
     ) -> SettingsOutcome {
         match event {
             WindowEvent::CloseRequested => {
@@ -219,8 +221,15 @@ impl<S: Surface> SettingsWindow<S> {
                     status: update,
                     can_update,
                 };
-                let activity =
-                    self.frame(settings, keymap, extensions, support, updates, can_download);
+                let activity = self.frame(
+                    settings,
+                    keymap,
+                    extensions,
+                    support,
+                    updates,
+                    can_download,
+                    default_browser,
+                );
                 let (dirty, outcome) = after_frame(self.dirty, activity);
                 self.dirty = dirty;
                 return outcome;
@@ -307,6 +316,7 @@ impl<S: Surface> SettingsWindow<S> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn frame(
         &mut self,
         settings: &mut Settings,
@@ -315,6 +325,7 @@ impl<S: Surface> SettingsWindow<S> {
         support: Option<&ExtensionSupport>,
         updates: UpdatesSection<'_>,
         can_download: bool,
+        default_browser: DefaultBrowser,
     ) -> FormActivity {
         let mut activity = FormActivity::default();
         let mut update_commands = Vec::new();
@@ -346,6 +357,7 @@ impl<S: Surface> SettingsWindow<S> {
                 updates,
                 &mut update_commands,
                 can_download,
+                default_browser,
             );
         });
         // The extensions section borrowed `commands`; it is done with it.
@@ -513,6 +525,7 @@ fn draw_settings(
     updates: UpdatesSection<'_>,
     update_commands: &mut Vec<Command>,
     can_download: bool,
+    default_browser: DefaultBrowser,
 ) -> FormActivity {
     let mut activity = FormActivity::default();
     egui::CentralPanel::default().show_inside(ui, |ui| {
@@ -523,6 +536,19 @@ fn draw_settings(
                 ui.add_space(8.0);
                 draw_general(ui, settings, &mut activity);
                 ui.add_space(20.0);
+                if default_browser != DefaultBrowser::Unsupported {
+                    ui.heading("Default browser");
+                    ui.add_space(8.0);
+                    draw_default_browser(
+                        ui,
+                        settings,
+                        updates.brand,
+                        default_browser,
+                        &mut activity,
+                        update_commands,
+                    );
+                    ui.add_space(20.0);
+                }
                 ui.heading("Bookmarks");
                 ui.add_space(8.0);
                 draw_bookmarks(ui, settings, &mut activity, update_commands);
@@ -716,6 +742,44 @@ fn draw_general(ui: &mut egui::Ui, settings: &mut Settings, activity: &mut FormA
                     .weak(),
                 );
             });
+            ui.end_row();
+        });
+}
+
+/// Whether this browser is the system's default, the button that asks
+/// the system to make it so (`Command::MakeDefaultBrowser`; the system
+/// confirms with the user), and whether to offer it in a bar when it is
+/// not.
+fn draw_default_browser(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    brand: &Brand,
+    status: DefaultBrowser,
+    activity: &mut FormActivity,
+    commands: &mut Vec<Command>,
+) {
+    egui::Grid::new("default-browser-grid")
+        .num_columns(2)
+        .spacing([12.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Status");
+            ui.horizontal(|ui| {
+                ui.label(status.describe(brand.name));
+                if status == DefaultBrowser::No && ui.button("Make default").clicked() {
+                    commands.push(Command::MakeDefaultBrowser);
+                }
+            });
+            ui.end_row();
+
+            ui.label("At startup");
+            let ask = ui.checkbox(
+                &mut settings.check_default_browser,
+                format!("Offer to make {} the default when it is not", brand.name),
+            );
+            if ask.changed() {
+                activity.edited = true;
+                activity.committed = true;
+            }
             ui.end_row();
         });
 }

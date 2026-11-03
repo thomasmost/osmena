@@ -485,6 +485,9 @@ pub struct ChromeContext<'a> {
     /// The last run ended badly and left a session: offer to restore it
     /// in a bar under the toolbar.
     pub restore_offer: bool,
+    /// Offer, in a bar under the toolbar, to make this browser the
+    /// system's default (`Browser::offers_default_browser`).
+    pub default_browser_offer: bool,
     /// What the shell fetched for the Launch Panel's tiles.
     pub launch: &'a LaunchData,
     /// The panel's widgets and what they need (`Settings::launch`).
@@ -915,6 +918,33 @@ pub fn draw(
                         }
                         if ui.button("Restore").clicked() {
                             commands.push(Command::RestoreSession(window.id));
+                        }
+                    });
+                });
+            });
+    }
+
+    if context.default_browser_offer {
+        let frame = Frame::new()
+            .fill(palette.toolbar)
+            .inner_margin(Margin::symmetric(10, 6));
+        Panel::top("default-browser-bar")
+            .frame(frame)
+            .show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "{} isn't your default browser.",
+                        context.brand.name
+                    ));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Not now").clicked() {
+                            commands.push(Command::DismissDefaultBrowser);
+                        }
+                        if ui.button("Don't ask again").clicked() {
+                            commands.push(Command::NeverAskDefaultBrowser);
+                        }
+                        if ui.button("Make default").clicked() {
+                            commands.push(Command::MakeDefaultBrowser);
                         }
                     });
                 });

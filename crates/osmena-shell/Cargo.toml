@@ -46,6 +46,27 @@ tempfile = "3"
 # (profiles.rs).
 libc = "0.2"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# The default browser and the URLs the system asks this browser to open
+# (default_browser.rs).
+block2 = "0.6"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "NSWorkspace",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSBundle",
+    "NSDictionary",
+    "NSEnumerator",
+    "NSError",
+    "NSString",
+    "NSURL",
+] }
+
 [target.'cfg(windows)'.dependencies]
 # The job object that ties an engine's child processes to the browser
 # (process.rs), and whether a process is still running (profiles.rs).

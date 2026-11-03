@@ -580,13 +580,88 @@ pub fn keyboard_modifiers_from_winit_modifiers(mods: ModifiersState) -> Modifier
     modifiers
 }
 
+/// A key event in the browser's terms, with the modifiers held while it
+/// happens. `state` is the window's modifier state as winit last
+/// reported it; see [`with_own_modifier`] for the modifier keys.
 pub fn key_input_from_winit(key_event: &KeyEvent, state: ModifiersState) -> KeyInput {
+    let key_state = KeyState::from_winit_key_event(key_event);
+    let code = Code::from_winit_key_event(key_event);
     KeyInput {
-        state: KeyState::from_winit_key_event(key_event),
+        state: key_state,
         key: Key::from_winit_key_event(key_event),
-        code: Code::from_winit_key_event(key_event),
+        code,
         location: Location::from_winit_key_event(key_event),
-        modifiers: keyboard_modifiers_from_winit_modifiers(state),
+        modifiers: with_own_modifier(
+            keyboard_modifiers_from_winit_modifiers(state),
+            code,
+            key_state,
+        ),
         repeat: key_event.repeat,
+    }
+}
+
+/// The modifiers of a modifier key's own event: its modifier is held on
+/// its press and not on its release, as the DOM reports them (Shift's
+/// `keydown` has `shiftKey` set, its `keyup` not). winit sends a modifier
+/// key's `KeyboardInput` before the `ModifiersChanged` it causes (macOS
+/// always does), so the state at hand is the one from before the key;
+/// an engine that tells a modifier's press from its release by the flag
+/// (CEF on macOS) would otherwise see them swapped. Other keys keep the
+/// state as it is.
+pub fn with_own_modifier(modifiers: Modifiers, code: Code, state: KeyState) -> Modifiers {
+    let own = match code {
+        Code::ShiftLeft | Code::ShiftRight => Modifiers::SHIFT,
+        Code::ControlLeft | Code::ControlRight => Modifiers::CONTROL,
+        Code::AltLeft | Code::AltRight => Modifiers::ALT,
+        Code::MetaLeft | Code::MetaRight => Modifiers::META,
+        _ => return modifiers,
+    };
+    let mut modifiers = modifiers;
+    modifiers.set(own, state == KeyState::Down);
+    modifiers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_modifier_key_holds_its_modifier_on_press_and_not_on_release() {
+        // The press arrives before ModifiersChanged: Shift is not in the
+        // state yet, but the event is Shift going down.
+        assert_eq!(
+            with_own_modifier(Modifiers::empty(), Code::ShiftLeft, KeyState::Down),
+            Modifiers::SHIFT
+        );
+        // The release arrives while the state still says Shift.
+        assert_eq!(
+            with_own_modifier(Modifiers::SHIFT, Code::ShiftRight, KeyState::Up),
+            Modifiers::empty()
+        );
+        // Other modifiers held at the time stay.
+        assert_eq!(
+            with_own_modifier(Modifiers::SHIFT, Code::MetaLeft, KeyState::Down),
+            Modifiers::SHIFT | Modifiers::META
+        );
+        assert_eq!(
+            with_own_modifier(
+                Modifiers::CONTROL | Modifiers::ALT,
+                Code::AltRight,
+                KeyState::Up
+            ),
+            Modifiers::CONTROL
+        );
+    }
+
+    #[test]
+    fn other_keys_keep_the_window_state() {
+        assert_eq!(
+            with_own_modifier(Modifiers::SHIFT, Code::KeyA, KeyState::Up),
+            Modifiers::SHIFT
+        );
+        assert_eq!(
+            with_own_modifier(Modifiers::empty(), Code::Backspace, KeyState::Down),
+            Modifiers::empty()
+        );
     }
 }

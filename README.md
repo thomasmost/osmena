@@ -31,7 +31,7 @@ Dependencies point only downwards.
 | `osmena-engine` | engine contract | The `Engine`, `TabHost`, and `Surface` traits, `PagePaint`, `Waker`, `EngineError`; with the `glutin` feature, a `Surface` for engines that paint into memory. | osmena-core, glow, raw-window-handle |
 | `osmena-chrome` | chrome | The egui tab strip, toolbar, status overlay and crash panel; the theme (Inter, bundled under `assets/fonts` with its SIL Open Font License, and the shared style); the window, tab and page menus and the macOS menu bar as data and as native menus; pointer and key routing; the icon and the fatal-error dialog. | osmena-core, egui, winit, muda |
 | `osmena-shell` | shell | The winit `App`, `BrowserWindow`, `SettingsWindow`, the process glue, and `run`. Generic over `Engine`. | osmena-chrome, osmena-engine, egui_glow |
-| `osmena-xtask` | tool | `icons`: renders a browser's `assets/logo.svg` into its icon set. | resvg |
+| `osmena-xtask` | tool | `icons`: renders a browser's `assets/logo.svg` into its icon set, the `.icns` from `assets/logo-macos.svg` when the browser has one (macOS icons sit on Apple's grid, inset in a transparent canvas, which would look small on Windows). | resvg |
 
 An engine crate depends on `osmena-core` and `osmena-engine` only; it never
 sees egui or winit. A browser's binary depends on `osmena-shell` and its
@@ -307,9 +307,23 @@ The engine contract, in `osmena-engine`:
   `work-stuff-2`); deleting one asks first, refuses a profile open in
   another browser, and for the current profile hands over to the
   default one and removes the directory on the way out.
+- **The default browser (macOS).** While the browser is not the
+  system's default for web links, a bar under the toolbar offers to
+  make it so (Make default, Don't ask again, Not now); the settings
+  window's Default browser section shows the status with the same
+  button and the switch for the bar. "Make default" asks the system,
+  which asks the user. Links clicked in other apps arrive as `GURL`
+  Apple Events and pages opened from the Finder as `odoc`: each opens
+  as a tab of the focused window, brought to the front, and a link the
+  browser was launched for takes the start's home-page tab instead. A
+  browser gets all this by claiming `http` in its bundle's
+  `Info.plist` (`CFBundleURLTypes`; also `https`, and HTML pages in
+  `CFBundleDocumentTypes` for the system to list it); without the claim,
+  or outside a bundle, nothing of it shows. Not on Windows yet.
 - **Settings** (`settings.toml`): homepage, new-tab URL, the search
   provider, a chrome colour per profile, the title bar switch, the
-  pinned extensions, the session-restore switch, the bookmarks bar switch and the
+  pinned extensions, the session-restore switch, the default-browser
+  offer (`check_default_browser`), the bookmarks bar switch and the
   group the last bookmark went to, the default page zoom, `[downloads]`
   (the directory and whether to ask each time), `[launch]` (the
   panel's widgets in order, the question templates, the weather place

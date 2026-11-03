@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::bookmarks::Bookmarks;
+use crate::default_browser::DefaultBrowser;
 use crate::download::Downloads;
 use crate::extension::Extension;
 use crate::history::History;
@@ -370,6 +371,12 @@ pub struct Browser {
     pub crashed_session: Option<Session>,
     /// What the shell fetched for the Launch Panel's tiles.
     pub launch: LaunchData,
+    /// Whether this browser is the system's default for web links, as
+    /// the shell last found out.
+    pub default_browser: DefaultBrowser,
+    /// The offer to become the default was answered "Not now" (or taken)
+    /// in this run; it comes back at the next start.
+    pub default_browser_dismissed: bool,
     next_window_id: u64,
     next_tab_id: u64,
     next_folder_id: u64,
@@ -396,10 +403,21 @@ impl Browser {
             quit_confirmed: false,
             crashed_session: None,
             launch: LaunchData::default(),
+            default_browser: DefaultBrowser::default(),
+            default_browser_dismissed: false,
             next_window_id: 1,
             next_tab_id: 1,
             next_folder_id: 1,
         }
+    }
+
+    /// Whether the chrome offers to make this browser the default: it is
+    /// not, the system lets it ask, the profile has not said "Don't ask
+    /// again", and this run has not said "Not now".
+    pub fn offers_default_browser(&self) -> bool {
+        self.default_browser == DefaultBrowser::No
+            && self.settings.check_default_browser
+            && !self.default_browser_dismissed
     }
 
     /// The profile's display name (`[profile] name` in the settings, or

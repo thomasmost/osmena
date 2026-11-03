@@ -6,6 +6,13 @@
 //! (1024 px), `<name>.icns` (macOS), and `<name>.ico` (Windows). Output is
 //! deterministic for a given `Cargo.lock`, so the generated files are
 //! committed and CI checks they are up to date.
+//!
+//! macOS draws an app icon exactly as the bundle's `.icns` has it (no
+//! mask before macOS 26), and its icons follow Apple's grid: the shape
+//! inset in a transparent 1024 px canvas, which looks small as a Windows
+//! taskbar icon. A brand that wants both therefore puts its macOS icon
+//! in `assets/logo-macos.svg`; when that file exists the `.icns` is
+//! rendered from it, and everything else from `logo.svg`.
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -36,52 +43,26 @@ const ICNS_TYPES: [(u32, icns::IconType); 10] = [
 ];
 
 /// Render `<root>/assets/logo.svg` into `<root>/assets/icons/` as the
-/// `<name>` icon set (see the crate docs).
+/// `<name>` icon set, the `.icns` from `logo-macos.svg` when there is one
+/// (see the crate docs).
 pub fn icons(root: &Path, name: &str) -> Result<()> {
     let assets = root.join("assets");
-    let svg_path = assets.join("logo.svg");
-    let svg_data =
-        std::fs::read(&svg_path).map_err(|e| format!("reading {}: {e}", svg_path.display()))?;
-    // No fonts (the build drops text support); raster artwork the SVG
-    // references is resolved against the assets directory.
-    let options = usvg::Options {
-        resources_dir: Some(assets.clone()),
-        ..usvg::Options::default()
-    };
-    let tree = usvg::Tree::from_data(&svg_data, &options)?;
-
     let out = root.join("assets").join("icons");
     std::fs::create_dir_all(&out)?;
 
-    // Render once at the largest size and area-average the rest down from
-    // it, so every size comes from the same pixels. Sizes that do not divide
-    // 1024 (24, 48) weight the partly covered source pixels.
-    let largest = render(&tree, LARGEST_SIZE)?;
-    // usvg drops an <image> whose file is missing or not a recognised
-    // format with only a log warning, and resvg draws nothing for one it
-    // cannot decode; either leaves an empty tile. The logos are dark ink,
-    // so an all-light interior means the logo did not render.
-    if !has_dark_interior(&largest) {
-        return Err(
-            "the logo did not render: assets/logo.svg draws nothing dark \
-                    (a referenced image may be missing or corrupt)"
-                .into(),
-        );
-    }
-    let mut pngs: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
-    for size in PNG_SIZES.iter().chain(ICO_SIZES.iter()).copied() {
-        if let std::collections::btree_map::Entry::Vacant(entry) = pngs.entry(size) {
-            entry.insert(downsample(&largest, size)?.encode_png()?);
-        }
-    }
+    let pngs = render_set(&assets, "logo.svg")?;
     for size in PNG_SIZES {
         std::fs::write(out.join(format!("{name}-{size}.png")), &pngs[&size])?;
     }
     std::fs::write(out.join(format!("{name}.png")), &pngs[&1024])?;
 
+    let mac_pngs = match macos_source(&assets) {
+        Some(file) => render_set(&assets, file)?,
+        None => pngs.clone(),
+    };
     let mut family = icns::IconFamily::new();
     for (size, icon_type) in ICNS_TYPES {
-        let image = icns::Image::read_png(Cursor::new(&pngs[&size]))?;
+        let image = icns::Image::read_png(Cursor::new(&mac_pngs[&size]))?;
         family.add_icon_with_type(&image, icon_type)?;
     }
     let mut icns_bytes = Vec::new();
@@ -99,6 +80,56 @@ pub fn icons(root: &Path, name: &str) -> Result<()> {
 
     println!("wrote icons to {}", out.display());
     Ok(())
+}
+
+/// The macOS icon's own source in `assets`, if the brand has one.
+const MACOS_SOURCE: &str = "logo-macos.svg";
+
+fn macos_source(assets: &Path) -> Option<&'static str> {
+    assets.join(MACOS_SOURCE).is_file().then_some(MACOS_SOURCE)
+}
+
+/// Render `assets/<file>` at every size the icon set needs, as PNGs by
+/// pixel size. It is rendered once at the largest size and the rest are
+/// area-averaged down from it, so every size comes from the same pixels
+/// (sizes that do not divide 1024, 24 and 48, weight the partly covered
+/// source pixels).
+fn render_set(assets: &Path, file: &str) -> Result<BTreeMap<u32, Vec<u8>>> {
+    let svg_path = assets.join(file);
+    let svg_data =
+        std::fs::read(&svg_path).map_err(|e| format!("reading {}: {e}", svg_path.display()))?;
+    // No fonts (the build drops text support); artwork the SVG references
+    // (raster images, or another SVG) is resolved against the assets
+    // directory.
+    let options = usvg::Options {
+        resources_dir: Some(assets.to_path_buf()),
+        ..usvg::Options::default()
+    };
+    let tree = usvg::Tree::from_data(&svg_data, &options)?;
+    let largest = render(&tree, LARGEST_SIZE)?;
+    // usvg drops an <image> whose file is missing or not a recognised
+    // format with only a log warning, and resvg draws nothing for one it
+    // cannot decode; either leaves an empty tile. The logos are dark ink,
+    // so an all-light interior means the logo did not render.
+    if !has_dark_interior(&largest) {
+        return Err(format!(
+            "the logo did not render: assets/{file} draws nothing dark \
+             (a referenced image may be missing or corrupt)"
+        )
+        .into());
+    }
+    let mut pngs = BTreeMap::new();
+    for size in PNG_SIZES
+        .iter()
+        .chain(ICO_SIZES.iter())
+        .chain(ICNS_TYPES.iter().map(|(size, _)| size))
+        .copied()
+    {
+        if let std::collections::btree_map::Entry::Vacant(entry) = pngs.entry(size) {
+            entry.insert(downsample(&largest, size)?.encode_png()?);
+        }
+    }
+    Ok(pngs)
 }
 
 fn render(tree: &usvg::Tree, size: u32) -> Result<tiny_skia::Pixmap> {
@@ -246,6 +277,16 @@ mod tests {
         assert!(downsample(&source, 16).is_err());
         let wide = tiny_skia::Pixmap::new(8, 4).unwrap();
         assert!(downsample(&wide, 2).is_err());
+    }
+
+    #[test]
+    fn the_macos_icon_has_its_own_source_only_when_the_file_exists() {
+        let dir = std::env::temp_dir().join(format!("osmena-xtask-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(macos_source(&dir), None);
+        std::fs::write(dir.join(MACOS_SOURCE), "<svg/>").unwrap();
+        assert_eq!(macos_source(&dir), Some(MACOS_SOURCE));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! The application icon: the window icon (Windows title bar) and, on
-//! macOS, the Dock icon, so `cargo run` shows the logo without an `.app`
-//! bundle. Both come from the brand's embedded PNG.
+//! macOS outside an app bundle, the Dock icon, so `cargo run` shows the
+//! logo. Both come from the brand's embedded PNG; a bundle's own icon
+//! wins over it in the Dock.
 
 use osmena_core::Brand;
 use winit::window::Icon;
@@ -36,18 +37,32 @@ pub fn window_icon(brand: &Brand) -> Option<Icon> {
     }
 }
 
-/// Set the Dock icon from the brand's PNG. Must run on the main thread
-/// after the event loop (and so `NSApplication`) exists.
+/// Set the Dock icon from the brand's PNG, unless the browser runs from
+/// an app bundle that names an icon of its own: the system then draws
+/// the bundle's icon (made for the Dock, at every size), and replacing it
+/// with the window icon's PNG would show that instead for as long as the
+/// browser runs. Must run on the main thread after the event loop (and
+/// so `NSApplication`) exists.
 #[cfg(target_os = "macos")]
 pub fn set_dock_icon(brand: &Brand) {
     use objc2::{AnyThread, MainThreadMarker};
     use objc2_app_kit::{NSApplication, NSImage};
-    use objc2_foundation::NSData;
+    use objc2_foundation::{NSBundle, NSData, NSString};
 
     let Some(mtm) = MainThreadMarker::new() else {
         log::warn!("set_dock_icon called off the main thread; skipping");
         return;
     };
+    let bundle = NSBundle::mainBundle();
+    let bundled_icon = ["CFBundleIconFile", "CFBundleIconName"].iter().any(|key| {
+        bundle
+            .objectForInfoDictionaryKey(&NSString::from_str(key))
+            .is_some()
+    });
+    if bundled_icon {
+        log::debug!("the app bundle has its own icon; leaving the Dock icon to it");
+        return;
+    }
     let app = NSApplication::sharedApplication(mtm);
     let data = NSData::with_bytes(brand.icon_png);
     let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {

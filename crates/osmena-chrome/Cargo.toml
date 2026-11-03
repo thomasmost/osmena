@@ -27,7 +27,12 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSImage",
     "NSRunningApplication",
 ] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSBundle",
+    "NSData",
+    "NSString",
+] }
 
 [target.'cfg(windows)'.dependencies]
 # Native message box for fatal startup errors in release builds (see fatal.rs).

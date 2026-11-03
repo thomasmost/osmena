@@ -6,6 +6,7 @@ use url::Url;
 
 use crate::bookmarks::{Bookmark, Bookmarks};
 use crate::bookmarks_html;
+use crate::default_browser::DefaultBrowser;
 use crate::download::{Download, DownloadId, DownloadState};
 use crate::event::PendingTab;
 use crate::extension::ExtensionSource;
@@ -277,6 +278,17 @@ pub enum Command {
     InstallUpdate,
     /// Clear the update failure shown in the status area.
     DismissUpdateFailure,
+    /// Ask the system to make this browser the default for web links
+    /// (the offer bar's and the settings window's button). The system
+    /// asks the user to confirm; the shell reports the outcome through
+    /// `Browser::default_browser`. Nothing unless it is not the default.
+    MakeDefaultBrowser,
+    /// Hide the offer to become the default browser until the next start
+    /// ("Not now").
+    DismissDefaultBrowser,
+    /// Stop offering to become the default browser ("Don't ask again"):
+    /// `Settings::check_default_browser` off.
+    NeverAskDefaultBrowser,
     /// Open the popup of `extension`'s toolbar action over `window`
     /// (the toolbar button or the menu entry was clicked). Nothing if
     /// the extension is unknown, disabled, or has no popup.
@@ -579,6 +591,9 @@ pub enum EngineAction {
         update: AvailableUpdate,
         file: std::path::PathBuf,
     },
+    /// Ask the system to make this browser the default for web links;
+    /// the shell reports the answer as `Browser::default_browser`.
+    MakeDefaultBrowser,
     /// Start a `<binary> --profile <profile> <urls>` process.
     OpenInProfile {
         profile: String,
@@ -1325,6 +1340,28 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
                 browser.update = UpdateStatus::Idle;
             }
             Vec::new()
+        }
+        Command::MakeDefaultBrowser => {
+            if browser.default_browser != DefaultBrowser::No {
+                return Vec::new();
+            }
+            // The system's confirmation takes over from the bar; the
+            // answer comes back as a new status either way.
+            browser.default_browser_dismissed = true;
+            vec![EngineAction::MakeDefaultBrowser]
+        }
+        Command::DismissDefaultBrowser => {
+            browser.default_browser_dismissed = true;
+            Vec::new()
+        }
+        Command::NeverAskDefaultBrowser => {
+            browser.default_browser_dismissed = true;
+            if browser.settings.check_default_browser {
+                browser.settings.check_default_browser = false;
+                vec![EngineAction::SaveSettings]
+            } else {
+                Vec::new()
+            }
         }
         Command::OpenExtensionAction { window, extension } => {
             let usable = browser.window(*window).is_some()
@@ -2814,6 +2851,51 @@ mod tests {
                 size: 1,
             },
         }
+    }
+
+    #[test]
+    fn the_default_browser_offer_is_made_until_answered() {
+        let (mut b, _, _) = one_window();
+        // Unknown here (not a bundle that claims web links): no offer,
+        // and the button does nothing.
+        assert!(!b.offers_default_browser());
+        assert!(dispatch(&mut b, &Command::MakeDefaultBrowser).is_empty());
+        // Already the default: no offer either.
+        b.default_browser = DefaultBrowser::Yes;
+        assert!(!b.offers_default_browser());
+        assert!(dispatch(&mut b, &Command::MakeDefaultBrowser).is_empty());
+
+        b.default_browser = DefaultBrowser::No;
+        assert!(b.offers_default_browser());
+        // "Make default" asks the system and hides the bar meanwhile.
+        assert_eq!(
+            dispatch(&mut b, &Command::MakeDefaultBrowser),
+            vec![EngineAction::MakeDefaultBrowser]
+        );
+        assert!(!b.offers_default_browser());
+
+        // "Not now" lasts until the next start; the setting is untouched.
+        let (mut b, _, _) = one_window();
+        b.default_browser = DefaultBrowser::No;
+        assert!(dispatch(&mut b, &Command::DismissDefaultBrowser).is_empty());
+        assert!(!b.offers_default_browser());
+        assert!(b.settings.check_default_browser);
+
+        // "Don't ask again" turns the setting off and saves it, once.
+        let (mut b, _, _) = one_window();
+        b.default_browser = DefaultBrowser::No;
+        assert_eq!(
+            dispatch(&mut b, &Command::NeverAskDefaultBrowser),
+            vec![EngineAction::SaveSettings]
+        );
+        assert!(!b.settings.check_default_browser);
+        assert!(!b.offers_default_browser());
+        assert!(dispatch(&mut b, &Command::NeverAskDefaultBrowser).is_empty());
+        // The settings window's button still works without the offer.
+        assert_eq!(
+            dispatch(&mut b, &Command::MakeDefaultBrowser),
+            vec![EngineAction::MakeDefaultBrowser]
+        );
     }
 
     #[test]

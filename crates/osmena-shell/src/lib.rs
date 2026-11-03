@@ -16,6 +16,7 @@
 
 mod app;
 mod clipboard;
+mod default_browser;
 mod favicons;
 mod launch;
 mod page;
@@ -230,9 +231,17 @@ pub fn run<E: Engine>(launch: Launch<E>) -> ExitCode {
         ));
     }
     let mut urls = urls.into_iter();
+    // The tab opened on the home page because nothing was named: a link
+    // the system launched the browser for takes its place (`App`).
+    let mut homepage_tab = None;
     if browser.windows.is_empty() {
-        let first: Url = urls.next().unwrap_or_else(|| browser.homepage());
+        let named = urls.next();
+        let on_homepage = named.is_none();
+        let first: Url = named.unwrap_or_else(|| browser.homepage());
         actions.extend(open_window(&mut browser, first));
+        if on_homepage {
+            homepage_tab = browser.windows.last().map(|w| w.active);
+        }
         if crashed && !session.is_empty() {
             log::info!("the last run did not end cleanly; offering its session");
             browser.crashed_session = Some(session);
@@ -277,6 +286,9 @@ pub fn run<E: Engine>(launch: Launch<E>) -> ExitCode {
         args.exit_after.map(std::time::Duration::from_secs_f64),
         args.update_manifest.as_deref(),
     );
+    if let Some(tab) = homepage_tab {
+        app.opened_on_homepage(tab);
+    }
     match event_loop.run_app(&mut app) {
         Ok(()) if app.started_cleanly() => ExitCode::SUCCESS,
         Ok(()) => ExitCode::FAILURE,

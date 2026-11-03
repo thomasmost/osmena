@@ -5,10 +5,12 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-10-31 (the Launch Panel: the mosaic of tiles under
-the new-tab field, the Launch Settings, the shell's weather and Google
-fetchers; before that session restore, downloads, page zoom, find in
-page, bookmarks, updates over the air)._
+_Last updated: 2026-11-03 (the default browser on macOS: the status,
+the offer bar, the settings section, the shell's Apple Event handlers
+for links and pages other apps hand over; modifier keys carry their
+own modifier; the Dock keeps a bundle's icon; osmena-xtask's macOS
+icon source; before that the Launch Panel, session restore, downloads,
+page zoom, find in page, bookmarks, updates over the air)._
 
 ## Architecture
 
@@ -229,6 +231,25 @@ No engine is needed; the workspace builds in under a minute.
   `History::matches` ranks suggestions; the chrome draws them under the
   address bar (`address_suggestions`) and in the launcher, with
   `step_pick` for the arrow keys. Nothing else reads or writes the file.
+- **The default browser is the system's; the model holds the answer.**
+  `osmena-shell::default_browser` asks the system (macOS: the `http`
+  handler's bundle id against the running bundle's) at start and on
+  every browser window's `Focused(true)`, and writes
+  `Browser::default_browser`; `Unsupported` (not macOS, no bundle, or a
+  bundle whose `Info.plist` does not claim `http`) hides everything.
+  The bar is `Browser::offers_default_browser` (not the default,
+  `Settings::check_default_browser`, not dismissed this run); its
+  buttons and the settings window's are `Command`s, and only
+  `MakeDefaultBrowser` reaches the shell (`EngineAction`), which calls
+  `NSWorkspace` and reads the status again when the system answers.
+  The same module installs the `GURL` and `odoc` Apple Event handlers
+  (C functions of CoreServices, installed before the run loop and again
+  when AppKit posts "will finish launching", since AppKit replaces an
+  earlier `odoc` handler then); what they bring is `AppEvent::OpenUrls`,
+  opened by `App::open_urls` as tabs, the launch's link in the start's
+  home-page tab (`App::startup_tab`, within `LAUNCH_URL_WINDOW`).
+  winit's application delegate implements no open-URL method, so do
+  not move this into one.
 - **Updates are the shell's; the model carries the status.** A brand
   that can update names its manifest URL (`Brand::updates`) and its
   build number (`Brand::build`, stamped by CI through
@@ -317,6 +338,22 @@ No engine is needed; the workspace builds in under a minute.
   adds; the shared behaviour is documented here only.
 
 ## Status and handoff (2026-10-19)
+
+Added 2026-11-03, from Nautilus's macOS reports (see its handoff for
+the causes): the default browser (see Conventions), the modifier
+keys' own flag (`keyutils::with_own_modifier`), the Dock left to a
+bundle's icon (`icon::set_dock_icon`), and osmena-xtask's
+`logo-macos.svg`. Verified: `cargo test` (the offer's commands, the
+setting, the URL filter, the modifier flags, the macOS icon source),
+clippy, fmt, and Nautilus's bundle on Apple silicon built against this
+checkout: the status reads "No" with Comet the default, the Dock keeps
+the bundle's icon, `open -a` with a URL loads it in place of the home
+page at launch and as a new tab while running, an `.html` file opens.
+Not verified: "Make default" and the system's question (it would
+change the user's default browser), the bar and the settings section by
+eye, Paladin (not built against this revision; nothing it implements
+changed, but its pin moves with Nautilus's), the Windows build (no
+Windows target here; the non-macOS branches are stubs, CI will tell).
 
 Added 2026-10-31: the Launch Panel (see Conventions): the wide modal,
 the field's dropdown over the tiles, the five tiles, the edit mode

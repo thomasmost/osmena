@@ -22,6 +22,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 
 use crate::StartEngine;
 use crate::clipboard;
+use crate::default_browser;
 use crate::favicons::FaviconCache;
 use crate::launch::LaunchFetcher;
 use crate::profiles;
@@ -35,6 +36,9 @@ use crate::window::BrowserWindow;
 const HISTORY_SAVE_DELAY: Duration = Duration::from_secs(3);
 /// How long after the windows or tabs last changed the session is written.
 const SESSION_SAVE_DELAY: Duration = Duration::from_secs(2);
+/// How long after the start a link the system hands over still counts as
+/// the one the browser was launched for (`App::startup_tab`).
+const LAUNCH_URL_WINDOW: Duration = Duration::from_secs(10);
 
 /// The user events: the engine asked us to spin its message loop, the
 /// `--exit-after` timer ran out, an item of the menu bar was picked
@@ -48,6 +52,12 @@ pub enum AppEvent {
     Update(UpdateStatus),
     /// A Launch Panel fetcher's answer (`crate::launch`).
     Launch(osmena_core::launch::LaunchUpdate),
+    /// The system asks this browser to open these (a link clicked in
+    /// another app, a page opened with it from the Finder).
+    OpenUrls(Vec<Url>),
+    /// The system answered the request to make this the default browser;
+    /// the status is read again.
+    DefaultBrowserAnswered,
 }
 
 struct WinitWaker(Mutex<EventLoopProxy<AppEvent>>);
@@ -112,6 +122,18 @@ pub struct App<E: Engine> {
     /// The session was written for this exit already (before the
     /// windows went), so `exiting` leaves it alone.
     session_final: bool,
+    /// When this browser started.
+    started: Instant,
+    /// The tab the first window opened on the home page because the
+    /// start named nothing to open: when the system launched the browser
+    /// for a link, the link arrives a moment later and takes this tab's
+    /// place instead of opening beside it.
+    startup_tab: Option<TabId>,
+    /// URLs the system handed over before the engine was there to open
+    /// them; opened once it is.
+    pending_urls: Vec<Url>,
+    /// Asks the event loop to read the default-browser status again.
+    default_browser_proxy: Arc<Mutex<EventLoopProxy<AppEvent>>>,
 }
 
 impl<E: Engine> App<E> {
@@ -138,6 +160,15 @@ impl<E: Engine> App<E> {
             }
         });
         browser.profiles = browser.profile.siblings(brand);
+        browser.default_browser = default_browser::status();
+        log::info!("default browser: {:?}", browser.default_browser);
+        let open_proxy = Mutex::new(event_loop.create_proxy());
+        default_browser::install_open_handler(move |urls| {
+            let proxy = open_proxy.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Err(e) = proxy.send_event(AppEvent::OpenUrls(urls)) {
+                log::warn!("failed to hand the system's URLs to the event loop: {e}");
+            }
+        });
         profiles::claim(&browser.profile.pid_path());
         let mut favicons = FaviconCache::new(browser.profile.favicons_dir());
         favicons.preload(bookmarked_hosts(&browser.bookmarks));
@@ -186,6 +217,68 @@ impl<E: Engine> App<E> {
             session_dirty: None,
             pending_geometry: HashMap::new(),
             session_final: false,
+            started: Instant::now(),
+            startup_tab: None,
+            pending_urls: Vec::new(),
+            default_browser_proxy: Arc::new(Mutex::new(event_loop.create_proxy())),
+        }
+    }
+
+    /// The first window opened on the home page, in `tab`, because the
+    /// start named nothing to open (see `startup_tab`).
+    pub(crate) fn opened_on_homepage(&mut self, tab: TabId) {
+        self.startup_tab = Some(tab);
+    }
+
+    /// Read the default-browser status again and show it if it changed.
+    fn refresh_default_browser(&mut self) {
+        let status = default_browser::status();
+        if status != self.browser.default_browser {
+            log::info!("default browser: {status:?}");
+            self.browser.default_browser = status;
+            self.redraw_all();
+        }
+    }
+
+    /// Open what the system handed over: each URL in a new tab of the
+    /// focused window (or any), brought to the front. The link the
+    /// browser was launched for loads in the tab the start opened on
+    /// the home page instead, while that tab is still on it.
+    fn open_urls(&mut self, urls: Vec<Url>, event_loop: &ActiveEventLoop) {
+        if self.engine.is_none() {
+            self.pending_urls.extend(urls);
+            return;
+        }
+        let Some(window) = self.menu_window() else {
+            // No browser window: the first URL opens one, the rest tabs.
+            let mut urls = urls.into_iter();
+            if let Some(first) = urls.next() {
+                self.run_commands(vec![Command::OpenInNewWindow(first)], event_loop);
+                self.open_urls(urls.collect(), event_loop);
+            }
+            return;
+        };
+        let mut urls = urls.into_iter();
+        let mut commands = Vec::new();
+        let homepage = self.browser.homepage();
+        if let Some(tab) = self.startup_tab.take()
+            && self.started.elapsed() < LAUNCH_URL_WINDOW
+            && self
+                .browser
+                .window(window)
+                .and_then(|w| w.tab(tab))
+                .is_some_and(|t| t.url == homepage)
+            && let Some(first) = urls.next()
+        {
+            commands.push(Command::Navigate { tab, url: first });
+        }
+        commands.extend(urls.map(|url| Command::NewTab {
+            window,
+            url: Some(url),
+        }));
+        self.run_commands(commands, event_loop);
+        if let Some(w) = self.window_for_core_id(window) {
+            w.bring_to_front();
         }
     }
 
@@ -1040,6 +1133,16 @@ impl<E: Engine> App<E> {
                     Err(e) => log::error!("cannot open settings window: {e}"),
                 },
             },
+            EngineAction::MakeDefaultBrowser => {
+                let proxy = self.default_browser_proxy.clone();
+                default_browser::make_default(move || {
+                    let proxy = proxy.lock().unwrap_or_else(PoisonError::into_inner);
+                    if let Err(e) = proxy.send_event(AppEvent::DefaultBrowserAnswered) {
+                        log::warn!("failed to report the default-browser answer: {e}");
+                    }
+                });
+                self.redraw_all();
+            }
             EngineAction::CheckForUpdates => match &self.updater {
                 Some(updater) => {
                     updater.check();
@@ -1462,6 +1565,10 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
             }
             let actions = std::mem::take(&mut self.pending_actions);
             self.perform_all(actions, event_loop);
+            let urls = std::mem::take(&mut self.pending_urls);
+            if !urls.is_empty() {
+                self.open_urls(urls, event_loop);
+            }
             self.schedule_update_check(update::FIRST_CHECK_DELAY);
         }
     }
@@ -1490,6 +1597,7 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
                 &self.browser.update,
                 self.brand.can_update(),
                 self.engine_info.downloads,
+                self.browser.default_browser,
             );
             let commands = sw.take_commands();
             match outcome {
@@ -1520,8 +1628,10 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
             }
             if matches!(event, WindowEvent::Focused(true)) {
                 // Another browser may have made or deleted a profile, or
-                // changed the shared bookmarks, meanwhile.
+                // changed the shared bookmarks, meanwhile; the user may
+                // have chosen another default browser.
                 self.refresh_profiles();
+                self.refresh_default_browser();
                 if self.bookmarks_shared() {
                     self.reload_bookmarks(event_loop);
                 }
@@ -1552,6 +1662,16 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
             }
             AppEvent::Update(status) => self.update_reported(status),
             AppEvent::Launch(update) => self.launch_reported(update),
+            AppEvent::OpenUrls(urls) => {
+                self.open_urls(urls, event_loop);
+                self.pump(event_loop);
+            }
+            AppEvent::DefaultBrowserAnswered => {
+                self.refresh_default_browser();
+                // An answer that left things as they were still needs the
+                // bar back in the settings window's terms.
+                self.redraw_all();
+            }
             AppEvent::ExitAfter(delay) => {
                 // What a smoke test reads: did the pages load.
                 let tabs: Vec<String> = self

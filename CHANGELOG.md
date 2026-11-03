@@ -4,8 +4,38 @@ All notable changes to the osmena crates. The crates version together.
 
 ## Unreleased
 
+### Changed
+
+- `keyutils::key_input_from_winit` gives a modifier key's own event its
+  modifier on the press and not on the release (`with_own_modifier`):
+  winit reports the key before the `ModifiersChanged` it causes, so
+  Shift's press arrived without Shift and its release with it, which
+  CEF on macOS read the wrong way round.
+- macOS: the Dock icon is set from `Brand::icon_png` only outside an
+  app bundle with an icon of its own (`CFBundleIconFile` or
+  `CFBundleIconName`); in a bundle the system shows the bundle's icon.
+
 ### Added
 
+- The default browser, on macOS. `osmena-core`: `DefaultBrowser`
+  (`Unsupported`, `Yes`, `No`) on `Browser::default_browser`, with
+  `Browser::default_browser_dismissed` and
+  `Browser::offers_default_browser`; `Settings::check_default_browser`
+  (on by default); `Command::{MakeDefaultBrowser,
+  DismissDefaultBrowser, NeverAskDefaultBrowser}` and
+  `EngineAction::MakeDefaultBrowser`. `osmena-chrome`:
+  `ChromeContext::default_browser_offer` and the bar under the toolbar
+  ("<brand> isn't your default browser." Make default, Don't ask
+  again, Not now). `osmena-shell`: `default_browser.rs` reads the status
+  at start and on every window focus (supported only in a bundle whose
+  `Info.plist` claims `http`), asks `NSWorkspace` to set the `http`
+  handler (and `https` if it did not follow), and answers the `GURL`
+  and `odoc` Apple Events: the URLs open as tabs of the focused window,
+  brought to the front, the launch's own link in place of the home
+  page; the settings window's Default browser section. A browser opts
+  in through its bundle's `Info.plist`.
+- `osmena-xtask`: the `.icns` is rendered from `assets/logo-macos.svg`
+  when the browser has one (everything else still from `logo.svg`).
 - The Launch Panel. `Ctrl+T` and "+" open a wide modal in place of the
   one-field launcher: the same field at the top (its matches now drop
   down over the rest), a mosaic of tiles under it, and a gear at the

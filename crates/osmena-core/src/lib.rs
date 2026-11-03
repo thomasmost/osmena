@@ -13,6 +13,7 @@ pub mod bookmarks;
 pub mod bookmarks_html;
 pub mod brand;
 pub mod command;
+pub mod default_browser;
 pub mod download;
 pub mod event;
 pub mod extension;
@@ -33,6 +34,7 @@ pub use brand::{Brand, EngineInfo, ExtensionSupport, PageTools};
 pub use command::{
     BookmarksFile, Command, EngineAction, FolderTarget, PageCommand, ProfileForm, Prompt, dispatch,
 };
+pub use default_browser::DefaultBrowser;
 pub use download::{
     Download, DownloadId, DownloadPolicy, DownloadReport, DownloadState, Downloads, DownloadsError,
     describe_bytes, describe_download, system_downloads_dir,
