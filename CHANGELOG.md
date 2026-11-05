@@ -216,6 +216,10 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- The "☰" window menu button moved from the tab strip's right end to
+  the toolbar's, right of the profile avatar, drawn as three strokes
+  (`menu_button`) like the window controls. The strip's right end now
+  holds only the window controls on a frameless window.
 - The Profiles menu is shaped like Chromium's: the current profile and
   "Edit…", then, only when there are others, an "Other <brand>
   Profiles" heading over them, then "Add <brand> Profile…", "Open

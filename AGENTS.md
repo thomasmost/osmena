@@ -372,7 +372,9 @@ in-process delete failing on a file Chromium holds until the process
 ends; the detached helper now finishes it). Not verified: macOS and
 its menu bar, the Unix helper, a real "Delete profile" of the current
 profile through the same helper, and the menu and the Manage Profiles
-dialog by eye unless the commit says otherwise.
+dialog by eye unless the commit says otherwise. Later the same day the
+"☰" button moved from the strip to the toolbar's right end, right of
+the avatar (`menu_button`, strokes like the window controls).
 Added 2026-11-03, from Nautilus's macOS reports (see its handoff for
 the causes): the default browser (see Conventions), the modifier
 keys' own flag (`keyutils::with_own_modifier`), the Dock left to a

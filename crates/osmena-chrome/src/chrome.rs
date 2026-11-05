@@ -42,7 +42,7 @@ const TAB_CLOSE_MIN_WIDTH: f32 = 110.0;
 const TAB_PADDING_X: f32 = 12.0;
 const TAB_CORNER: u8 = theme::CORNER;
 const CLOSE_SIZE: f32 = 18.0;
-/// The "+" and "☰" buttons on the strip.
+/// The "+" button on the strip.
 const MENU_WIDTH: f32 = 28.0;
 /// One window control (minimize, maximize, close) on a frameless window.
 const CONTROL_WIDTH: f32 = 40.0;
@@ -390,7 +390,8 @@ impl ChromeState {
 /// this window).
 #[derive(Clone, Debug, PartialEq)]
 pub enum MenuRequest {
-    /// The "☰" window menu, below its button.
+    /// The "☰" window menu, below its button at the toolbar's right
+    /// end.
     Window { position: Pos2 },
     /// The extensions menu, below the puzzle-piece button.
     Extensions { position: Pos2 },
@@ -577,14 +578,12 @@ pub fn draw(
                     .frame(false)
                     .min_size(Vec2::new(MENU_WIDTH, TAB_HEIGHT))
             };
-            // The strip's right end holds the menu button and, on a
-            // frameless window (except on macOS, where the system keeps
-            // its own), the window controls. The tabs scroll within what
-            // is left of them, and the gap between is the title bar's
-            // drag area.
+            // The strip's right end holds, on a frameless window (except
+            // on macOS, where the system keeps its own), the window
+            // controls. The tabs scroll within what is left of them, and
+            // the gap between is the title bar's drag area.
             let controls = frameless && !cfg!(target_os = "macos");
-            let right_width = MENU_WIDTH
-                + if controls { 3.0 * CONTROL_WIDTH } else { 0.0 }
+            let right_width = if controls { 3.0 * CONTROL_WIDTH } else { 0.0 }
                 + 2.0 * ui.spacing().item_spacing.x;
             let tabs_width = (ui.available_width() - right_width).max(0.0);
             // What is left for the tabs after the "+" button, shared
@@ -660,12 +659,6 @@ pub fn draw(
                     {
                         state.window_request = Some(WindowRequest::Minimize);
                     }
-                }
-                let menu = ui.add(on_strip("☰", 16.0)).on_hover_text("Menu");
-                if menu.clicked() {
-                    state.menu_request = Some(MenuRequest::Window {
-                        position: menu.rect.left_bottom(),
-                    });
                 }
                 // Whatever is left between the tabs and the buttons moves
                 // the window, as a title bar would.
@@ -752,10 +745,16 @@ pub fn draw(
                     }
                 }
 
-                // From the right: the profile's avatar, the extensions
-                // menu, the pinned actions (in their order), then the
-                // address bar takes the rest.
+                // From the right: the window menu, the profile's avatar,
+                // the extensions menu, the pinned actions (in their
+                // order), then the address bar takes the rest.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let menu = menu_button(ui, &palette, window).on_hover_text("Menu");
+                    if menu.clicked() {
+                        state.menu_request = Some(MenuRequest::Window {
+                            position: menu.rect.left_bottom(),
+                        });
+                    }
                     let profile = avatar_button(ui, &palette, window, color, avatar, profile_name)
                         .on_hover_text(profile_name);
                     if profile.clicked() {
@@ -3476,6 +3475,29 @@ fn avatar_button(
     let (rect, response, _) = icon_button_rect(ui, palette, id);
     if ui.is_rect_visible(rect) {
         paint_avatar(ui, rect.center(), AVATAR_RADIUS, color, avatar, name);
+    }
+    response
+}
+
+/// The "☰" button at the toolbar's right end, which opens the window
+/// menu: three lines drawn as strokes, like the window controls, so
+/// it never depends on a font having the glyph.
+fn menu_button(ui: &mut Ui, palette: &Palette, window: &Window) -> egui::Response {
+    let id = Id::new(("window-menu", window.id));
+    let (rect, response, _) = icon_button_rect(ui, palette, id);
+    if ui.is_rect_visible(rect) {
+        let c = rect.center();
+        let half = 6.0;
+        let stroke = Stroke::new(1.5_f32, ui.visuals().text_color());
+        for dy in [-4.5, 0.0, 4.5] {
+            ui.painter().line_segment(
+                [
+                    Pos2::new(c.x - half, c.y + dy),
+                    Pos2::new(c.x + half, c.y + dy),
+                ],
+                stroke,
+            );
+        }
     }
     response
 }
