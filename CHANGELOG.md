@@ -17,6 +17,23 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- Guest profiles and the Manage Profiles dialog. "Open Guest Profile"
+  in the Profiles menu makes a profile named "Guest" (the next free
+  `guest` directory, marked by an empty `guest` file in it; grey, a
+  ghost avatar, nothing shared) and starts a browser for it, which
+  deletes the directory on its way out; a guest left behind by a
+  crash is swept at the next start of any browser once it is a minute
+  old and unclaimed. A guest is listed nowhere, cannot be edited, and
+  its window is titled "<brand> – Guest". "Manage Profiles…" opens a
+  dialog with a row per profile (this browser's first, with its
+  avatar): Open for another, Edit… for this one, Delete… for any but
+  the default and a guest, and "Add <brand> Profile…" and "Open Guest
+  Profile" under them. New: `Profile::guest`,
+  `Profile::{guests, guest_marker_path}`, `profile::{GUEST_PROFILE_NAME,
+  GUEST_MARKER_NAME}`, `Command::{OpenGuestProfile,
+  PromptManageProfiles}`, `EngineAction::OpenGuestProfile`,
+  `Prompt::ManageProfiles`, `menus::CurrentProfile::guest`,
+  `osmena_shell::profiles::{create_guest, sweep_guests}`.
 - The default browser, on macOS. `osmena-core`: `DefaultBrowser`
   (`Unsupported`, `Yes`, `No`) on `Browser::default_browser`, with
   `Browser::default_browser_dismissed` and
@@ -188,8 +205,26 @@ All notable changes to the osmena crates. The crates version together.
   site_icons}`, `MenuRequest::{Bookmark, BookmarkGroup,
   BookmarkOverflow}`.
 
+### Fixed
+
+- Deleting the profile a browser runs (now also a guest's exit) left
+  the directory behind on Windows with Chromium, which still holds a
+  file in it when the shell tries: `profiles::delete_at_exit` retries
+  for a moment and then leaves the removal to a detached helper that
+  waits for the process to exit (PowerShell on Windows, `sh` on Unix),
+  the way the updater reopens the browser.
+
 ### Changed
 
+- The Profiles menu is shaped like Chromium's: the current profile and
+  "Edit…", then, only when there are others, an "Other <brand>
+  Profiles" heading over them, then "Add <brand> Profile…", "Open
+  Guest Profile" and "Manage Profiles…". The "Delete Profile" submenu
+  and the "No Other Profiles" line are gone: a profile is deleted from
+  the Manage Profiles dialog or, for the current one, the Edit dialog.
+  `menus::profiles_menu` takes the brand name first; `Profile` has a
+  `guest` field (set by `resolve` and `sibling` from the marker file)
+  and `Profile::others` and `siblings` leave guests out.
 - `BrowserWindow::open` takes an optional `WindowGeometry`.
 - `EngineInfo` has new fields, `find` and `downloads`;
   `menus::window_menu` takes `can_find` and `can_download` and

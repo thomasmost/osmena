@@ -292,9 +292,12 @@ The engine contract, in `osmena-engine`:
   bookmarks, history, the engine's cookies and storage; `--profile
   <dir>` picks one, `default` otherwise) with a name, a colour and an
   avatar. The toolbar ends in the avatar; its menu, the same Profiles
-  menu the macOS menu bar has, shows the current profile and "Edit…",
-  the other profiles (each starts a browser for it: a profile is a
-  process), "Add Profile…" and "Delete Profile". The dialog asks for
+  menu the macOS menu bar has, is shaped like Chromium's: the current
+  profile and "Edit…", the other profiles under an "Other <brand>
+  Profiles" heading (each starts a browser for it: a profile is a
+  process), then "Add <brand> Profile…", "Open Guest Profile" and
+  "Manage Profiles…" (a dialog with a row per profile: open, edit or
+  delete it, and the two ways to add one). The dialog asks for
   the name, the theme colour and the avatar (the name's initial, or a
   flat monochrome glyph from three tabs: sea creatures, the 24 most
   used emoji, and an assorted set; the colour is one of seven hues, each
@@ -306,6 +309,13 @@ The engine contract, in `osmena-engine`:
   profile's directory is the slug of its name (`work-stuff`, then
   `work-stuff-2`); deleting one asks first, refuses a profile open in
   another browser, and for the current profile hands over to the
+  default one and removes the directory on the way out. A guest
+  profile is a throwaway: "Open Guest Profile" makes one (`guest`,
+  then `guest-2`, marked by an empty `guest` file; named "Guest",
+  grey, a ghost avatar, nothing shared) and starts a browser for it,
+  which removes the directory when it exits; a guest is listed in no
+  menu, cannot be edited, and one a crash left behind is swept at the
+  next start once it is a minute old and no browser claims it.
   default one and removes the directory on the way out.
 - **The default browser (macOS).** While the browser is not the
   system's default for web links, a bar under the toolbar offers to

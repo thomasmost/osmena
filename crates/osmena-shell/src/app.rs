@@ -170,6 +170,15 @@ impl<E: Engine> App<E> {
             }
         });
         profiles::claim(&browser.profile.pid_path());
+        profiles::sweep_guests(&browser.profile);
+        // A guest's directory goes with its browser.
+        let delete_on_exit = browser.profile.guest.then(|| browser.profile.clone());
+        if browser.profile.guest {
+            log::info!(
+                "running as a guest: profile {:?} goes at exit",
+                browser.profile.name
+            );
+        }
         let mut favicons = FaviconCache::new(browser.profile.favicons_dir());
         favicons.preload(bookmarked_hosts(&browser.bookmarks));
         let launch = LaunchFetcher::new(
@@ -209,7 +218,7 @@ impl<E: Engine> App<E> {
             window_failed: false,
             history_dirty: None,
             menu_bar: native_menu::MenuBar::default(),
-            delete_on_exit: None,
+            delete_on_exit,
             updater,
             update_check_due: None,
             favicons,
@@ -656,6 +665,7 @@ impl<E: Engine> App<E> {
             profile: menus::CurrentProfile {
                 dir: &self.browser.profile.name,
                 name: &profile_name,
+                guest: self.browser.profile.guest,
             },
             profiles: &self.browser.profiles,
             updates,
@@ -1169,6 +1179,30 @@ impl<E: Engine> App<E> {
                     Err(e) => {
                         self.browser.update = UpdateStatus::Idle;
                         self.update_reported(UpdateStatus::Failed(e));
+                    }
+                }
+            }
+            EngineAction::OpenGuestProfile => {
+                match profiles::create_guest(&self.browser.profile, self.brand) {
+                    Ok(guest) => {
+                        log::info!(
+                            "made guest profile {:?} at {}",
+                            guest.name,
+                            guest.dir.display()
+                        );
+                        if let Err(e) = crate::process::open_in_profile(&guest.name, &[]) {
+                            // Nothing will claim it: take it back now.
+                            if let Err(e) = profiles::delete(&guest) {
+                                log::warn!("cannot remove the unused guest profile: {e}");
+                            }
+                            self.report_error(
+                                format!("cannot start a browser for the guest profile: {e}"),
+                                event_loop,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        self.report_error(format!("cannot create a guest profile: {e}"), event_loop)
                     }
                 }
             }
@@ -1762,8 +1796,14 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
         self.engine = None;
         profiles::release(&self.browser.profile.pid_path());
         if let Some(profile) = self.delete_on_exit.take() {
-            match profiles::delete(&profile) {
-                Ok(()) => log::info!("deleted profile {:?}", profile.name),
+            match profiles::delete_at_exit(&profile) {
+                Ok(profiles::Deletion::Removed) => {
+                    log::info!("deleted profile {:?}", profile.name)
+                }
+                Ok(profiles::Deletion::Deferred) => log::info!(
+                    "profile {:?} is still held by a file; a helper removes it once this process has exited",
+                    profile.name
+                ),
                 Err(e) => log::error!(
                     "cannot delete profile {:?} at {}: {e}",
                     profile.name,

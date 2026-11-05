@@ -324,6 +324,7 @@ impl ChromeState {
             Prompt::MoveToFolder { suggested, .. } => suggested.clone(),
             Prompt::BookmarkTabs { .. }
             | Prompt::DeleteProfile { .. }
+            | Prompt::ManageProfiles { .. }
             | Prompt::DeleteBookmarkGroup { .. }
             | Prompt::QuitWithDownloads { .. } => String::new(),
             Prompt::RenameFolder { name, .. } => name.clone(),
@@ -1748,6 +1749,9 @@ fn draw_prompt(
         None => return Vec::new(),
         Some(Prompt::Profile { .. }) => return draw_profile_prompt(ui, window, context, state),
         Some(Prompt::DeleteProfile { .. }) => return draw_delete_profile_prompt(ui, state),
+        Some(Prompt::ManageProfiles { .. }) => {
+            return draw_manage_profiles_prompt(ui, window, context, state);
+        }
         Some(Prompt::Bookmark { .. }) => return draw_bookmark_prompt(ui, state),
         Some(Prompt::DeleteBookmarkGroup { .. }) => return draw_delete_group_prompt(ui, state),
         Some(Prompt::QuitWithDownloads { .. }) => return draw_quit_prompt(ui, state),
@@ -1774,6 +1778,7 @@ fn draw_prompt(
             Prompt::RenameBookmarkGroup { .. } => ("Rename group", "Name", "", Vec::new()),
             Prompt::Profile { .. }
             | Prompt::DeleteProfile { .. }
+            | Prompt::ManageProfiles { .. }
             | Prompt::Bookmark { .. }
             | Prompt::DeleteBookmarkGroup { .. }
             | Prompt::QuitWithDownloads { .. } => return Vec::new(),
@@ -1893,6 +1898,7 @@ fn draw_prompt(
         }
         Prompt::Profile { .. }
         | Prompt::DeleteProfile { .. }
+        | Prompt::ManageProfiles { .. }
         | Prompt::Bookmark { .. }
         | Prompt::DeleteBookmarkGroup { .. }
         | Prompt::QuitWithDownloads { .. } => Vec::new(),
@@ -3169,6 +3175,120 @@ fn draw_profile_prompt(
     } else {
         vec![Command::SaveProfile(form)]
     }
+}
+
+/// The Manage Profiles dialog: a row per profile (this browser's first,
+/// then the others as the menu lists them) with its avatar, name and
+/// what may be done with it (Open for another, Edit for this one,
+/// Delete for any but the default and a guest), and under them the ways
+/// to add one: "Add <brand> Profile…" and "Open Guest Profile". Every
+/// button answers with the command the Profiles menu would issue; the
+/// ones that open another dialog replace this one.
+fn draw_manage_profiles_prompt(
+    ui: &mut Ui,
+    window: &Window,
+    context: &ChromeContext<'_>,
+    state: &mut ChromeState,
+) -> Vec<Command> {
+    let Some(prompt) = state.prompt.as_ref() else {
+        return Vec::new();
+    };
+    let Prompt::ManageProfiles {
+        current,
+        guest,
+        others,
+    } = &prompt.prompt
+    else {
+        return Vec::new();
+    };
+    let mut picked: Option<Command> = None;
+    let mut closed = false;
+    egui::Window::new("Manage profiles")
+        .id(Id::new("chrome-prompt"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_TOP, Vec2::new(0.0, 48.0))
+        .show(ui.ctx(), |ui| {
+            ui.set_min_width(400.0);
+            ui.set_max_width(480.0);
+            let rows = std::iter::once((current, true)).chain(others.iter().map(|p| (p, false)));
+            for (entry, is_current) in rows {
+                ui.horizontal(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(
+                        Vec2::splat(AVATAR_CHOICE_RADIUS * 2.0 + 4.0),
+                        Sense::hover(),
+                    );
+                    paint_avatar(
+                        ui,
+                        rect.center(),
+                        AVATAR_CHOICE_RADIUS,
+                        entry.color,
+                        entry.avatar,
+                        &entry.name,
+                    );
+                    ui.add_space(4.0);
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui.label(RichText::new(&entry.name).strong());
+                        let note = if is_current && *guest {
+                            "This browser, a guest: it is removed when the browser closes"
+                        } else if is_current {
+                            "This browser"
+                        } else if entry.dir == DEFAULT_PROFILE_NAME {
+                            "The default profile"
+                        } else {
+                            ""
+                        };
+                        if !note.is_empty() {
+                            ui.label(RichText::new(note).small().weak());
+                        }
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let deletable =
+                            entry.dir != DEFAULT_PROFILE_NAME && !(is_current && *guest);
+                        if ui.add_enabled(deletable, Button::new("Delete…")).clicked() {
+                            picked = Some(Command::PromptDeleteProfile {
+                                window: window.id,
+                                profile: entry.dir.clone(),
+                            });
+                        }
+                        if is_current {
+                            if ui.add_enabled(!*guest, Button::new("Edit…")).clicked() {
+                                picked = Some(Command::PromptEditProfile(window.id));
+                            }
+                        } else if ui.button("Open").clicked() {
+                            picked = Some(Command::OpenProfile(entry.dir.clone()));
+                        }
+                    });
+                });
+                ui.add_space(2.0);
+            }
+            ui.separator();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .button(format!("Add {} Profile…", context.brand.name))
+                    .clicked()
+                {
+                    picked = Some(Command::PromptAddProfile(window.id));
+                }
+                if ui.button("Open Guest Profile").clicked() {
+                    picked = Some(Command::OpenGuestProfile);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Close").clicked() {
+                        closed = true;
+                    }
+                });
+            });
+            if ui.input(|i| i.key_pressed(Key::Escape)) {
+                closed = true;
+            }
+        });
+    if closed || picked.is_some() {
+        state.prompt = None;
+    }
+    picked.into_iter().collect()
 }
 
 /// "Delete this profile?": what goes with it, and Delete or Cancel.

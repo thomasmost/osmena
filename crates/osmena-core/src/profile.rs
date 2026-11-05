@@ -28,6 +28,13 @@ use crate::settings::{ChromeColor, Settings};
 
 pub const PROFILES_DIR_NAME: &str = "profiles";
 pub const DEFAULT_PROFILE_NAME: &str = "default";
+/// The display name of a guest profile, and the stem of its directory
+/// name (`guest`, `guest-2`, …).
+pub const GUEST_PROFILE_NAME: &str = "Guest";
+/// The empty file that marks a profile directory as a guest's: made
+/// for one browser, left out of the profile lists, and deleted when
+/// that browser exits.
+pub const GUEST_MARKER_NAME: &str = "guest";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Profile {
@@ -37,6 +44,9 @@ pub struct Profile {
     /// the HTTP cache, and whatever else the engine keeps. Its name comes
     /// from [`EngineInfo::data_dir`], so two engines never share one.
     pub engine_dir: PathBuf,
+    /// A guest profile ([`GUEST_MARKER_NAME`] is in `dir`): temporary,
+    /// listed nowhere, and removed when its browser exits.
+    pub guest: bool,
 }
 
 /// Another profile on this machine, as the menus list it: its directory
@@ -522,6 +532,7 @@ impl Profile {
         Ok(Profile {
             name: name.to_string(),
             engine_dir: dir.join(engine.data_dir),
+            guest: is_guest_dir(&dir),
             dir,
         })
     }
@@ -539,6 +550,7 @@ impl Profile {
         };
         Ok(Profile {
             name: name.to_string(),
+            guest: is_guest_dir(&dir),
             dir,
             engine_dir,
         })
@@ -625,23 +637,44 @@ impl Profile {
         self.dir.join("running.pid")
     }
 
+    /// The file that marks this profile as a guest's.
+    pub fn guest_marker_path(&self) -> PathBuf {
+        self.dir.join(GUEST_MARKER_NAME)
+    }
+
     /// Create the profile directory and the engine's subdirectory.
     pub fn ensure_dirs(&self) -> io::Result<()> {
         std::fs::create_dir_all(&self.engine_dir)
     }
 
     /// The names of the other profiles on this machine: every validly
-    /// named directory under the profiles directory except this one,
-    /// sorted. Each is a profile another `--profile <name>` process can
-    /// run. Returns nothing if the directory cannot be read.
+    /// named directory under the profiles directory except this one
+    /// and the guests', sorted. Each is a profile another
+    /// `--profile <name>` process can run. Returns nothing if the
+    /// directory cannot be read.
     pub fn others(&self) -> Vec<String> {
+        self.directories(|name, dir| *name != self.name && !is_guest_dir(dir))
+    }
+
+    /// The names of the guest profiles on this machine, this one's
+    /// included, sorted: what a browser sweeps when their browsers are
+    /// gone, and what a new guest's name must avoid.
+    pub fn guests(&self) -> Vec<String> {
+        self.directories(|_, dir| is_guest_dir(dir))
+    }
+
+    /// The validly named directories under the profiles directory that
+    /// `keep` accepts (by name and path), sorted.
+    fn directories(&self, keep: impl Fn(&String, &Path) -> bool) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(self.profiles_dir())
             .map(|entries| {
                 entries
                     .filter_map(|entry| entry.ok())
                     .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
                     .filter_map(|entry| entry.file_name().into_string().ok())
-                    .filter(|name| is_valid_name(name) && *name != self.name)
+                    .filter(|name| {
+                        is_valid_name(name) && keep(name, &self.profiles_dir().join(name))
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -708,6 +741,11 @@ pub fn directory_name_for(name: &str, taken: &[String]) -> String {
         .map(|n| format!("{base}-{n}"))
         .find(|candidate| !is_taken(candidate))
         .expect("an unbounded sequence has a free name")
+}
+
+/// Whether the profile directory `dir` holds a guest's marker.
+fn is_guest_dir(dir: &Path) -> bool {
+    dir.join(GUEST_MARKER_NAME).is_file()
 }
 
 fn is_valid_name(name: &str) -> bool {
@@ -842,6 +880,41 @@ mod tests {
         }
         std::fs::write(root.path().join("Osmena/profiles/notes.txt"), "x").unwrap();
         assert_eq!(me.others(), vec!["alpha".to_string(), "zeta".to_string()]);
+    }
+
+    #[test]
+    fn a_guest_is_marked_by_its_file_listed_apart_and_never_among_the_others() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let me = under(root.path(), "work").unwrap();
+        for name in ["work", "guest", "guest-2", "zeta"] {
+            std::fs::create_dir_all(root.path().join("Osmena/profiles").join(name)).unwrap();
+        }
+        for name in ["guest", "guest-2"] {
+            std::fs::write(
+                root.path()
+                    .join("Osmena/profiles")
+                    .join(name)
+                    .join(GUEST_MARKER_NAME),
+                "",
+            )
+            .unwrap();
+        }
+        assert!(!me.guest);
+        assert_eq!(me.others(), vec!["zeta".to_string()]);
+        assert_eq!(
+            me.guests(),
+            vec!["guest".to_string(), "guest-2".to_string()]
+        );
+        let guest = me.sibling("guest").unwrap();
+        assert!(guest.guest);
+        assert_eq!(
+            guest.guest_marker_path().file_name().unwrap(),
+            GUEST_MARKER_NAME
+        );
+        assert!(under(root.path(), "guest-2").unwrap().guest);
+        // The guests do not appear among the siblings either.
+        let dirs: Vec<String> = me.siblings(&BRAND).into_iter().map(|e| e.dir).collect();
+        assert_eq!(dirs, ["zeta"]);
     }
 
     #[test]

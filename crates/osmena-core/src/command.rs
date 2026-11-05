@@ -17,7 +17,7 @@ use crate::launch::{
 use crate::model::{
     Browser, FindState, Folder, FolderId, LoadState, Tab, TabId, Window, WindowId, site_key,
 };
-use crate::profile::{Avatar, DEFAULT_PROFILE_NAME};
+use crate::profile::{Avatar, DEFAULT_PROFILE_NAME, ProfileEntry};
 use crate::session::{Session, WindowGeometry};
 use crate::settings::{ChromeColor, UrlTemplate};
 use crate::update::{AvailableUpdate, UpdateStatus};
@@ -73,10 +73,16 @@ pub enum Command {
     /// Start a browser for `profile` (another process) on its new-window
     /// page; nothing for the current profile.
     OpenProfile(String),
+    /// Start a browser for a fresh guest profile: made for it, listed
+    /// nowhere, and deleted when that browser exits.
+    OpenGuestProfile,
     /// Ask the user to configure the current profile (its name, colour
     /// and avatar, and what it shares with the default profile) in
-    /// `window`.
+    /// `window`. Nothing for a guest.
     PromptEditProfile(WindowId),
+    /// Show every profile in `window`, each to open, edit or delete,
+    /// with the ways to add one.
+    PromptManageProfiles(WindowId),
     /// Ask the user for a new profile's name, colour and avatar in
     /// `window`.
     PromptAddProfile(WindowId),
@@ -499,6 +505,14 @@ pub enum Prompt {
         name: String,
         current: bool,
     },
+    /// Every profile, to open, edit or delete: this browser's
+    /// (`current`, a guest when `guest`: neither edited nor deleted)
+    /// and the `others` as the Profiles menu lists them.
+    ManageProfiles {
+        current: ProfileEntry,
+        guest: bool,
+        others: Vec<ProfileEntry>,
+    },
     /// The bookmark popover under the star: the bookmark of `url`, its
     /// `title` and `group` as they are, the existing `groups` to pick
     /// from, and whether the star just `added` it ("Bookmark added"
@@ -599,6 +613,9 @@ pub enum EngineAction {
         profile: String,
         urls: Vec<Url>,
     },
+    /// Make a guest profile directory (marked as one, named "Guest")
+    /// and start a browser for it, which deletes it on its way out.
+    OpenGuestProfile,
     /// Make a profile directory for `form` (the brand's defaults with
     /// the form's name, colour, avatar and flags) and start a browser
     /// for it.
@@ -781,8 +798,28 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             profile: profile.clone(),
             urls: Vec::new(),
         }],
-        Command::PromptEditProfile(window) => {
+        Command::OpenGuestProfile => vec![EngineAction::OpenGuestProfile],
+        Command::PromptManageProfiles(window) => {
             if browser.window(*window).is_none() {
+                return Vec::new();
+            }
+            let settings = &browser.settings;
+            vec![EngineAction::ShowPrompt {
+                window: *window,
+                prompt: Prompt::ManageProfiles {
+                    current: ProfileEntry {
+                        dir: browser.profile.name.clone(),
+                        name: browser.profile_name(),
+                        avatar: settings.profile.avatar,
+                        color: settings.chrome_color,
+                    },
+                    guest: browser.profile.guest,
+                    others: browser.profiles.clone(),
+                },
+            }]
+        }
+        Command::PromptEditProfile(window) => {
+            if browser.window(*window).is_none() || browser.profile.guest {
                 return Vec::new();
             }
             let settings = &browser.settings;
@@ -820,10 +857,15 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             }]
         }
         Command::PromptDeleteProfile { window, profile } => {
-            if browser.window(*window).is_none() || profile == DEFAULT_PROFILE_NAME {
+            let current = *profile == browser.profile.name;
+            // A guest's directory goes with its browser; there is
+            // nothing to confirm.
+            if browser.window(*window).is_none()
+                || profile == DEFAULT_PROFILE_NAME
+                || (current && browser.profile.guest)
+            {
                 return Vec::new();
             }
-            let current = *profile == browser.profile.name;
             let name = if current {
                 browser.profile_name()
             } else {
@@ -851,9 +893,9 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             vec![EngineAction::CreateProfile(form)]
         }
         Command::DeleteProfile(profile) => {
-            let known = *profile == browser.profile.name
-                || browser.profiles.iter().any(|p| p.dir == *profile);
-            if profile == DEFAULT_PROFILE_NAME || !known {
+            let current = *profile == browser.profile.name;
+            let known = current || browser.profiles.iter().any(|p| p.dir == *profile);
+            if profile == DEFAULT_PROFILE_NAME || !known || (current && browser.profile.guest) {
                 return Vec::new();
             }
             vec![EngineAction::DeleteProfile(profile.clone())]
@@ -3276,6 +3318,64 @@ mod tests {
         );
         let own_profile = b.profile.name.clone();
         assert!(dispatch(&mut b, &Command::OpenProfile(own_profile)).is_empty());
+        assert_eq!(
+            dispatch(&mut b, &Command::OpenGuestProfile),
+            vec![EngineAction::OpenGuestProfile]
+        );
+    }
+
+    #[test]
+    fn managing_profiles_lists_this_one_first_and_a_guest_is_neither_edited_nor_deleted() {
+        let (mut b, window, _) = three_tabs();
+        b.settings.profile.name = "Me".to_string();
+        b.settings.profile.avatar = Avatar::Whale;
+        b.settings.chrome_color = ChromeColor::Plum;
+        b.profiles = vec![ProfileEntry {
+            dir: "work".to_string(),
+            name: "Work".to_string(),
+            avatar: Avatar::Initial,
+            color: ChromeColor::Slate,
+        }];
+        let current = ProfileEntry {
+            dir: b.profile.name.clone(),
+            name: "Me".to_string(),
+            avatar: Avatar::Whale,
+            color: ChromeColor::Plum,
+        };
+        assert_eq!(
+            dispatch(&mut b, &Command::PromptManageProfiles(window)),
+            vec![EngineAction::ShowPrompt {
+                window,
+                prompt: Prompt::ManageProfiles {
+                    current: current.clone(),
+                    guest: false,
+                    others: b.profiles.clone(),
+                },
+            }]
+        );
+        assert!(dispatch(&mut b, &Command::PromptManageProfiles(WindowId(99))).is_empty());
+        assert!(!dispatch(&mut b, &Command::PromptEditProfile(window)).is_empty());
+
+        b.profile.guest = true;
+        assert!(dispatch(&mut b, &Command::PromptEditProfile(window)).is_empty());
+        let own = b.profile.name.clone();
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::PromptDeleteProfile {
+                    window,
+                    profile: own,
+                }
+            )
+            .is_empty()
+        );
+        assert!(matches!(
+            dispatch(&mut b, &Command::PromptManageProfiles(window)).as_slice(),
+            [EngineAction::ShowPrompt {
+                prompt: Prompt::ManageProfiles { guest: true, .. },
+                ..
+            }]
+        ));
     }
 
     #[test]

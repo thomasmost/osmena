@@ -539,6 +539,7 @@ pub(crate) mod test_support {
             name: "test".to_string(),
             engine_dir: dir.join("engine"),
             dir,
+            guest: false,
         };
         Browser::new(profile, Settings::default())
     }

@@ -1133,10 +1133,12 @@ impl<E: Engine> BrowserWindow<E> {
                 let name = browser.profile_name();
                 (
                     menus::profiles_menu(
+                        self.brand.name,
                         Some(self.id),
                         menus::CurrentProfile {
                             dir: &browser.profile.name,
                             name: &name,
+                            guest: browser.profile.guest,
                         },
                         &browser.profiles,
                     ),

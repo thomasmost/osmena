@@ -5,12 +5,13 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-11-03 (the default browser on macOS: the status,
-the offer bar, the settings section, the shell's Apple Event handlers
-for links and pages other apps hand over; modifier keys carry their
-own modifier; the Dock keeps a bundle's icon; osmena-xtask's macOS
-icon source; before that the Launch Panel, session restore, downloads,
-page zoom, find in page, bookmarks, updates over the air)._
+_Last updated: 2026-11-05 (the Profiles menu shaped like Chromium's,
+guest profiles and the Manage Profiles dialog; before that the default
+browser on macOS: the status, the offer bar, the settings section, the
+shell's Apple Event handlers for links and pages other apps hand over;
+modifier keys carry their own modifier; the Dock keeps a bundle's icon;
+osmena-xtask's macOS icon source; the Launch Panel, session restore,
+downloads, page zoom, find in page, bookmarks, updates over the air)._
 
 ## Architecture
 
@@ -224,6 +225,24 @@ No engine is needed; the workspace builds in under a minute.
   (`Browser::bookmarks_path`); copying extensions goes through the
   `extensions.toml` snapshot the shell writes on every
   `ExtensionsChanged` and `Engine::install_extension` by store id.
+  A guest profile is an ordinary directory with an empty `guest`
+  file in it (`GUEST_MARKER_NAME`): `Profile::guest` is read from
+  that file by `resolve` and `sibling`, `others`/`siblings` leave
+  guests out and `guests` lists them, `dispatch` refuses to edit or
+  delete the current profile when it is one, the shell starts with
+  `delete_on_exit` set for it (so no session is written either) and
+  sweeps abandoned guests at every start (`profiles::sweep_guests`,
+  a minute's grace for one whose browser is still starting). The
+  directory of a profile on its way out (a guest, or the current
+  profile the user deleted) goes through `profiles::delete_at_exit`:
+  Chromium still holds a file after the engine is dropped, so after a
+  short retry a detached helper (outside the job object, like the
+  updater's) removes it once the process has exited. The
+  Profiles menu (`menus::profiles_menu`, Chromium's shape, the brand
+  name in its labels) and the Manage Profiles dialog
+  (`Prompt::ManageProfiles`, drawn by `draw_manage_profiles_prompt`)
+  issue the same commands; deletion lives in that dialog and the Edit
+  dialog, not in the menu.
 - **The history is the model's, written by the shell.** `apply` records
   a visit when a load completes and a title when one arrives, answering
   `EngineAction::SaveHistory`; the shell writes `history.toml` a few
@@ -339,6 +358,21 @@ No engine is needed; the workspace builds in under a minute.
 
 ## Status and handoff (2026-10-19)
 
+Added 2026-11-05: the Profiles menu in Chromium's shape (the "Other
+<brand> Profiles" heading, "Add <brand> Profile…", "Open Guest
+Profile", "Manage Profiles…"; the Delete submenu gone), guest profiles
+and the Manage Profiles dialog (see Conventions). Verified: `cargo
+test` (the menu's three shapes, the guest marker and listing, the
+dispatch of the new commands and the guest guards, `create_guest`
+and the sweep with aged markers), clippy, fmt, and scripted runs of
+Nautilus on Windows: a staged guest directory started with
+`--profile guest --exit-after 10` shows "Nautilus – Guest", and the
+directory is gone a moment after the exit (the first try showed the
+in-process delete failing on a file Chromium holds until the process
+ends; the detached helper now finishes it). Not verified: macOS and
+its menu bar, the Unix helper, a real "Delete profile" of the current
+profile through the same helper, and the menu and the Manage Profiles
+dialog by eye unless the commit says otherwise.
 Added 2026-11-03, from Nautilus's macOS reports (see its handoff for
 the causes): the default browser (see Conventions), the modifier
 keys' own flag (`keyutils::with_own_modifier`), the Dock left to a
