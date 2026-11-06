@@ -181,7 +181,14 @@ No engine is needed; the workspace builds in under a minute.
   per size in `CachedFavicon` through `icon_texture`, and
   `favicon::snap` gives the box to draw it in. A tab's parts are
   placed by `tab_layout` (Chromium's order as a tab narrows), a
-  pure function with tests.
+  pure function with tests. A label in the strip is centred by
+  `text_top_centered`, never by `galley.size().y / 2.0`: a galley's
+  box has room over the capitals and none under the baseline, so the
+  box centres the text about two pixels low beside a favicon. The band
+  that is centred instead runs from the top of a capital to the foot
+  of a descender, measured from `TEXT_BAND` rather than from the
+  label, so titles without descenders keep the same height as the
+  rest.
 - **Folders are contiguous runs of tabs.** `Tab::folder` names the
   folder; `Window::gather_folder` keeps a folder's tabs together where
   its first tab is, `prune_folders` drops a folder whose last tab went

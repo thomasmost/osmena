@@ -71,6 +71,14 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- Tab titles and folder names are 11.5 px, a notch down from 12.5, and
+  are placed by the band their letters fill rather than by the box the
+  text is laid out in. That box keeps room over the capitals for
+  accents the title may not have and stops at the descenders, so
+  centring it hung every title about two pixels below the middle of
+  its favicon; the words now sit on the icon's centre line, and a
+  title with no `p` or `g` in it is not lifted above its neighbours
+  (the band is measured from a reference word, not from the title).
 - Tabs lay out by Chromium's rules as they narrow (`tab_layout`): the
   active tab keeps its close control first and its icon second, an
   inactive tab keeps its icon (centred when nothing else fits) and

@@ -45,8 +45,12 @@ const TAB_MIN_WIDTH: f32 = 64.0;
 const TAB_CLOSE_MIN_WIDTH: f32 = 110.0;
 const TAB_PADDING_X: f32 = 12.0;
 const TAB_CORNER: u8 = theme::CORNER;
-/// The tab titles' font: a little under the body text.
-const TAB_FONT_SIZE: f32 = 12.5;
+/// The tab titles' font: a notch under the body text.
+const TAB_FONT_SIZE: f32 = 11.5;
+
+/// The letters a strip label's band is measured from: a capital for
+/// the top of it, a descender for the foot. See [`text_top_centered`].
+const TEXT_BAND: &str = "Hg";
 const CLOSE_SIZE: f32 = 18.0;
 /// How far the close control reaches into the tab's right padding,
 /// so its hover ring has room without pushing the title.
@@ -1650,6 +1654,39 @@ impl Chip {
 /// Room for a chip's disclosure triangle before its name.
 const CHIP_GLYPH_WIDTH: f32 = 12.0;
 
+/// Where the top of a galley goes for its text to sit centred on `y`.
+///
+/// Not `y - height / 2`: a galley's box keeps room over the capitals
+/// for the accents a title may not have and stops at the descenders,
+/// so centring the box hangs the words below the middle — two pixels
+/// of it at the strip's size, which is plain to see beside a favicon.
+/// What is centred here instead is the band the letters fill, from the
+/// top of a capital to the foot of a descender.
+///
+/// The band is measured from a reference word ([`TEXT_BAND`]), never
+/// from the label itself: a title with no descender in it has a
+/// shorter band, and measuring that would leave every tab's words at
+/// a slightly different height. egui keeps laid-out text, so the
+/// reference costs a cache lookup after the first one.
+fn text_top_centered(painter: &egui::Painter, font: &egui::FontId, y: f32) -> f32 {
+    let reference = painter.layout_no_wrap(TEXT_BAND.to_string(), font.clone(), Color32::WHITE);
+    let band = reference.rows.first().and_then(|row| {
+        let (mut top, mut bottom) = (f32::MAX, f32::MIN);
+        for glyph in &row.glyphs {
+            if glyph.uv_rect.is_nothing() {
+                continue;
+            }
+            // The ink of a glyph, as an offset from its own baseline.
+            let ink = glyph.pos.y + glyph.uv_rect.offset.y;
+            top = top.min(ink);
+            bottom = bottom.max(ink + glyph.uv_rect.size.y);
+        }
+        (top <= bottom).then_some(f32::midpoint(top, bottom))
+    });
+    // A font with nothing to measure leaves the box as the best guess.
+    y - band.unwrap_or(reference.size().y / 2.0)
+}
+
 /// A folder's chip in the strip: its name with a disclosure glyph and,
 /// collapsed, its tab count. A click drops the list of its tabs down
 /// under it (another click, a click elsewhere, or Escape takes it away);
@@ -1719,10 +1756,11 @@ fn strip_folder(
             text_color,
             Stroke::NONE,
         ));
+        let font = egui::FontId::new(TAB_FONT_SIZE, FontFamily::Proportional);
         shapes.push(egui::Shape::galley(
             Pos2::new(
                 rect.left() + TAB_PADDING_X + CHIP_GLYPH_WIDTH,
-                rect.center().y - galley.size().y / 2.0,
+                text_top_centered(ui.painter(), &font, rect.center().y),
             )
             .round_to_pixels(ppp),
             galley.clone(),
@@ -3855,7 +3893,8 @@ fn tab_widget(
     // The title, cut at the first glyph that does not fit; no ellipsis,
     // a fade over its end says the same without spending the room.
     let galley = layout.title.map(|(_, room)| {
-        let mut job = egui::text::LayoutJob::simple_singleline(title.to_string(), font, text_color);
+        let mut job =
+            egui::text::LayoutJob::simple_singleline(title.to_string(), font.clone(), text_color);
         job.wrap = egui::text::TextWrapping {
             max_width: room,
             max_rows: 1,
@@ -3895,8 +3934,11 @@ fn tab_widget(
             }
         }
         if let (Some((left, room)), Some(galley)) = (layout.title, galley) {
-            let pos = Pos2::new(rect.left() + left, rect.center().y - galley.size().y / 2.0)
-                .round_to_pixels(ppp);
+            let pos = Pos2::new(
+                rect.left() + left,
+                text_top_centered(ui.painter(), &font, rect.center().y),
+            )
+            .round_to_pixels(ppp);
             shapes.push(egui::Shape::galley(pos, galley, text_color));
             if cut {
                 let fade = TAB_TITLE_FADE.min(room / 2.0);
@@ -4827,6 +4869,88 @@ mod tests {
         assert_eq!(
             describe_chord(KeyChord::new(Modifiers::empty(), Code::Numpad5)),
             "Num 5"
+        );
+    }
+
+    /// A context with the chrome's fonts in it, which egui only builds
+    /// once a frame has run.
+    fn with_fonts() -> egui::Context {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let _ = ctx.run_ui(Default::default(), |_| {});
+        ctx
+    }
+
+    /// The ink of a laid-out line, as offsets from the galley's top.
+    fn ink(ctx: &egui::Context, font: &egui::FontId, text: &str) -> (f32, f32) {
+        let galley = ctx.fonts_mut(|f| {
+            f.layout_job(egui::text::LayoutJob::simple_singleline(
+                text.to_string(),
+                font.clone(),
+                Color32::WHITE,
+            ))
+        });
+        let (mut top, mut bottom) = (f32::MAX, f32::MIN);
+        for glyph in &galley.rows[0].glyphs {
+            if glyph.uv_rect.is_nothing() {
+                continue;
+            }
+            let y = glyph.pos.y + glyph.uv_rect.offset.y;
+            top = top.min(y);
+            bottom = bottom.max(y + glyph.uv_rect.size.y);
+        }
+        (top, bottom)
+    }
+
+    /// A strip label is placed by the band its letters fill, not by the
+    /// box the galley reports: that box has room over the capitals and
+    /// none under the baseline, which is what left titles sitting low
+    /// beside a favicon.
+    #[test]
+    fn a_strip_label_is_centred_by_its_letters_not_by_its_box() {
+        let ctx = with_fonts();
+        let font = egui::FontId::new(TAB_FONT_SIZE, FontFamily::Proportional);
+        let middle = 40.0;
+        let top = ctx.layer_painter(egui::LayerId::background());
+        let placed = text_top_centered(&top, &font, middle);
+
+        let (ink_top, ink_bottom) = ink(&ctx, &font, TEXT_BAND);
+        let centre = f32::midpoint(placed + ink_top, placed + ink_bottom);
+        assert!(
+            (centre - middle).abs() < 0.01,
+            "the band sits at {centre}, not {middle}"
+        );
+
+        // The box would have hung it low; this is the fault being fixed,
+        // so it is worth holding on to the size of it.
+        let galley_box = ctx.fonts_mut(|f| {
+            f.layout_job(egui::text::LayoutJob::simple_singleline(
+                TEXT_BAND.to_string(),
+                font.clone(),
+                Color32::WHITE,
+            ))
+        });
+        let by_the_box = middle - galley_box.size().y / 2.0;
+        assert!(
+            placed < by_the_box - 0.5,
+            "placed {placed} is no higher than the box would put it ({by_the_box})"
+        );
+    }
+
+    /// The reference the band is taken from has to reach both ends of
+    /// it. Cut the descender out of it and the rule quietly becomes
+    /// the old one, centring the capitals and hanging every `p` and
+    /// `g` below the favicon again.
+    #[test]
+    fn the_reference_word_reaches_under_the_baseline() {
+        let ctx = with_fonts();
+        let font = egui::FontId::new(TAB_FONT_SIZE, FontFamily::Proportional);
+        let (top, bottom) = ink(&ctx, &font, TEXT_BAND);
+        let (cap_top, baseline) = ink(&ctx, &font, "H");
+        assert_eq!(top, cap_top, "{TEXT_BAND:?} has no capital in it");
+        assert!(
+            bottom > baseline,
+            "{TEXT_BAND:?} has no descender in it: {bottom} is no lower than {baseline}"
         );
     }
 }
