@@ -413,17 +413,24 @@ fn system_locale() -> Option<String> {
 }
 
 impl Settings {
-    /// The defaults of a fresh profile of `brand`.
+    /// The defaults of a fresh profile of `brand` on this system.
     pub fn for_brand(brand: &Brand) -> Settings {
+        Settings::for_brand_in(brand, system_locale().as_deref())
+    }
+
+    /// The defaults of a fresh profile of `brand` on a system whose
+    /// locale is `locale`, taken apart from the system so the choice
+    /// can be tested without one.
+    fn for_brand_in(brand: &Brand, locale: Option<&str>) -> Settings {
         let mut settings = Settings {
             homepage: brand.homepage.to_string(),
             chrome_color: brand.chrome_color,
             ..Settings::default()
         };
-        // A locale that names no country ("C", "en") leaves this
-        // unset, and the weather tile takes the units from wherever it
-        // turns out to be.
-        settings.launch.weather.units = system_locale().as_deref().and_then(Units::for_locale);
+        // A locale that names no country ("C", "en"), or a system that
+        // will not say, leaves this unset, and the weather tile takes
+        // the units from wherever it turns out to be.
+        settings.launch.weather.units = locale.and_then(Units::for_locale);
         settings
     }
 
@@ -660,16 +667,19 @@ mod tests {
 
     /// The shell reads the locale however its platform keeps it and
     /// hands it over before any profile is loaded; a fresh profile in
-    /// one of the few Fahrenheit countries starts in Fahrenheit. (The
-    /// hint is set once per process, so this is the only test that
-    /// sets it.)
+    /// one of the few Fahrenheit countries starts in Fahrenheit.
+    ///
+    /// Asked through `for_brand_in`, not by setting the process-wide
+    /// hint: that is write-once and every other test would see it.
     #[test]
     fn a_fresh_profile_measures_the_way_the_system_does() {
-        set_system_locale("en-US");
-        assert_eq!(
-            Settings::for_brand(&BRAND).launch.weather.units,
-            Some(Units::Fahrenheit)
-        );
+        let units = |locale| Settings::for_brand_in(&BRAND, locale).launch.weather.units;
+        assert_eq!(units(Some("en-US")), Some(Units::Fahrenheit));
+        assert_eq!(units(Some("fr_FR.UTF-8")), Some(Units::Celsius));
+        // A system with no locale, or one that names no country,
+        // leaves the units to the place the tile is showing.
+        assert_eq!(units(Some("C")), None);
+        assert_eq!(units(None), None);
     }
 
     #[test]
