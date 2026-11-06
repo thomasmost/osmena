@@ -90,7 +90,15 @@ mod tests {
     /// and never a panic. On a machine that allows it the coordinates
     /// are on the globe; on one that does not, the refusal reads as
     /// a sentence.
+    ///
+    /// Not run by `cargo test`: asking the system is asking the user.
+    /// `RequestAccessAsync` waits for the consent prompt to be
+    /// answered, and with nobody at the keyboard — a CI runner — it
+    /// waits for as long as it is given, which is a hung job rather
+    /// than a failing one. Run it by hand:
+    /// `cargo test -p osmena-shell -- --ignored location`.
     #[test]
+    #[ignore = "asks the system, which asks the user: needs someone at the keyboard"]
     fn the_answer_is_coordinates_or_a_sentence() {
         match super::current() {
             Ok((latitude, longitude)) => {
@@ -105,5 +113,19 @@ mod tests {
                 assert!(reason.len() > 20, "too terse: {reason}");
             }
         }
+    }
+
+    /// The sentences the tile shows instead of a temperature, checked
+    /// without asking the system anything.
+    #[test]
+    fn a_refusal_reads_as_a_sentence() {
+        let sentence = |reason: &str| {
+            assert!(reason.ends_with('.'), "not a sentence: {reason}");
+            assert!(reason.len() > 20, "too terse: {reason}");
+        };
+        sentence(super::REFUSED);
+        // The system that cannot be asked at all says so itself.
+        #[cfg(not(windows))]
+        sentence(&super::current().unwrap_err());
     }
 }

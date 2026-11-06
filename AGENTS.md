@@ -242,7 +242,12 @@ No engine is needed; the workspace builds in under a minute.
   permission is what the permission exists to prevent; and a refusal
   is re-asked only on `force` (Retry, or handing a named place back),
   never at every opening. A fresh location is reused even when forced,
-  so changing the units costs no new fix.
+  so changing the units costs no new fix. No test asks the system for
+  a position: `RequestAccessAsync` waits for the consent prompt to be
+  answered, and with nobody at the keyboard it waits for as long as it
+  is given, so the test that calls `current` is `#[ignore]`d and CI
+  checks the sentences instead. Anything else that asks the system for
+  a permission goes the same way.
 - **A fresh profile follows the system's locale, which the shell
   reads.** `Settings::for_brand` asks `settings::system_locale`, which
   is what the shell left in `set_system_locale` at startup or, failing
@@ -411,6 +416,21 @@ No engine is needed; the workspace builds in under a minute.
   adds; the shared behaviour is documented here only.
 
 ## Status and handoff (2026-11-06, later still)
+
+CI had been red since "the weather tile follows this device", for two
+reasons neither of which a Windows checkout shows: on macOS clippy
+read the `match` in `locale.rs`'s test as a `single_match`, because
+the `None` arm is empty once its `#[cfg(windows)] panic!` is compiled
+out; and on Windows the job hit the 30-minute cap because
+`launch::location`'s test waited on `RequestAccessAsync` for a consent
+prompt no runner can answer (the log says "has been running for over
+60 seconds", then nothing). Both fixed. Platform-conditional code
+needs its other arm linted: the recipe that found the first is a
+scratch crate holding a copy of the module with `#[cfg(windows)]` and
+`#[cfg(not(windows))]` rewritten to two Cargo features, clippied with
+only the non-Windows one on. It reproduces CI's error on the old file
+exactly, so a clean run means something; `cfg(all())` as the stand-in
+does not work, since clippy lints that as `non_minimal_cfg`.
 
 Units nobody has chosen follow the country the tile is showing (see
 Conventions), which is what covers a system with no locale to read:

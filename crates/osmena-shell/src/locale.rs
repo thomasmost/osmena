@@ -47,19 +47,16 @@ mod tests {
     /// guessing.
     #[test]
     fn the_answer_is_a_locale_name_or_nothing() {
-        match system() {
-            Some(name) => {
-                assert!(!name.is_empty());
-                assert!(
-                    name.chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
-                    "{name:?}"
-                );
-            }
-            None => {
-                #[cfg(windows)]
-                panic!("Windows always has a user locale");
-            }
+        let answer = system();
+        #[cfg(windows)]
+        assert!(answer.is_some(), "Windows always has a user locale");
+        if let Some(name) = answer {
+            assert!(!name.is_empty());
+            assert!(
+                name.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "{name:?}"
+            );
         }
     }
 }
