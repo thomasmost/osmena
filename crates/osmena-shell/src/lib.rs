@@ -19,6 +19,7 @@ mod clipboard;
 mod default_browser;
 mod favicons;
 mod launch;
+mod locale;
 mod page;
 pub mod process;
 mod profiles;
@@ -100,6 +101,13 @@ pub fn run<E: Engine>(launch: Launch<E>) -> ExitCode {
         start_engine,
     } = launch;
     let bin = brand.binary;
+
+    // Before any profile is loaded: a fresh one's defaults follow the
+    // system's locale, and on Windows only the system can say what it
+    // is.
+    if let Some(name) = locale::system() {
+        osmena_core::settings::set_system_locale(name);
+    }
 
     let profile = match Profile::resolve(brand, engine, &args.profile) {
         Ok(p) => p,

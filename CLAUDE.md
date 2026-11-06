@@ -6,7 +6,9 @@ trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
 _Last updated: 2026-11-06 (the weather tile follows this device, asking
-the system for the location; before that the strip on the pixel grid,
+the system for the location, with Fahrenheit and Celsius a row of their
+own in the Launch Settings and a fresh profile's units following the
+system's locale; before that the strip on the pixel grid,
 icons fitted to their pixels, Chromium's order as tabs narrow, the
 active tab open into the toolbar; earlier that day the Profiles menu shaped like Chromium's,
 guest profiles and the Manage Profiles dialog; before that the default
@@ -241,6 +243,16 @@ No engine is needed; the workspace builds in under a minute.
   is re-asked only on `force` (Retry, or handing a named place back),
   never at every opening. A fresh location is reused even when forced,
   so changing the units costs no new fix.
+- **A fresh profile follows the system's locale, which the shell
+  reads.** `Settings::for_brand` asks `settings::system_locale`, which
+  is what the shell left in `set_system_locale` at startup or, failing
+  that, `LC_ALL`/`LC_MESSAGES`/`LANG`. The environment covers Linux
+  and a Mac started from a terminal; Windows keeps its locale nowhere
+  an environment variable can see it, so `osmena-shell`'s `locale.rs`
+  asks `GetUserDefaultLocaleName`. So far it decides one thing, the
+  weather tile's units, and only for a profile with no settings file
+  yet. A Mac app bundle started from the Dock has no locale in its
+  environment either and would need `NSLocale`.
 - **A profile is a directory; its face is in its settings.** The
   directory name is the identity (`--profile <dir>`, `Profile::name`);
   the display name, avatar and colour live in that profile's
@@ -384,6 +396,23 @@ No engine is needed; the workspace builds in under a minute.
 - Commit to `main` unless asked for a branch. Conventional Commits.
 - The browsers' own docs (`README.md`, `CLAUDE.md`) describe what each one
   adds; the shared behaviour is documented here only.
+
+## Status and handoff (2026-11-06, later)
+
+Fahrenheit and Celsius now have a labelled row of their own in the
+Launch Settings ("Temperature", the two named in words), where they
+were two bare degree signs under the weather place that did not read
+as a control. The default they start from was wrong on Windows:
+`Units::for_locale` was fed `LC_ALL`/`LC_MESSAGES`/`LANG`, which
+Windows never sets, so every fresh profile measured in Celsius
+wherever it was. The shell reads the locale from the system
+(`locale.rs`, `GetUserDefaultLocaleName`) and hands it to the model
+before any profile loads. Verified on Windows by driving the debug
+Nautilus with a fresh profile: `en-US`, and the tile opened on 67°F,
+H 69 L 61; clicking "Celsius (°C)" refetched and drew 19°C, H 20
+L 16, with the second Open-Meteo call in the log. Not verified: the
+locale on macOS and Linux (both still read the environment; a Mac
+bundle started from the Dock has none and would need `NSLocale`).
 
 ## Status and handoff (2026-11-06)
 

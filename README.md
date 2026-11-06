@@ -141,8 +141,8 @@ The engine contract, in `osmena-engine`:
   hides that host). The gear at the bottom right opens the Launch
   Settings in the panel: the search engine as presets or a custom
   template (the same setting the address bar uses), the two question
-  templates, the weather location and units, the Google account, and the
-  tiles in edit mode, dragged to reorder and closed to remove, with
+  templates, the weather location and whether temperatures read in
+  Fahrenheit or Celsius, the Google account, and the tiles in edit mode, dragged to reorder and closed to remove, with
   "Restore default widgets". The same matches drop down under the
   address bar of an existing tab as you type. The history
   (`history.toml` in the profile) keeps every page that finished
@@ -351,8 +351,8 @@ The engine contract, in `osmena-engine`:
   offer (`check_default_browser`), the bookmarks bar switch and the
   group the last bookmark went to, the default page zoom, `[downloads]`
   (the directory and whether to ask each time), `[launch]` (the
-  panel's widgets in order, the question templates, the weather place
-  and units, hidden sites), and `[profile]` (name, avatar, shared
+  panel's widgets in order, the question templates, the weather
+  location and units, hidden sites), and `[profile]` (name, avatar, shared
   bookmarks, extensions to copy at the next start).
 
 ## Updates

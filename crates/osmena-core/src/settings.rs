@@ -4,6 +4,7 @@
 use std::fmt;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -384,6 +385,33 @@ impl From<io::Error> for SettingsError {
     }
 }
 
+/// What the shell was told the system's locale is. POSIX systems put it
+/// in the environment, so the model can read it itself; Windows does
+/// not, and the shell leaves the answer here instead.
+static SYSTEM_LOCALE: OnceLock<String> = OnceLock::new();
+
+/// Tell the model the system's locale ("en-US", "fr_FR.UTF-8"), read
+/// however the platform keeps it. The shell calls this once at startup,
+/// before any profile is loaded; a later call is ignored.
+///
+/// It decides one thing: what a *fresh* profile measures temperature
+/// in. A profile with a settings file already has its answer, and the
+/// Launch Settings override it either way.
+pub fn set_system_locale(locale: impl Into<String>) {
+    let _ = SYSTEM_LOCALE.set(locale.into());
+}
+
+/// The locale a fresh profile's defaults follow: what the shell was
+/// told, or failing that the environment the way POSIX sets it.
+fn system_locale() -> Option<String> {
+    if let Some(locale) = SYSTEM_LOCALE.get() {
+        return Some(locale.clone());
+    }
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .find_map(|var| std::env::var(var).ok().filter(|v| !v.is_empty()))
+}
+
 impl Settings {
     /// The defaults of a fresh profile of `brand`.
     pub fn for_brand(brand: &Brand) -> Settings {
@@ -392,10 +420,7 @@ impl Settings {
             chrome_color: brand.chrome_color,
             ..Settings::default()
         };
-        let locale = ["LC_ALL", "LC_MESSAGES", "LANG"]
-            .iter()
-            .find_map(|var| std::env::var(var).ok().filter(|v| !v.is_empty()));
-        settings.launch.weather.units = Units::for_locale(locale.as_deref());
+        settings.launch.weather.units = Units::for_locale(system_locale().as_deref());
         settings
     }
 
@@ -628,6 +653,20 @@ mod tests {
             Settings::parse("homepage = "),
             Err(SettingsError::Parse(_))
         ));
+    }
+
+    /// The shell reads the locale however its platform keeps it and
+    /// hands it over before any profile is loaded; a fresh profile in
+    /// one of the few Fahrenheit countries starts in Fahrenheit. (The
+    /// hint is set once per process, so this is the only test that
+    /// sets it.)
+    #[test]
+    fn a_fresh_profile_measures_the_way_the_system_does() {
+        set_system_locale("en-US");
+        assert_eq!(
+            Settings::for_brand(&BRAND).launch.weather.units,
+            Units::Fahrenheit
+        );
     }
 
     #[test]

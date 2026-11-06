@@ -18,9 +18,21 @@ All notable changes to the osmena crates. The crates version together.
   other systems answer that they cannot yet, so the tile falls back to
   naming a place (`EngineAction::FetchLocation`, `LaunchUpdate::
   Location`, `LaunchData::located`).
+- Fahrenheit and Celsius are a row of their own in the Launch
+  Settings, labelled "Temperature" and named in words, where they were
+  two bare degree signs tucked under the weather place and read as a
+  caption rather than a control.
 
 ### Fixed
 
+- A fresh profile on Windows always measured in Celsius. The units
+  follow the system's locale, which osmena read from `LC_ALL`,
+  `LC_MESSAGES` and `LANG`: Windows sets none of them, so every new
+  profile fell through to the default. The shell now asks the system
+  (`GetUserDefaultLocaleName`) and tells the model through
+  `settings::set_system_locale` before a profile is loaded. A profile
+  that already has a settings file keeps its answer, and the Launch
+  Settings override it either way.
 - The Launch Settings gear was a ring with spokes, which read as a
   steering wheel; it is a cog now, with eight teeth standing off a
   ring around a hollow hub.

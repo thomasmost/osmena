@@ -81,6 +81,9 @@ windows = { version = "0.61", features = [
 # (process.rs), and whether a process is still running (profiles.rs).
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    # GetUserDefaultLocaleName: what a fresh profile's units follow
+    # (locale.rs), since Windows puts no locale in the environment.
+    "Win32_Globalization",
     # CreateJobObjectW takes a SECURITY_ATTRIBUTES, gated behind this feature.
     "Win32_Security",
     "Win32_System_JobObjects",

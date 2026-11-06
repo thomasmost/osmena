@@ -1536,15 +1536,6 @@ fn settings_view(
                         place_field(ui, context, place_query, commands);
                     }
                 }
-                ui.horizontal(|ui| {
-                    let units = context.launch_settings.weather.units;
-                    for (choice, label) in [(Units::Fahrenheit, "°F"), (Units::Celsius, "°C")] {
-                        if ui.selectable_label(units == choice, label).clicked() && units != choice
-                        {
-                            commands.push(Command::SetWeatherUnits(choice));
-                        }
-                    }
-                });
                 // Open-Meteo's data is CC BY 4.0, which asks for this
                 // line; BigDataCloud's free endpoint asks for its name
                 // where its answers are shown.
@@ -1552,6 +1543,33 @@ fn settings_view(
                     RichText::new("Weather by Open-Meteo.com, places by BigDataCloud")
                         .small()
                         .weak(),
+                );
+            });
+            ui.end_row();
+
+            // A row of its own: two bare degree signs under the place
+            // field read as a caption rather than as a control.
+            ui.label("Temperature");
+            ui.vertical(|ui| {
+                let units = context.launch_settings.weather.units;
+                ui.horizontal_wrapped(|ui| {
+                    for (choice, label) in [
+                        (Units::Fahrenheit, "Fahrenheit (°F)"),
+                        (Units::Celsius, "Celsius (°C)"),
+                    ] {
+                        if ui.selectable_label(units == choice, label).clicked() && units != choice
+                        {
+                            commands.push(Command::SetWeatherUnits(choice));
+                        }
+                    }
+                });
+                ui.label(
+                    RichText::new(
+                        "What the weather tile shows. Changing it asks for today's report \
+                         again.",
+                    )
+                    .small()
+                    .weak(),
                 );
             });
             ui.end_row();
