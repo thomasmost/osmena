@@ -12,7 +12,8 @@ use crate::event::PendingTab;
 use crate::extension::ExtensionSource;
 use crate::history::unix_now;
 use crate::launch::{
-    DRIVE_LIFETIME, DriveState, Fetched, Place, Units, WEATHER_LIFETIME, WidgetKind,
+    DRIVE_LIFETIME, DriveState, Fetched, LOCATION_LIFETIME, Place, Units, WEATHER_LIFETIME,
+    WidgetKind,
 };
 use crate::model::{
     Browser, FindState, Folder, FolderId, LoadState, Tab, TabId, Window, WindowId, site_key,
@@ -737,6 +738,12 @@ pub enum EngineAction {
     LookUpPlace(String),
     /// Fetch today's weather at `place`; answered with
     /// `LaunchUpdate::Weather`.
+    /// Ask the system where this device is, which asks the user for
+    /// permission the first time. The answer is a `LaunchUpdate::
+    /// Location`, and the forecast for it follows in `units`.
+    FetchLocation {
+        units: Units,
+    },
     FetchWeather {
         place: Place,
         units: Units,
@@ -2329,16 +2336,43 @@ fn launch_fetches(browser: &mut Browser, force: bool) -> Vec<EngineAction> {
     let mut actions = Vec::new();
     let settings = &browser.settings.launch;
     let shown = |kind: WidgetKind| settings.widgets.contains(&kind);
-    if shown(WidgetKind::Weather)
-        && let Some(place) = &settings.weather.location
-        && browser.launch.weather != Fetched::Loading
-        && (force || browser.launch.weather.is_stale(now, WEATHER_LIFETIME))
-    {
-        actions.push(EngineAction::FetchWeather {
-            place: place.clone(),
-            units: settings.weather.units,
-        });
-        browser.launch.weather = Fetched::Loading;
+    if shown(WidgetKind::Weather) {
+        let units = settings.weather.units;
+        let chosen = settings.weather.location.clone();
+        let report_wanted = browser.launch.weather != Fetched::Loading
+            && (force || browser.launch.weather.is_stale(now, WEATHER_LIFETIME));
+        match chosen {
+            // A place the user named is used as it stands; the system
+            // is never asked where the device is.
+            Some(place) => {
+                if report_wanted {
+                    actions.push(EngineAction::FetchWeather { place, units });
+                    browser.launch.weather = Fetched::Loading;
+                }
+            }
+            // Otherwise the tile follows the device. The system is
+            // asked when nothing is known or what is known has aged
+            // out; a refusal is not put to the user again at every
+            // opening, only when they ask for it (`force`: Retry, or
+            // handing a named place back). A fresh fix is reused even
+            // when forced, so changing the units costs no new fix.
+            None => {
+                let relocate = match &browser.launch.located {
+                    Fetched::Loading => false,
+                    Fetched::Empty => true,
+                    Fetched::Failed(_) => force,
+                    Fetched::Ready { at, .. } => now.saturating_sub(*at) >= LOCATION_LIFETIME,
+                };
+                if relocate {
+                    actions.push(EngineAction::FetchLocation { units });
+                    browser.launch.located = Fetched::Loading;
+                } else if report_wanted && let Some(place) = browser.launch.located.value().cloned()
+                {
+                    actions.push(EngineAction::FetchWeather { place, units });
+                    browser.launch.weather = Fetched::Loading;
+                }
+            }
+        }
     }
     if shown(WidgetKind::DriveRecent)
         && let DriveState::Connected { files, .. } = &mut browser.launch.drive
@@ -2532,7 +2566,17 @@ mod tests {
     fn new_tab_without_a_url_opens_the_launcher_and_no_tab() {
         let (mut b, window, _) = one_window();
         let actions = dispatch(&mut b, &Command::NewTab { window, url: None });
-        assert_eq!(actions, vec![EngineAction::ShowLauncher { window }]);
+        // The weather tile follows the device, so opening the panel
+        // also asks the system where it is.
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::ShowLauncher { window },
+                EngineAction::FetchLocation {
+                    units: Units::Celsius
+                }
+            ]
+        );
         assert_eq!(b.window(window).unwrap().tabs.len(), 1);
         assert!(
             dispatch(
@@ -4949,11 +4993,19 @@ mod tests {
     fn the_launcher_fetches_stale_weather_and_drive_but_not_fresh_or_loading() {
         let (mut b, window, _) = one_window();
         let open = Command::NewTab { window, url: None };
-        // No place, no account: the launcher alone.
+        // No named place, no account: the launcher and the ask for
+        // this device's location, which the next opening does not
+        // repeat while it is going.
         assert_eq!(
             dispatch(&mut b, &open),
-            vec![EngineAction::ShowLauncher { window }]
+            vec![
+                EngineAction::ShowLauncher { window },
+                EngineAction::FetchLocation {
+                    units: Units::Celsius
+                }
+            ]
         );
+        assert_eq!(b.launch.located, Fetched::Loading);
         // A place and a connected account with nothing fetched yet.
         b.settings.launch.weather.location = Some(seattle());
         b.launch.drive = DriveState::Connected {
@@ -5047,11 +5099,79 @@ mod tests {
             ]
         );
         assert!(dispatch(&mut b, &Command::SetWeatherUnits(Units::Fahrenheit)).is_empty());
+        // Handing the place back means "follow this device" again,
+        // which asks the system where it is.
         assert_eq!(
             dispatch(&mut b, &Command::SetWeatherPlace(None)),
-            vec![EngineAction::SaveSettings]
+            vec![
+                EngineAction::SaveSettings,
+                EngineAction::FetchLocation {
+                    units: Units::Fahrenheit
+                }
+            ]
         );
         assert_eq!(b.launch.weather, Fetched::Empty);
+    }
+
+    /// With no place named, the tile follows the device: the system is
+    /// asked once, its answer is used for the forecast and reused for
+    /// an hour, a refusal is not put to the user again unless they ask,
+    /// and a fix that ages out is asked for afresh.
+    #[test]
+    fn the_weather_follows_this_device_when_no_place_is_named() {
+        let (mut b, _, _) = one_window();
+        let now = unix_now();
+        let here = || Place {
+            name: "Current location".into(),
+            latitude: 47.6,
+            longitude: -122.3,
+        };
+        // Nothing known: ask the system, and not twice over.
+        assert_eq!(
+            dispatch(&mut b, &Command::RefreshLaunch),
+            vec![EngineAction::FetchLocation {
+                units: Units::Celsius
+            }]
+        );
+        assert!(dispatch(&mut b, &Command::RefreshLaunch).is_empty());
+        // The answer arrived: its forecast is what the tile asks for,
+        // and the fix itself is not asked for again within the hour,
+        // even when the units change (which forces a refresh).
+        b.launch.located = Fetched::Ready {
+            value: here(),
+            at: now,
+        };
+        b.launch.weather = Fetched::Empty;
+        assert_eq!(
+            dispatch(&mut b, &Command::RefreshLaunch),
+            vec![EngineAction::FetchWeather {
+                place: here(),
+                units: Units::Celsius
+            }]
+        );
+        assert_eq!(b.launch.weather, Fetched::Loading);
+        // A refusal stands until the user asks again; `RefreshLaunch`
+        // is that asking, and an unforced opening leaves it alone.
+        b.launch.located = Fetched::Failed("No.".into());
+        b.launch.weather = Fetched::Empty;
+        assert!(launch_fetches(&mut b, false).is_empty());
+        assert_eq!(
+            dispatch(&mut b, &Command::RefreshLaunch),
+            vec![EngineAction::FetchLocation {
+                units: Units::Celsius
+            }]
+        );
+        // A fix older than its lifetime is asked for afresh.
+        b.launch.located = Fetched::Ready {
+            value: here(),
+            at: now - LOCATION_LIFETIME - 1,
+        };
+        assert_eq!(
+            launch_fetches(&mut b, false),
+            vec![EngineAction::FetchLocation {
+                units: Units::Celsius
+            }]
+        );
     }
 
     #[test]

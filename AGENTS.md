@@ -5,9 +5,10 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-11-05 (the strip on the pixel grid, icons fitted to
-their pixels, Chromium's order as tabs narrow, the active tab open into
-the toolbar; earlier that day the Profiles menu shaped like Chromium's,
+_Last updated: 2026-11-06 (the weather tile follows this device, asking
+the system for the location; before that the strip on the pixel grid,
+icons fitted to their pixels, Chromium's order as tabs narrow, the
+active tab open into the toolbar; earlier that day the Profiles menu shaped like Chromium's,
 guest profiles and the Manage Profiles dialog; before that the default
 browser on macOS: the status, the offer bar, the settings section, the
 shell's Apple Event handlers for links and pages other apps hand over;
@@ -224,6 +225,22 @@ No engine is needed; the workspace builds in under a minute.
   `dispatch` from its `UrlTemplate`, like a search. The Launch
   Settings are drawn in the panel, not the settings window; the
   settings window's search rows edit the same `Settings::search`.
+- **The weather tile follows the device unless a place is named.**
+  `WeatherSettings::location` of `None` means "where this device is":
+  `launch_fetches` asks for `EngineAction::FetchLocation`, the shell's
+  `launch::location::current` asks the system (Windows: WinRT's
+  `Geolocator`, whose access request is what the user answers; other
+  systems say they cannot yet), and the same thread names the position
+  through BigDataCloud and goes straight on to the forecast, so one
+  opening costs one wait. The answer is `LaunchUpdate::Location` into
+  `LaunchData::located`, which stands for `LOCATION_LIFETIME`. A
+  `Some(place)` is the user's own choice and asks the system nothing.
+  Two rules keep the permission honest: nothing falls back to guessing
+  the position from the network, because a guess behind a refused
+  permission is what the permission exists to prevent; and a refusal
+  is re-asked only on `force` (Retry, or handing a named place back),
+  never at every opening. A fresh location is reused even when forced,
+  so changing the units costs no new fix.
 - **A profile is a directory; its face is in its settings.** The
   directory name is the identity (`--profile <dir>`, `Profile::name`);
   the display name, avatar and colour live in that profile's
@@ -367,6 +384,26 @@ No engine is needed; the workspace builds in under a minute.
 - Commit to `main` unless asked for a branch. Conventional Commits.
 - The browsers' own docs (`README.md`, `CLAUDE.md`) describe what each one
   adds; the shared behaviour is documented here only.
+
+## Status and handoff (2026-11-06)
+
+The weather tile follows this device (see Conventions), with the
+Launch Settings gear redrawn as a cog and two drawing faults in the
+tile fixed (the cloud's overlapping translucent circles, the dangling
+unit after the high and low). Verified: `cargo test`, clippy, fmt,
+and the debug Nautilus built against this checkout on Windows, driven
+to open the panel and captured with `PrintWindow`: the tile found
+"New York City, New York" through the system and BigDataCloud and
+drew 19°C with the drizzle glyph, the high and low; the log shows
+both services answering 200. The gear and the cloud were judged from
+magnified crops of that capture. Not verified: the refusal path by
+hand (this machine allows location, so the "Try again" and place-field
+branch was never drawn), a location that ages out, macOS and Linux
+(where `location::current` is a stub that says so), and the Launch
+Settings view's new rows by eye. One flake seen and not a bug: an
+earlier run drew "Open-Meteo is having trouble; try again later" from
+a genuine 5xx; `get_text` now logs every service's URL and status at
+debug, which is how that was settled.
 
 ## Status and handoff (2026-10-19)
 

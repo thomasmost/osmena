@@ -4,7 +4,32 @@ All notable changes to the osmena crates. The crates version together.
 
 ## Unreleased
 
+### Added
+
+- The Launch Panel's weather tile follows this device. Opening the
+  panel asks the system where it is, which is what asks the user for
+  permission, names the position through BigDataCloud and fetches the
+  forecast for it; a location stands for an hour. A place named on the
+  tile still overrides it and asks the system nothing, and the Launch
+  Settings move between the two ("Use my location", or a place). A
+  system that will not say leaves the tile saying so, with Try again
+  and the place field; a refusal is not put to the user again at every
+  opening, only when they ask. Windows asks WinRT's `Geolocator`;
+  other systems answer that they cannot yet, so the tile falls back to
+  naming a place (`EngineAction::FetchLocation`, `LaunchUpdate::
+  Location`, `LaunchData::located`).
+
 ### Fixed
+
+- The Launch Settings gear was a ring with spokes, which read as a
+  steering wheel; it is a cog now, with eight teeth standing off a
+  ring around a hollow hub.
+- The weather tile's cloud had a dark bow tie across its middle: it
+  was three translucent circles and a bar, and the fill compounded
+  wherever they overlapped. The cloud is one filled outline now.
+- The weather tile read "H 20° L 14° °C", with the unit left dangling
+  after temperatures that already carried a degree sign. The unit is
+  on the current temperature now ("19°C") and the range is bare.
 
 - Tab favicons blurred at some tab widths. A 16-pixel icon drawn at a
   position between pixels (which an odd or fractional tab width gives

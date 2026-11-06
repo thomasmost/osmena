@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use egui::{
     Align, Align2, Color32, CornerRadius, FontId, Id, Key, Layout, Margin, Pos2, Rect, RichText,
-    Sense, Stroke, StrokeKind, TextStyle, Ui, UiBuilder, Vec2,
+    Sense, Shape, Stroke, StrokeKind, TextStyle, Ui, UiBuilder, Vec2,
 };
 use osmena_core::launch::{
     DriveKind, DriveState, Fetched, TOP_SITES, TopSite, Units, WeatherCode, WidgetKind, top_sites,
@@ -364,7 +364,10 @@ fn bottom_row(ui: &mut Ui, launcher: &mut Launcher, commands: &mut Vec<Command>)
 }
 
 /// A gear drawn with the painter, so it never depends on a font having
-/// the glyph.
+/// the glyph: a ring with a hollow hub and seven square-shouldered
+/// teeth standing off it. Radial strokes alone would read as a
+/// steering wheel, so a tooth is a tapered quadrilateral wide enough
+/// to see, and the gap between two teeth is about a tooth wide.
 fn gear_button(ui: &mut Ui) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(GEAR_SIZE), Sense::click());
     if !ui.is_rect_visible(rect) {
@@ -380,23 +383,119 @@ fn gear_button(ui: &mut Ui) -> egui::Response {
     } else {
         ui.visuals().weak_text_color()
     };
-    let c = rect.center();
-    let r = 6.0;
-    let stroke = Stroke::new(2.2_f32, ink);
-    painter.circle_stroke(c, r, stroke);
-    painter.circle_filled(c, 1.8, ink);
-    for i in 0..8 {
-        let a = std::f32::consts::TAU * i as f32 / 8.0;
-        let (sin, cos) = a.sin_cos();
-        painter.line_segment(
-            [
-                Pos2::new(c.x + cos * (r + 0.5), c.y + sin * (r + 0.5)),
-                Pos2::new(c.x + cos * (r + 3.4), c.y + sin * (r + 3.4)),
-            ],
-            stroke,
-        );
-    }
+    painter.add(gear_shape(rect.center(), 10.0, ink));
     response
+}
+
+/// The gear as shapes, `reach` points from the centre to a tooth's tip.
+fn gear_shape(center: Pos2, reach: f32, ink: Color32) -> Vec<Shape> {
+    const TEETH: usize = 8;
+    // The ring's centre line and how thick it is drawn; the hub is
+    // whatever the ring leaves empty, so the gear reads as a wheel
+    // with a hole rather than a disc. The teeth stand well clear of
+    // the ring: stubby bumps on a thick ring read as a nut.
+    let ring = reach * 0.50;
+    let thickness = reach * 0.22;
+    // A tooth starts inside the ring's outer edge, so the two meet
+    // with no seam, and narrows towards its tip. Its width is set in
+    // points and turned into angles, so the taper is a taper at every
+    // size rather than a flare.
+    let root = ring + thickness * 0.35;
+    let width = reach * 0.27;
+    let at = |angle: f32, radius: f32| {
+        let (sin, cos) = angle.sin_cos();
+        Pos2::new(center.x + cos * radius, center.y + sin * radius)
+    };
+    let step = std::f32::consts::TAU / TEETH as f32;
+    let root_half = (width * 0.5 / root).asin();
+    let tip_half = (width * 0.40 / reach).asin();
+    let mut shapes: Vec<Shape> = Vec::with_capacity(TEETH + 1);
+    for i in 0..TEETH {
+        // The first tooth points up, which is how a gear icon is drawn.
+        let a = step * i as f32 - std::f32::consts::FRAC_PI_2;
+        shapes.push(Shape::convex_polygon(
+            vec![
+                at(a - root_half, root),
+                at(a - tip_half, reach),
+                at(a + tip_half, reach),
+                at(a + root_half, root),
+            ],
+            ink,
+            Stroke::NONE,
+        ));
+    }
+    shapes.push(Shape::circle_stroke(
+        center,
+        ring,
+        Stroke::new(thickness, ink),
+    ));
+    shapes
+}
+
+/// The union of some circles and a rectangle, as one filled shape.
+///
+/// Drawing the parts separately would be simpler, but a translucent
+/// fill compounds wherever two of them overlap and the seams show. The
+/// outline is found by casting rays from a point inside the rectangle
+/// and taking the farthest surface each one meets, which is exact for
+/// a shape every part of which that point can see: lobes sitting on a
+/// base, the shape of a cloud. The triangles fan from that same point,
+/// so the fill is laid down once.
+fn blob(lobes: &[(Pos2, f32)], base: Rect, fill: Color32) -> Shape {
+    const STEPS: usize = 72;
+    let origin = base.center();
+    let mut mesh = egui::epaint::Mesh::default();
+    mesh.colored_vertex(origin, fill);
+    for step in 0..STEPS {
+        let angle = std::f32::consts::TAU * step as f32 / STEPS as f32;
+        let (sin, cos) = angle.sin_cos();
+        let direction = Vec2::new(cos, sin);
+        let mut reach = ray_leaves_rect(origin, direction, base);
+        for (center, radius) in lobes {
+            if let Some(hit) = ray_leaves_circle(origin, direction, *center, *radius) {
+                reach = reach.max(hit);
+            }
+        }
+        mesh.colored_vertex(origin + direction * reach, fill);
+    }
+    for step in 0..STEPS as u32 {
+        mesh.add_triangle(0, step + 1, (step + 1) % STEPS as u32 + 1);
+    }
+    Shape::mesh(mesh)
+}
+
+/// How far along `direction` from `origin` the ray leaves the circle,
+/// if it is ever inside it.
+fn ray_leaves_circle(origin: Pos2, direction: Vec2, center: Pos2, radius: f32) -> Option<f32> {
+    let to_center = center - origin;
+    let along = direction.dot(to_center);
+    let gap = along * along - to_center.length_sq() + radius * radius;
+    (gap >= 0.0)
+        .then(|| along + gap.sqrt())
+        .filter(|reach| *reach > 0.0)
+}
+
+/// How far along `direction` from `origin`, a point inside `rect`, the
+/// ray leaves it.
+fn ray_leaves_rect(origin: Pos2, direction: Vec2, rect: Rect) -> f32 {
+    let edge = |ahead: f32, towards: f32| {
+        if towards.abs() < 1e-6 {
+            f32::INFINITY
+        } else {
+            ahead / towards
+        }
+    };
+    let x = if direction.x > 0.0 {
+        edge(rect.max.x - origin.x, direction.x)
+    } else {
+        edge(rect.min.x - origin.x, direction.x)
+    };
+    let y = if direction.y > 0.0 {
+        edge(rect.max.y - origin.y, direction.y)
+    } else {
+        edge(rect.min.y - origin.y, direction.y)
+    };
+    x.min(y).max(0.0)
 }
 
 /// One tile's place in the grid.
@@ -906,52 +1005,84 @@ fn initial_disc(ui: &Ui, rect: Rect, host: &str) {
     );
 }
 
-/// The weather: the place's current temperature, conditions and today's
-/// range; before a place is set, a field to name one and the places
-/// found for it.
+/// A field to name a place, with what the geocoder found for what was
+/// typed. Used where the tile has no location to work from and in the
+/// Launch Settings, so a place can be named without waiting for the
+/// system to refuse first.
+fn place_field(
+    ui: &mut Ui,
+    context: &ChromeContext<'_>,
+    query: &mut String,
+    commands: &mut Vec<Command>,
+) {
+    let field = ui.add(
+        egui::TextEdit::singleline(&mut *query)
+            .id(Id::new("weather-place-query"))
+            .margin(theme::INPUT_MARGIN)
+            .hint_text("City or town")
+            .desired_width(f32::INFINITY),
+    );
+    let enter = ui.input(|i| i.key_pressed(Key::Enter));
+    if field.lost_focus() && enter && !query.trim().is_empty() {
+        commands.push(Command::LookUpPlace(query.clone()));
+    }
+    ui.add_space(4.0);
+    match &context.launch.places {
+        Fetched::Empty => {}
+        Fetched::Loading => {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(12.0));
+                ui.weak("Looking up\u{2026}");
+            });
+        }
+        Fetched::Failed(e) => {
+            ui.weak(e);
+        }
+        Fetched::Ready { value, .. } if value.is_empty() => {
+            ui.weak("No place by that name.");
+        }
+        Fetched::Ready { value, .. } => {
+            for candidate in value.iter().take(3) {
+                if ui.link(truncate(&candidate.name, 36)).clicked() {
+                    commands.push(Command::SetWeatherPlace(Some(candidate.clone())));
+                    query.clear();
+                }
+            }
+        }
+    }
+}
+
+/// The weather: the current temperature, conditions and today's range
+/// for the place the user named or, when they named none, for where
+/// the system says this device is. While that is being asked the tile
+/// says so; if the system refuses, the tile says that and offers to
+/// look a place up by name instead.
 fn weather_tile(ui: &mut Ui, context: &ChromeContext<'_>, launcher: &mut Launcher) -> TileOutcome {
     let mut outcome = TileOutcome::default();
     let settings = &context.launch_settings.weather;
-    let Some(place) = &settings.location else {
-        ui.weak("Today's weather for a place you choose.");
-        ui.add_space(6.0);
-        let field = ui.add(
-            egui::TextEdit::singleline(&mut launcher.place_query)
-                .id(Id::new("weather-place-query"))
-                .margin(theme::INPUT_MARGIN)
-                .hint_text("City or town")
-                .desired_width(f32::INFINITY),
-        );
-        let enter = ui.input(|i| i.key_pressed(Key::Enter));
-        if field.lost_focus() && enter && !launcher.place_query.trim().is_empty() {
-            outcome
-                .commands
-                .push(Command::LookUpPlace(launcher.place_query.clone()));
-        }
-        ui.add_space(4.0);
-        match &context.launch.places {
-            Fetched::Empty => {}
-            Fetched::Loading => {
-                ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().size(12.0));
-                    ui.weak("Looking up\u{2026}");
-                });
-            }
-            Fetched::Failed(e) => {
-                ui.weak(e);
-            }
-            Fetched::Ready { value, .. } if value.is_empty() => {
-                ui.weak("No place by that name.");
-            }
-            Fetched::Ready { value, .. } => {
-                for candidate in value.iter().take(3) {
-                    if ui.link(truncate(&candidate.name, 36)).clicked() {
-                        outcome
-                            .commands
-                            .push(Command::SetWeatherPlace(Some(candidate.clone())));
-                        launcher.place_query.clear();
-                    }
+    let chosen = settings.location.as_ref();
+    let Some(place) = chosen.or_else(|| context.launch.located.value()) else {
+        match &context.launch.located {
+            Fetched::Failed(reason) => {
+                ui.label(RichText::new(reason).small());
+                ui.add_space(6.0);
+                if ui.small_button("Try again").clicked() {
+                    outcome.commands.push(Command::RefreshLaunch);
                 }
+                ui.add_space(6.0);
+                place_field(
+                    ui,
+                    context,
+                    &mut launcher.place_query,
+                    &mut outcome.commands,
+                );
+            }
+            _ => {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(14.0));
+                    ui.weak("Finding your location\u{2026}");
+                });
             }
         }
         return outcome;
@@ -988,16 +1119,15 @@ fn weather_tile(ui: &mut Ui, context: &ChromeContext<'_>, launcher: &mut Launche
             ui.painter().text(
                 Pos2::new(rect.left() + 66.0, rect.center().y),
                 Align2::LEFT_CENTER,
-                format!("{}°", report.temperature.round()),
+                format!("{}{}", report.temperature.round(), report.units.symbol()),
                 FontId::new(34.0, egui::FontFamily::Name(theme::MEDIUM.into())),
                 ui.visuals().text_color(),
             );
             ui.label(report.code.describe());
             ui.weak(format!(
-                "H {}°  L {}°  {}",
+                "H {}°   L {}°",
                 report.high.round(),
-                report.low.round(),
-                report.units.symbol()
+                report.low.round()
             ));
         }
     }
@@ -1031,19 +1161,20 @@ fn paint_weather(
         }
     };
     let cloud = |c: Pos2, w: f32| {
-        // Three lobes over a flat base.
-        let r = w * 0.22;
-        painter.circle_filled(Pos2::new(c.x - w * 0.22, c.y + r * 0.2), r, soft);
-        painter.circle_filled(Pos2::new(c.x + w * 0.05, c.y - r * 0.5), r * 1.25, soft);
-        painter.circle_filled(Pos2::new(c.x + w * 0.3, c.y + r * 0.2), r * 0.95, soft);
-        painter.rect_filled(
-            Rect::from_min_max(
-                Pos2::new(c.x - w * 0.22, c.y + r * 0.2),
-                Pos2::new(c.x + w * 0.3, c.y + r * 1.2),
-            ),
-            CornerRadius::same((r * 0.6) as u8),
-            soft,
+        // Three lobes over a flat base, drawn as one filled outline.
+        // Drawn as separate circles they would overlap, and the soft
+        // colour is translucent, so every overlap showed as a darker
+        // patch through the middle of the cloud.
+        let lobes = [
+            (Pos2::new(c.x - w * 0.24, c.y + w * 0.01), w * 0.20),
+            (Pos2::new(c.x + w * 0.02, c.y - w * 0.10), w * 0.27),
+            (Pos2::new(c.x + w * 0.27, c.y + w * 0.02), w * 0.18),
+        ];
+        let base = Rect::from_min_max(
+            Pos2::new(c.x - w * 0.32, c.y - w * 0.02),
+            Pos2::new(c.x + w * 0.32, c.y + w * 0.17),
         );
+        painter.add(blob(&lobes, base, soft));
     };
     let drops = |c: Pos2, n: usize, dy: f32| {
         for i in 0..n {
@@ -1274,6 +1405,9 @@ fn settings_view(
     )));
     ui.add_space(6.0);
     let form = &mut launcher.form;
+    // A disjoint borrow, so the closure below can edit the query
+    // without holding the whole launcher.
+    let place_query = &mut launcher.place_query;
     egui::Grid::new(("launch-settings", window.id))
         .num_columns(2)
         .spacing([16.0, 10.0])
@@ -1375,17 +1509,33 @@ fn settings_view(
 
             ui.label("Weather");
             ui.vertical(|ui| {
-                ui.horizontal(|ui| match &context.launch_settings.weather.location {
+                match &context.launch_settings.weather.location {
+                    // A place the user named: the tile asks the system
+                    // nothing until they hand it back.
                     Some(place) => {
-                        ui.label(truncate(&place.name, 40));
-                        if ui.small_button("Change").clicked() {
-                            commands.push(Command::SetWeatherPlace(None));
-                        }
+                        ui.horizontal(|ui| {
+                            ui.label(truncate(&place.name, 40));
+                            if ui.small_button("Use my location").clicked() {
+                                commands.push(Command::SetWeatherPlace(None));
+                            }
+                        });
                     }
                     None => {
-                        ui.weak("Set a place on the Weather tile.");
+                        match &context.launch.located {
+                            Fetched::Ready { value, .. } => {
+                                ui.weak(format!("Your location: {}", truncate(&value.name, 32)));
+                            }
+                            Fetched::Failed(reason) => {
+                                ui.label(RichText::new(reason).small());
+                            }
+                            _ => {
+                                ui.weak("Using your location.");
+                            }
+                        }
+                        ui.add_space(4.0);
+                        place_field(ui, context, place_query, commands);
                     }
-                });
+                }
                 ui.horizontal(|ui| {
                     let units = context.launch_settings.weather.units;
                     for (choice, label) in [(Units::Fahrenheit, "°F"), (Units::Celsius, "°C")] {
@@ -1395,9 +1545,11 @@ fn settings_view(
                         }
                     }
                 });
-                // The data is CC BY 4.0, which asks for this line.
+                // Open-Meteo's data is CC BY 4.0, which asks for this
+                // line; BigDataCloud's free endpoint asks for its name
+                // where its answers are shown.
                 ui.label(
-                    RichText::new("Weather data by Open-Meteo.com")
+                    RichText::new("Weather by Open-Meteo.com, places by BigDataCloud")
                         .small()
                         .weak(),
                 );

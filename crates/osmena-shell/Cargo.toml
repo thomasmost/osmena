@@ -68,6 +68,15 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 ] }
 
 [target.'cfg(windows)'.dependencies]
+# Where this device is, for the weather tile (launch/location.rs):
+# WinRT's Geolocator, which is also what puts the permission question
+# to the user. `windows-sys` cannot reach it (WinRT activation and
+# IAsyncOperation need the projections this crate generates).
+windows = { version = "0.61", features = [
+    "Devices_Geolocation",
+    "Foundation",
+    "Win32_System_Com",
+] }
 # The job object that ties an engine's child processes to the browser
 # (process.rs), and whether a process is still running (profiles.rs).
 windows-sys = { version = "0.61", features = [

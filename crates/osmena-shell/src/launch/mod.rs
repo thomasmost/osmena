@@ -6,6 +6,7 @@
 //! panel asks through `EngineAction`s and never waits.
 
 pub mod google;
+pub mod location;
 pub mod weather;
 
 use std::io::{Read, Write};
@@ -134,6 +135,47 @@ impl LaunchFetcher {
     /// `EngineAction::FetchWeather`.
     pub fn fetch_weather(&self, place: Place, units: Units) {
         self.spawn("weather", move |f| {
+            let result = get_text(
+                &f.agent(),
+                &weather::forecast_url(&place, units),
+                None,
+                "Open-Meteo",
+            )
+            .and_then(|text| weather::parse_forecast(&text, &place, units));
+            f.report(LaunchUpdate::Weather(result));
+        });
+    }
+
+    /// `EngineAction::FetchLocation`: ask the system where this device
+    /// is (which asks the user the first time), name the position, and
+    /// go straight on to its forecast, so one opening of the panel
+    /// costs the user one wait rather than two.
+    pub fn fetch_location(&self, units: Units) {
+        self.spawn("location", move |f| {
+            let (latitude, longitude) = match location::current() {
+                Ok(position) => position,
+                Err(reason) => {
+                    log::info!("no location for the weather tile: {reason}");
+                    f.report(LaunchUpdate::Location(Err(reason)));
+                    return;
+                }
+            };
+            let name = get_text(
+                &f.agent(),
+                &weather::reverse_geocode_url(latitude, longitude),
+                None,
+                "BigDataCloud",
+            )
+            .ok()
+            .as_deref()
+            .and_then(weather::parse_reverse_place)
+            .unwrap_or_else(|| weather::HERE.to_string());
+            let place = Place {
+                name,
+                latitude,
+                longitude,
+            };
+            f.report(LaunchUpdate::Location(Ok(place.clone())));
             let result = get_text(
                 &f.agent(),
                 &weather::forecast_url(&place, units),
@@ -426,10 +468,12 @@ fn get_text(
     if let Some(token) = bearer {
         request = request.header("Authorization", &format!("Bearer {token}"));
     }
-    let mut response = request
-        .call()
-        .map_err(|e| format!("{service} could not be reached: {e}"))?;
+    let mut response = request.call().map_err(|e| {
+        log::debug!("{service} could not be reached at {url}: {e}");
+        format!("{service} could not be reached: {e}")
+    })?;
     let status = response.status().as_u16();
+    log::debug!("{service} answered {status} for {url}");
     if status >= 400 {
         return Err(weather::describe_status(service, status));
     }

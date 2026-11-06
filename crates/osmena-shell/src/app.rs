@@ -1096,6 +1096,7 @@ impl<E: Engine> App<E> {
                 }
             }
             EngineAction::LookUpPlace(query) => self.launch.look_up_place(query),
+            EngineAction::FetchLocation { units } => self.launch.fetch_location(units),
             EngineAction::FetchWeather { place, units } => self.launch.fetch_weather(place, units),
             EngineAction::BeginGoogleSignIn { window } => match self.launch.begin_sign_in() {
                 Ok(url) => self.run_commands(

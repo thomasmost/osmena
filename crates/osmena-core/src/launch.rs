@@ -118,7 +118,10 @@ pub struct Place {
 /// so the equivalence is total, which lets a `Place` ride in a `Command`.
 impl Eq for Place {}
 
-/// `[launch.weather]`.
+/// `[launch.weather]`. A `location` of `None` means this device's own
+/// location, which the shell asks the system for (and the system asks
+/// the user about); a `Some` is a place the user named instead, which
+/// is used as is and asks the system nothing.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WeatherSettings {
@@ -334,6 +337,10 @@ impl<T> Fetched<T> {
 
 /// How long a weather report stands before the panel asks again.
 pub const WEATHER_LIFETIME: u64 = 15 * 60;
+/// How long this device's location stands before the panel asks the
+/// system again. Longer than the weather's: a machine rarely moves far
+/// within the hour, and each ask may cost the system a fix.
+pub const LOCATION_LIFETIME: u64 = 60 * 60;
 /// How long the Drive list stands before the panel asks again.
 pub const DRIVE_LIFETIME: u64 = 2 * 60;
 
@@ -478,6 +485,10 @@ pub struct LaunchData {
     pub weather: Fetched<WeatherReport>,
     /// The places found for what the user typed into the weather tile.
     pub places: Fetched<Vec<Place>>,
+    /// Where this device is, as the system answered, named as well as
+    /// the shell could. `Failed` carries what to tell the user: the
+    /// system refused, or has no location to give.
+    pub located: Fetched<Place>,
     pub drive: DriveState,
 }
 
@@ -486,6 +497,7 @@ impl Default for LaunchData {
         LaunchData {
             weather: Fetched::Empty,
             places: Fetched::Empty,
+            located: Fetched::Empty,
             drive: DriveState::Unavailable,
         }
     }
@@ -497,6 +509,10 @@ impl Default for LaunchData {
 pub enum LaunchUpdate {
     Weather(Result<WeatherReport, String>),
     Places(Result<Vec<Place>, String>),
+    /// Where the system says this device is, or why it would not say.
+    /// The shell fetches the weather for it straight after, so a place
+    /// that arrives leaves the report loading.
+    Location(Result<Place, String>),
     /// Google accepted the sign-in for this account (the token is on
     /// disk), or refused.
     GoogleConnected(Result<String, String>),
@@ -524,6 +540,20 @@ impl LaunchData {
                 }
             }
             LaunchUpdate::Places(Err(e)) => self.places = Fetched::Failed(e),
+            LaunchUpdate::Location(Ok(place)) => {
+                self.located = Fetched::Ready {
+                    value: place,
+                    at: now,
+                };
+                // Its forecast is on its way from the same thread.
+                self.weather = Fetched::Loading;
+            }
+            LaunchUpdate::Location(Err(e)) => {
+                self.located = Fetched::Failed(e);
+                if self.weather == Fetched::Loading {
+                    self.weather = Fetched::Empty;
+                }
+            }
             LaunchUpdate::GoogleConnected(Ok(account)) => {
                 if self.drive != DriveState::Unavailable {
                     self.drive = DriveState::Connected {
@@ -744,6 +774,40 @@ mod tests {
         let mut u = LaunchData::default();
         u.apply(LaunchUpdate::GoogleConnected(Ok("x".into())), 1);
         assert_eq!(u.drive, DriveState::Unavailable);
+    }
+
+    /// A located device leaves the report loading, because the shell
+    /// fetches it from the same thread; a refusal leaves no spinner
+    /// standing.
+    #[test]
+    fn a_located_device_carries_its_forecast_with_it() {
+        let here = Place {
+            name: "Seattle, Washington, United States".into(),
+            latitude: 47.6,
+            longitude: -122.3,
+        };
+        let mut d = LaunchData::default();
+        d.apply(LaunchUpdate::Location(Ok(here.clone())), 40);
+        assert_eq!(
+            d.located,
+            Fetched::Ready {
+                value: here,
+                at: 40
+            }
+        );
+        assert_eq!(d.weather, Fetched::Loading);
+        // The refusal is the tile's sentence, and the report stops
+        // waiting for an answer that is not coming.
+        d.apply(LaunchUpdate::Location(Err("Not allowed.".into())), 50);
+        assert_eq!(d.located, Fetched::Failed("Not allowed.".into()));
+        assert_eq!(d.weather, Fetched::Empty);
+        // A report that already stands is left alone by a refusal.
+        let mut kept = LaunchData {
+            weather: Fetched::Failed("earlier".into()),
+            ..LaunchData::default()
+        };
+        kept.apply(LaunchUpdate::Location(Err("Not allowed.".into())), 60);
+        assert_eq!(kept.weather, Fetched::Failed("earlier".into()));
     }
 
     #[test]

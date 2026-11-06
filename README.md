@@ -128,16 +128,20 @@ The engine contract, in `osmena-engine`:
   the field, a mosaic of tiles: **Recent Drive files** (the five files
   the connected Google account opened last; "Connect Google Drive"
   signs in through Google in a tab, only in a build whose brand has a
-  Google client id), **Weather** (today's conditions, high and low at
-  a place named once on the tile; Open-Meteo, no key, fetched when the
-  panel opens and the last report is older than fifteen minutes),
+  Google client id), **Weather** (today's conditions, high and low
+  where this device is: the panel asks the system for the location,
+  which is what puts the question to the user, names it through
+  BigDataCloud and asks Open-Meteo for the forecast, both without a
+  key; a place can be named on the tile instead, and is then used
+  without asking the system anything. A report stands fifteen
+  minutes and a location an hour),
   **Ask Claude** and **Ask ChatGPT** (a question typed there opens the
   service with it in a new tab), and **Most visited** (the five hosts
   with the most visits, with their favicons; a close control on a row
   hides that host). The gear at the bottom right opens the Launch
   Settings in the panel: the search engine as presets or a custom
   template (the same setting the address bar uses), the two question
-  templates, the weather place and units, the Google account, and the
+  templates, the weather location and units, the Google account, and the
   tiles in edit mode, dragged to reorder and closed to remove, with
   "Restore default widgets". The same matches drop down under the
   address bar of an existing tab as you type. The history

@@ -11,6 +11,14 @@ use serde::Deserialize;
 
 const GEOCODING_URL: &str = "https://geocoding-api.open-meteo.com/v1/search";
 const FORECAST_URL: &str = "https://api.open-meteo.com/v1/forecast";
+/// Coordinates to a place name. Open-Meteo's geocoder only goes the
+/// other way, so the device's own position is named by BigDataCloud's
+/// client endpoint, which needs no key either. A failure here is not
+/// an error: the tile falls back to [`HERE`].
+const REVERSE_URL: &str = "https://api.bigdatacloud.net/data/reverse-geocode-client";
+
+/// What the device's location is called when nothing will name it.
+pub const HERE: &str = "Current location";
 
 /// The geocoder's URL for `query`: a handful of matches, in English.
 pub fn geocode_url(query: &str) -> String {
@@ -74,6 +82,53 @@ pub fn parse_places(json: &str) -> Result<Vec<Place>, String> {
             }
         })
         .collect())
+}
+
+/// The reverse geocoder's URL for a position.
+pub fn reverse_geocode_url(latitude: f64, longitude: f64) -> String {
+    format!("{REVERSE_URL}?latitude={latitude:.4}&longitude={longitude:.4}&localityLanguage=en")
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReverseResponse {
+    #[serde(default)]
+    city: Option<String>,
+    #[serde(default)]
+    locality: Option<String>,
+    #[serde(default)]
+    principal_subdivision: Option<String>,
+    #[serde(default)]
+    country_name: Option<String>,
+}
+
+/// The name in a reverse-geocoding answer: "City, Region", repeats
+/// dropped. Unlike a searched place this leaves the country out, since
+/// it is the country the user is standing in and the tile has room for
+/// a line rather than three. `None` when the answer names nowhere: out
+/// at sea, or a service having a bad day; the caller shows [`HERE`].
+pub fn parse_reverse_place(json: &str) -> Option<String> {
+    let response: ReverseResponse = serde_json::from_str(json).ok()?;
+    // `city` is empty outside towns, where `locality` still names the
+    // district or the municipality.
+    let town = [response.city, response.locality]
+        .into_iter()
+        .flatten()
+        .find(|t| !t.trim().is_empty());
+    let region = response
+        .principal_subdivision
+        .filter(|_| town.is_some())
+        .into_iter();
+    let mut parts: Vec<String> = Vec::new();
+    for part in town.into_iter().chain(region).chain(response.country_name) {
+        let part = part.trim().to_string();
+        if !part.is_empty() && !parts.contains(&part) {
+            parts.push(part);
+        }
+    }
+    // The country is the fallback only when nothing closer was named.
+    parts.truncate(2);
+    (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 #[derive(Deserialize)]
@@ -199,6 +254,36 @@ mod tests {
         let report = parse_forecast(bare, &place, Units::Celsius).unwrap();
         assert_eq!((report.high, report.low), (10.0, 10.0));
         assert!(parse_forecast("{}", &place, Units::Celsius).is_err());
+    }
+
+    #[test]
+    fn a_position_is_named_like_a_searched_place() {
+        let answer = r#"{"latitude":47.6,"longitude":-122.33,"continent":"North America",
+            "countryName":"United States","principalSubdivision":"Washington",
+            "city":"Seattle","locality":"Belltown","postcode":"98121"}"#;
+        assert_eq!(
+            parse_reverse_place(answer).as_deref(),
+            Some("Seattle, Washington")
+        );
+        // No city: the locality names the place, and a region equal to
+        // the country is not repeated.
+        let city_state = r#"{"city":"","locality":"Singapore",
+            "principalSubdivision":"Singapore","countryName":"Singapore"}"#;
+        assert_eq!(
+            parse_reverse_place(city_state).as_deref(),
+            Some("Singapore")
+        );
+        // Nothing nearer than the country: the country alone.
+        let at_sea = r#"{"city":"","locality":"","principalSubdivision":"",
+            "countryName":"Norway"}"#;
+        assert_eq!(parse_reverse_place(at_sea).as_deref(), Some("Norway"));
+        // Nowhere, and nonsense: the caller says "Current location".
+        assert_eq!(parse_reverse_place(r#"{"latitude":0.0}"#), None);
+        assert_eq!(parse_reverse_place("not json"), None);
+        assert!(
+            reverse_geocode_url(47.60621, -122.33207)
+                .starts_with("https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=47.6062&longitude=-122.3321")
+        );
     }
 
     #[test]
