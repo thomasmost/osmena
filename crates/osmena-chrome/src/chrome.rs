@@ -106,19 +106,19 @@ const UPDATE_PILL_HOVER: Color32 = Color32::from_rgb(42, 134, 88);
 /// [`ChromeColor`]: the tab strip is the swatch at its top and fades to
 /// the toolbar's fill at its bottom edge ([`Palette::strip_at`]), where
 /// a one-pixel edge (`strip_edge`) separates it from the toolbar; tabs
-/// are veils of white (or black, on a light swatch) over it, and the
-/// active tab shares the toolbar's fill, which is the swatch washed most
-/// of the way to the page background, and flares out over that edge
-/// ([`active_tab_body`]), so it reads as part of the toolbar. Tab titles
-/// are dark (`tab_text`) whatever the swatch; the strip's other glyphs
-/// pick `text_on_strip` by the swatch's luminance.
+/// are the swatch lifted halfway and more to white (opaque, so they
+/// never rely on the gradient behind them for contrast), and the active
+/// tab shares the toolbar's fill, which is the swatch washed most of
+/// the way to the page background, and flares out over that edge
+/// ([`active_tab_body`]), so it reads as part of the toolbar. The ink
+/// on any tab comes from its fill ([`Palette::ink_on`]): dark on the
+/// lifted fills, light only on a dark-mode toolbar; the strip's other
+/// glyphs pick `text_on_strip` by the swatch's luminance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palette {
     pub strip: Color32,
     pub toolbar: Color32,
     pub text_on_strip: Color32,
-    /// Tab titles and folder names, on any tab.
-    pub tab_text: Color32,
     /// The one-pixel line along the strip's bottom edge, which the
     /// active tab's outline continues.
     pub strip_edge: Color32,
@@ -154,20 +154,27 @@ impl Palette {
             },
             // The edge sits where the strip has faded to the toolbar's
             // fill, so it contrasts with that, not with the swatch.
-            tab_text: if dark_mode {
-                Color32::from_gray(230)
-            } else {
-                Color32::from_gray(24)
-            },
             strip_edge: if dark_mode {
                 Color32::from_white_alpha(56)
             } else {
                 Color32::from_black_alpha(48)
             },
-            tab_idle: veil_alpha(26),
-            tab_hover: veil_alpha(56),
-            tab_selected: veil_alpha(96),
+            // Lifted from the swatch towards white, idle the least and
+            // selected the most, all short of the active tab's wash.
+            tab_idle: blend(strip, Color32::WHITE, 0.5),
+            tab_hover: blend(strip, Color32::WHITE, 0.6),
+            tab_selected: blend(strip, Color32::WHITE, 0.7),
             tab_outline: veil_alpha(180),
+        }
+    }
+
+    /// The text colour that reads on `fill`: near-black on a light
+    /// fill, near-white on a dark one.
+    pub fn ink_on(&self, fill: Color32) -> Color32 {
+        if luminance(fill) > 0.55 {
+            Color32::from_gray(24)
+        } else {
+            Color32::from_gray(230)
         }
     }
 
@@ -1522,7 +1529,11 @@ impl Chip {
             )
         };
         let font = egui::FontId::new(TAB_FONT_SIZE, FontFamily::Proportional);
-        let text_color = palette.tab_text;
+        let text_color = palette.ink_on(if as_active {
+            palette.toolbar
+        } else {
+            palette.tab_selected
+        });
         let galley = ui.painter().layout_no_wrap(label, font, text_color);
         // Room for the disclosure triangle before the name.
         let width = TAB_PADDING_X + CHIP_GLYPH_WIDTH + galley.size().x + TAB_PADDING_X;
@@ -3673,18 +3684,27 @@ fn tab_widget(
     } = tab;
     let width = rect.width();
     let font = egui::FontId::new(TAB_FONT_SIZE, FontFamily::Proportional);
-    let ink = palette.tab_text;
-    let text_color = if deferred {
-        Color32::from_rgba_unmultiplied(ink.r(), ink.g(), ink.b(), 140)
-    } else {
-        ink
-    };
     let icon_width = if favicon.is_some() {
         FAVICON_SIZE + 6.0
     } else {
         0.0
     };
     let response = ui.interact(rect, id, Sense::click_and_drag());
+    let fill = if is_active {
+        palette.toolbar
+    } else if is_selected {
+        palette.tab_selected
+    } else if response.hovered() || response.dragged() {
+        palette.tab_hover
+    } else {
+        palette.tab_idle
+    };
+    let ink = palette.ink_on(fill);
+    let text_color = if deferred {
+        Color32::from_rgba_unmultiplied(ink.r(), ink.g(), ink.b(), 140)
+    } else {
+        ink
+    };
     let show_close = is_active || width >= TAB_CLOSE_MIN_WIDTH || response.hovered();
     let close_rect = Rect::from_center_size(
         Pos2::new(
@@ -3708,13 +3728,6 @@ fn tab_widget(
         if is_active {
             shapes.extend(active_tab_body(rect, palette));
         } else {
-            let fill = if is_selected {
-                palette.tab_selected
-            } else if response.hovered() || response.dragged() {
-                palette.tab_hover
-            } else {
-                palette.tab_idle
-            };
             let stroke = if is_selected {
                 Stroke::new(1.0_f32, palette.tab_outline)
             } else {

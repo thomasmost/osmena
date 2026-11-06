@@ -222,10 +222,14 @@ All notable changes to the osmena crates. The crates version together.
   in the toolbar's fill with a one-pixel outline that the edge
   continues on either side, painted over its neighbours
   (`active_tab_body`; a collapsed folder chip holding the active tab
-  takes the same shape). Tab titles and folder names are a little
-  smaller (12.5 px, `TAB_FONT_SIZE`) and dark on every swatch
-  (`Palette::tab_text`; light in dark mode), where they used to be
-  white on a dark swatch.
+  takes the same shape). The other tabs are opaque fills lifted from
+  the swatch towards white (idle 50%, hovered 60%, selected 70%;
+  `Palette::{tab_idle, tab_hover, tab_selected}`) instead of faint
+  veils over the strip's gradient, so a title reads on any swatch.
+  Tab titles and folder names are a little smaller (12.5 px,
+  `TAB_FONT_SIZE`) and take their ink from the fill they sit on
+  (`Palette::ink_on`: dark on the lifted fills, light only on a
+  dark-mode toolbar), where they used to be white on a dark swatch.
 - The "☰" window menu button moved from the tab strip's right end to
   the toolbar's, right of the profile avatar, drawn as three strokes
   (`menu_button`) like the window controls. The strip's right end now
