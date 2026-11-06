@@ -5,29 +5,33 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::time::Duration;
 
+use egui::emath::GuiRounding;
 use egui::{
-    Align2, Button, Color32, ColorImage, CornerRadius, FontFamily, Frame, Id, Key, Margin, Panel,
-    Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextStyle, TextureHandle, TextureOptions, Ui,
-    Vec2,
+    Align2, Button, Color32, CornerRadius, FontFamily, Frame, Id, Key, Margin, Panel, Pos2, Rect,
+    RichText, Sense, Stroke, StrokeKind, TextStyle, TextureHandle, TextureOptions, Ui, Vec2,
 };
 use keyboard_types::Code;
 use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
     Avatar, Bookmark, Bookmarks, Brand, ChromeColor, Command, CommandKind, EngineInfo, Extension,
     Favicon, Folder, FolderId, FolderTarget, History, KeyChord, Keymap, LaunchData, LaunchSettings,
-    LoadState, ProfileForm, Prompt, StripItem, Suggestion, SuggestionSource, Tab, TabId,
+    LoadState, ProfileForm, Prompt, RgbaImage, StripItem, Suggestion, SuggestionSource, Tab, TabId,
     UpdateStatus, UrlTemplate, Window, suggestions,
 };
 use url::{ParseError, Url};
 
 use osmena_core::download::{DownloadState, Downloads, describe_download};
 
+use crate::favicon;
 use crate::menus::bookmark_label;
 use crate::theme;
 
 /// The widest a title is drawn in a folder's drop-down list.
 const FOLDER_LIST_TITLE_MAX_CHARS: usize = 36;
+/// The square a tab's icon is drawn in, in points; the texture is
+/// fitted to the pixels that square covers (`favicon::fit`).
 const FAVICON_SIZE: f32 = 16.0;
 /// Tab geometry, in points.
 const TAB_HEIGHT: f32 = 32.0;
@@ -44,6 +48,16 @@ const TAB_CORNER: u8 = theme::CORNER;
 /// The tab titles' font: a little under the body text.
 const TAB_FONT_SIZE: f32 = 12.5;
 const CLOSE_SIZE: f32 = 18.0;
+/// How far the close control reaches into the tab's right padding,
+/// so its hover ring has room without pushing the title.
+const CLOSE_INSET: f32 = 4.0;
+/// The gap between a tab's icon and its title.
+const TAB_ICON_GAP: f32 = 6.0;
+/// The least room a tab's title is drawn in: under this (about two
+/// glyphs) the title is left out and the icon speaks for the tab.
+const TAB_TITLE_MIN: f32 = 24.0;
+/// How far a title that does not fit fades out before its room ends.
+const TAB_TITLE_FADE: f32 = 20.0;
 /// The "+" button on the strip.
 const MENU_WIDTH: f32 = 28.0;
 /// One window control (minimize, maximize, close) on a frameless window.
@@ -119,8 +133,8 @@ pub struct Palette {
     pub strip: Color32,
     pub toolbar: Color32,
     pub text_on_strip: Color32,
-    /// The one-pixel line along the strip's bottom edge, which the
-    /// active tab's outline continues.
+    /// The one-pixel line along the strip's bottom edge, under every
+    /// tab but the active one, whose outline continues it.
     pub strip_edge: Color32,
     pub tab_idle: Color32,
     pub tab_hover: Color32,
@@ -193,8 +207,9 @@ impl Palette {
 /// top to bottom, as a mesh of horizontal bands whose vertex colours
 /// egui interpolates (the bands keep the quadratic ease from flattening
 /// into one linear ramp), and the one-pixel edge along its bottom,
-/// which the active tab's body covers and whose outline continues it.
-fn strip_background(rect: Rect, palette: &Palette) -> egui::Shape {
+/// which every tab but the active one stops short of, and whose
+/// outline that tab continues.
+fn strip_background(rect: Rect, palette: &Palette, pixels_per_point: f32) -> egui::Shape {
     const BANDS: u32 = 8;
     let mut mesh = egui::Mesh::default();
     for band in 0..BANDS {
@@ -211,14 +226,83 @@ fn strip_background(rect: Rect, palette: &Palette) -> egui::Shape {
         mesh.add_triangle(base, base + 1, base + 2);
         mesh.add_triangle(base, base + 2, base + 3);
     }
-    let edge = rect.bottom() - 0.5;
+    // One pixel row, the strip's last; the tabs snap to the same grid.
+    let edge = strip_edge_y(rect.bottom(), pixels_per_point);
     egui::Shape::Vec(vec![
         egui::Shape::mesh(mesh),
         egui::Shape::line_segment(
             [Pos2::new(rect.left(), edge), Pos2::new(rect.right(), edge)],
-            Stroke::new(1.0_f32, palette.strip_edge),
+            Stroke::new(1.0 / pixels_per_point, palette.strip_edge),
         ),
     ])
+}
+
+/// The centre line of the strip's edge for a strip whose bottom is at
+/// `bottom`: the middle of the last pixel row above it.
+fn strip_edge_y(bottom: f32, pixels_per_point: f32) -> f32 {
+    bottom.round_to_pixels(pixels_per_point) - 0.5 / pixels_per_point
+}
+
+/// Points along a circle of `radius` around `centre` from angle `from`
+/// to `to` (radians, y down), ends included.
+fn arc(centre: Pos2, radius: f32, from: f32, to: f32) -> Vec<Pos2> {
+    const STEPS: usize = 8;
+    (0..=STEPS)
+        .map(|i| {
+            let a = from + (to - from) * i as f32 / STEPS as f32;
+            Pos2::new(centre.x + radius * a.cos(), centre.y + radius * a.sin())
+        })
+        .collect()
+}
+
+/// The rounding of a tab's top corners.
+fn top_corners() -> CornerRadius {
+    CornerRadius {
+        nw: TAB_CORNER,
+        ne: TAB_CORNER,
+        sw: 0,
+        se: 0,
+    }
+}
+
+/// The points of a tab's top edge inside `o`: from the bottom of the
+/// left corner's arc, over both rounded corners, to the bottom of the
+/// right corner's arc. The sides below them are the caller's.
+fn top_outline(o: Rect) -> Vec<Pos2> {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let r = f32::from(TAB_CORNER);
+    let mut points = arc(Pos2::new(o.left() + r, o.top() + r), r, PI, 3.0 * FRAC_PI_2);
+    points.extend(arc(
+        Pos2::new(o.right() - r, o.top() + r),
+        r,
+        3.0 * FRAC_PI_2,
+        2.0 * PI,
+    ));
+    points
+}
+
+/// Any tab's body but the active one's: a block rounded at the top that
+/// stops a pixel short of the strip's bottom, so the strip's edge runs
+/// on under it, with an outline open at the bottom (like the active
+/// tab's) when `outline` is given. `rect` is on the pixel grid and `px`
+/// is one pixel in points; the outline runs half a pixel inside, so its
+/// stroke fills whole pixels.
+fn inactive_tab_body(
+    rect: Rect,
+    fill: Color32,
+    outline: Option<Color32>,
+    px: f32,
+) -> Vec<egui::Shape> {
+    let body = Rect::from_min_max(rect.min, Pos2::new(rect.right(), rect.bottom() - px));
+    let mut shapes = vec![egui::Shape::rect_filled(body, top_corners(), fill)];
+    if let Some(colour) = outline {
+        let o = body.shrink(px / 2.0);
+        let mut points = vec![Pos2::new(o.left(), o.bottom())];
+        points.extend(top_outline(o));
+        points.push(Pos2::new(o.right(), o.bottom()));
+        shapes.push(egui::Shape::line(points, Stroke::new(px, colour)));
+    }
+    shapes
 }
 
 /// The active tab's body, shaped like Chromium's: rounded at the top,
@@ -226,72 +310,65 @@ fn strip_background(rect: Rect, palette: &Palette) -> egui::Shape {
 /// the strip's bottom edge, in the toolbar's fill so the tab and the
 /// toolbar read as one surface, with a one-pixel outline that ends at
 /// that edge on either side, where the strip's own line continues it.
-/// The flares reach `TAB_CORNER` past `rect` on each side, over the
-/// neighbouring tabs, so the caller paints the result after them.
-fn active_tab_body(rect: Rect, palette: &Palette) -> Vec<egui::Shape> {
+/// Nothing is drawn along the bottom: the fill runs a pixel past it
+/// into the toolbar, whose fill is the same colour, so no seam can open
+/// there however the strip's height falls on the pixel grid. The flares
+/// reach `TAB_CORNER` past `rect` on each side, over the neighbouring
+/// tabs, so the caller paints the result after them. `rect` is on the
+/// pixel grid and `px` is one pixel in points.
+fn active_tab_body(rect: Rect, palette: &Palette, px: f32) -> Vec<egui::Shape> {
     use std::f32::consts::{FRAC_PI_2, PI};
-    const STEPS: usize = 8;
     let r = f32::from(TAB_CORNER);
     let bottom = rect.bottom();
-    // A quarter circle around `centre` from angle `from` to `to`
-    // (radians, y down), as `STEPS` segments.
-    let arc = |centre: Pos2, from: f32, to: f32| -> Vec<Pos2> {
-        (0..=STEPS)
-            .map(|i| {
-                let a = from + (to - from) * i as f32 / STEPS as f32;
-                Pos2::new(centre.x + r * a.cos(), centre.y + r * a.sin())
-            })
-            .collect()
-    };
-    // Each flare runs from the strip's edge up into the tab's side.
-    let left_flare = arc(Pos2::new(rect.left() - r, bottom - r), FRAC_PI_2, 0.0);
-    let right_flare = arc(Pos2::new(rect.right() + r, bottom - r), FRAC_PI_2, PI);
-    let top_left = arc(
-        Pos2::new(rect.left() + r, rect.top() + r),
-        PI,
-        3.0 * FRAC_PI_2,
-    );
-    let top_right = arc(
-        Pos2::new(rect.right() - r, rect.top() + r),
-        3.0 * FRAC_PI_2,
-        2.0 * PI,
-    );
+    let below = bottom + px;
+    let fill = palette.toolbar;
 
-    // The flares' fill: each is a fan from the tab's bottom corner over
-    // its arc (the corner sees every point of the arc, so the fan tiles
-    // the region between the side, the edge and the arc).
+    // Each flare's fill is a fan from the tab's bottom corner (a pixel
+    // down, with the block) over the pixel row below the edge and its
+    // arc: the corner sees every point of that rim, so the fan tiles
+    // the region between the side, the edge and the arc.
     let mut flares = egui::Mesh::default();
-    for (corner, arc) in [
-        (Pos2::new(rect.left(), bottom), &left_flare),
-        (Pos2::new(rect.right(), bottom), &right_flare),
+    for (corner, outer, arc) in [
+        (
+            Pos2::new(rect.left(), below),
+            Pos2::new(rect.left() - r, below),
+            arc(Pos2::new(rect.left() - r, bottom - r), r, FRAC_PI_2, 0.0),
+        ),
+        (
+            Pos2::new(rect.right(), below),
+            Pos2::new(rect.right() + r, below),
+            arc(Pos2::new(rect.right() + r, bottom - r), r, FRAC_PI_2, PI),
+        ),
     ] {
         let base = flares.vertices.len() as u32;
-        flares.colored_vertex(corner, palette.toolbar);
-        for p in arc {
-            flares.colored_vertex(*p, palette.toolbar);
+        flares.colored_vertex(corner, fill);
+        flares.colored_vertex(outer, fill);
+        for p in &arc {
+            flares.colored_vertex(*p, fill);
         }
-        for i in 0..STEPS as u32 {
+        for i in 0..arc.len() as u32 {
             flares.add_triangle(base, base + 1 + i, base + 2 + i);
         }
     }
 
-    let mut outline = left_flare;
-    outline.extend(top_left);
-    outline.extend(top_right);
-    outline.extend(right_flare.into_iter().rev());
+    // The outline, half a pixel inside the fill: up the left flare, over
+    // the top, down the right flare, ending at the edge's own row.
+    let o = rect.shrink(px / 2.0);
+    let mut outline = arc(Pos2::new(o.left() - r, o.bottom() - r), r, FRAC_PI_2, 0.0);
+    outline.extend(top_outline(o));
+    outline.extend(
+        arc(Pos2::new(o.right() + r, o.bottom() - r), r, FRAC_PI_2, PI)
+            .into_iter()
+            .rev(),
+    );
     vec![
         egui::Shape::rect_filled(
-            rect,
-            CornerRadius {
-                nw: TAB_CORNER,
-                ne: TAB_CORNER,
-                sw: 0,
-                se: 0,
-            },
-            palette.toolbar,
+            Rect::from_min_max(rect.min, Pos2::new(rect.right(), below)),
+            top_corners(),
+            fill,
         ),
         egui::Shape::mesh(flares),
-        egui::Shape::line(outline, Stroke::new(1.0_f32, palette.strip_edge)),
+        egui::Shape::line(outline, Stroke::new(px, palette.strip_edge)),
     ]
 }
 
@@ -542,13 +619,15 @@ struct TabDrag {
     index: usize,
 }
 
-/// An uploaded favicon texture. The `Arc` is a clone of the model's pixels:
-/// holding it keeps that allocation alive, so pointer equality with a new
-/// favicon's pixels means the same icon, never a reused address.
+/// An uploaded icon texture, fitted to `px` pixels (`favicon::fit`). The
+/// `Arc` is a clone of the model's pixels: holding it keeps that
+/// allocation alive, so pointer equality with a new icon's pixels means
+/// the same icon, never a reused address.
 struct CachedFavicon {
     width: u32,
     height: u32,
     rgba: Arc<[u8]>,
+    px: u32,
     texture: TextureHandle,
 }
 
@@ -677,7 +756,13 @@ pub fn draw(
             top: 6,
             bottom: 0,
         });
-    let strip = Panel::top("tabs").frame(strip_frame).show_inside(ui, |ui| {
+    // Without egui's separator line: it would run under the active tab,
+    // which opens into the toolbar. The strip paints its own edge, which
+    // that tab interrupts.
+    let strip_panel = Panel::top("tabs")
+        .frame(strip_frame)
+        .show_separator_line(false);
+    let strip = strip_panel.show_inside(ui, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             if frameless && cfg!(target_os = "macos") {
@@ -800,7 +885,11 @@ pub fn draw(
     });
     ui.painter().set(
         strip_background_slot,
-        strip_background(strip.response.rect, &palette),
+        strip_background(
+            strip.response.rect,
+            &palette,
+            ui.painter().pixels_per_point(),
+        ),
     );
 
     let toolbar_frame = Frame::new()
@@ -1236,6 +1325,7 @@ fn strip_row(
     commands: &mut Vec<Command>,
 ) {
     let spacing = ui.spacing().item_spacing.x;
+    let ppp = ui.painter().pixels_per_point();
     let dragging: Vec<TabId> = state
         .tab_drag
         .as_ref()
@@ -1326,10 +1416,12 @@ fn strip_row(
         let offset = ui
             .ctx()
             .animate_value_with_time(slot.slide_id(), target, STRIP_SLIDE_SECS);
+        // On the pixel grid, so edges, outlines and icons are crisp.
         let rect = Rect::from_min_size(
             Pos2::new(row.left() + offset, row.top()),
             Vec2::new(slot.width, TAB_HEIGHT),
-        );
+        )
+        .round_to_pixels(ppp);
         match &slot.kind {
             SlotKind::Tab(tab) => {
                 live_drag |= strip_tab(ui, rect, window, tab, look, state, commands, &mut late);
@@ -1351,16 +1443,18 @@ fn strip_row(
             ui.ctx()
                 .animate_value_with_time(Id::new(("strip-slide", tab.id)), x - row.left(), 0.0);
             let rect =
-                Rect::from_min_size(Pos2::new(x, row.top()), Vec2::new(look.width, TAB_HEIGHT));
+                Rect::from_min_size(Pos2::new(x, row.top()), Vec2::new(look.width, TAB_HEIGHT))
+                    .round_to_pixels(ppp);
             live_drag |= strip_tab(ui, rect, window, tab, look, state, commands, &mut late);
         }
     }
     if !late.is_empty() {
-        // The flares reach past the first and last tab's rect, where
-        // the scroll area would clip them.
+        // The flares reach past the first and last tab's rect, and the
+        // fill a pixel under the strip, where the scroll area would clip
+        // them.
         let clip = ui
             .clip_rect()
-            .expand2(Vec2::new(f32::from(TAB_CORNER), 0.0));
+            .expand2(Vec2::new(f32::from(TAB_CORNER), 1.0));
         ui.painter().with_clip_rect(clip).extend(late);
     }
     if !live_drag {
@@ -1408,7 +1502,8 @@ fn strip_tab(
 ) -> bool {
     let is_active = tab.id == window.active;
     let is_selected = window.is_selected(tab.id);
-    let favicon = favicon_texture(ui, state, tab.id, tab.favicon.as_ref()).map(|t| t.id());
+    let px = favicon::icon_px(FAVICON_SIZE, ui.painter().pixels_per_point());
+    let favicon = favicon_texture(ui, state, tab.id, tab.favicon.as_ref(), px).map(|t| t.id());
     let (response, close_clicked) = tab_widget(
         ui,
         rect,
@@ -1418,6 +1513,7 @@ fn strip_tab(
             is_active,
             is_selected,
             favicon,
+            loading: tab.load == LoadState::Loading && !tab.deferred,
             deferred: tab.deferred,
         },
         tab.display_title(),
@@ -1588,28 +1684,18 @@ fn strip_folder(
             format!("{name}: click to list its tabs")
         });
     if ui.is_rect_visible(rect) {
+        let ppp = ui.painter().pixels_per_point();
+        let px = 1.0 / ppp;
         let mut shapes: Vec<egui::Shape> = Vec::new();
         if as_active {
-            shapes.extend(active_tab_body(rect, palette));
+            shapes.extend(active_tab_body(rect, palette, px));
         } else {
             let fill = if response.hovered() || state.open_folder == Some(folder) {
                 palette.tab_hover
             } else {
                 palette.tab_selected
             };
-            let corners = CornerRadius {
-                nw: TAB_CORNER,
-                ne: TAB_CORNER,
-                sw: 0,
-                se: 0,
-            };
-            shapes.push(egui::Shape::Rect(egui::epaint::RectShape::new(
-                rect,
-                corners,
-                fill,
-                Stroke::new(1.0_f32, palette.tab_outline),
-                StrokeKind::Inside,
-            )));
+            shapes.extend(inactive_tab_body(rect, fill, Some(palette.tab_outline), px));
         }
         // The disclosure triangle, drawn (the fonts lack the glyphs):
         // pointing right when collapsed, down when expanded.
@@ -1637,7 +1723,8 @@ fn strip_folder(
             Pos2::new(
                 rect.left() + TAB_PADDING_X + CHIP_GLYPH_WIDTH,
                 rect.center().y - galley.size().y / 2.0,
-            ),
+            )
+            .round_to_pixels(ppp),
             galley.clone(),
             text_color,
         ));
@@ -1677,8 +1764,9 @@ fn strip_folder(
                     let Some(tab) = window.tab(*id) else {
                         continue;
                     };
-                    let favicon =
-                        favicon_texture(ui, state, tab.id, tab.favicon.as_ref()).map(|t| t.id());
+                    let px = favicon::icon_px(FAVICON_SIZE, ui.painter().pixels_per_point());
+                    let favicon = favicon_texture(ui, state, tab.id, tab.favicon.as_ref(), px)
+                        .map(|t| t.id());
                     let title = truncate(tab.display_title(), FOLDER_LIST_TITLE_MAX_CHARS);
                     let row = ui.horizontal(|ui| {
                         if let Some(texture) = favicon {
@@ -2951,6 +3039,8 @@ fn bookmark_chip(
         return response;
     }
     chip_background(ui, palette, rect, &response);
+    let ppp = ui.painter().pixels_per_point();
+    let px = favicon::icon_px(FAVICON_SIZE, ppp);
     let icon_rect = Rect::from_center_size(
         Pos2::new(
             rect.left() + BAR_CHIP_PADDING + FAVICON_SIZE / 2.0,
@@ -2960,13 +3050,13 @@ fn bookmark_chip(
     );
     let icon = Bookmarks::site_key(&bookmark.url).and_then(|host| {
         let favicon = context.site_icons.get(&host)?;
-        site_icon_texture(ui, state, &host, favicon).map(|t| t.id())
+        Some(site_icon_texture(ui, state, &host, favicon, px).id())
     });
     match icon {
         Some(texture) => {
             ui.painter().image(
                 texture,
-                icon_rect,
+                favicon::snap(icon_rect, px, ppp),
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
             );
@@ -3000,37 +3090,24 @@ fn chip_background(ui: &Ui, palette: &Palette, rect: Rect, response: &egui::Resp
     }
 }
 
-/// The texture of a bookmarked site's favicon, uploaded on first use and
-/// again when the shell has a different image for the host.
+/// The texture of a bookmarked site's favicon fitted to `px` pixels,
+/// uploaded on first use and again when the shell has a different image
+/// for the host or the size changes.
 pub(crate) fn site_icon_texture<'a>(
     ui: &Ui,
     state: &'a mut ChromeState,
     host: &str,
     favicon: &Favicon,
-) -> Option<&'a TextureHandle> {
-    let fresh = state
-        .site_icons
-        .get(host)
-        .is_some_and(|cached| cached.is_for(favicon));
-    if !fresh {
-        let image = ColorImage::from_rgba_unmultiplied(
-            [favicon.width as usize, favicon.height as usize],
-            &favicon.rgba,
-        );
-        let texture = ui
-            .ctx()
-            .load_texture(format!("site-{host}"), image, TextureOptions::LINEAR);
-        state.site_icons.insert(
-            host.to_string(),
-            CachedFavicon {
-                width: favicon.width,
-                height: favicon.height,
-                rgba: favicon.rgba.clone(),
-                texture,
-            },
-        );
-    }
-    state.site_icons.get(host).map(|cached| &cached.texture)
+    px: u32,
+) -> &'a TextureHandle {
+    icon_texture(
+        ui,
+        &mut state.site_icons,
+        host.to_string(),
+        &format!("site-{host}"),
+        favicon,
+        px,
+    )
 }
 
 /// The zoom chip beside the address bar, shown while the page is not at
@@ -3654,16 +3731,80 @@ struct TabState {
     is_active: bool,
     is_selected: bool,
     favicon: Option<egui::TextureId>,
+    /// The page is loading: a throbber takes the icon's place.
+    loading: bool,
     /// A restored tab not loaded yet: drawn faint.
     deferred: bool,
 }
 
-/// One tab at `rect`: a rounded-top block with the favicon, the title
-/// elided to the room left, and a close control (hidden on a narrow
-/// inactive tab until hovered), filled per its state. `id` is the
-/// tab's own, the same every frame, so a drag keeps hold of it while
-/// the tab moves. Returns the tab's response (click, drag, context
-/// menu) and whether the close control was clicked.
+/// Where a tab's parts go at `width`, by Chromium's rules. The close
+/// control comes first on the active tab and, on an inactive one, only
+/// when the tab is wide (`TAB_CLOSE_MIN_WIDTH`) or hovered. The icon
+/// slot stays while it fits beside the control (an inactive tab too
+/// narrow for both keeps the icon instead), and is centred when neither
+/// the control nor the title is drawn. The title takes the room between,
+/// or nothing when that is under `TAB_TITLE_MIN`. Everything is measured
+/// from the tab's left edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TabLayout {
+    /// The left edge of the icon slot; `None` when it is not drawn.
+    icon_left: Option<f32>,
+    /// The title's left edge and the room it has; `None` when it is not
+    /// drawn.
+    title: Option<(f32, f32)>,
+    /// Whether the close control is drawn.
+    close: bool,
+}
+
+fn tab_layout(width: f32, is_active: bool, hovered: bool) -> TabLayout {
+    let close_left = width - TAB_PADDING_X + CLOSE_INSET - CLOSE_SIZE;
+    let mut close = is_active || width >= TAB_CLOSE_MIN_WIDTH || hovered;
+    // The right end of what the icon and the title may use.
+    let mut right = if close {
+        close_left - TAB_ICON_GAP
+    } else {
+        width - TAB_PADDING_X
+    };
+    let mut icon = right - TAB_PADDING_X >= FAVICON_SIZE;
+    if !icon && !is_active {
+        close = false;
+        right = width - TAB_PADDING_X;
+        icon = right - TAB_PADDING_X >= FAVICON_SIZE;
+    }
+    let text_left = TAB_PADDING_X
+        + if icon {
+            FAVICON_SIZE + TAB_ICON_GAP
+        } else {
+            0.0
+        };
+    let room = right - text_left;
+    let title = (room >= TAB_TITLE_MIN).then_some((text_left, room));
+    let icon_left = icon.then(|| {
+        if title.is_none() && !close {
+            (width - FAVICON_SIZE) / 2.0
+        } else {
+            TAB_PADDING_X
+        }
+    });
+    TabLayout {
+        icon_left,
+        title,
+        close,
+    }
+}
+
+/// `ink` at `alpha`.
+fn faded(ink: Color32, alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(ink.r(), ink.g(), ink.b(), alpha)
+}
+
+/// One tab at `rect` (on the pixel grid): a rounded-top block filled
+/// per its state with, laid out by [`tab_layout`], the favicon (a
+/// throbber while the page loads, a globe for a page without one), the
+/// title, faded out at its end when it does not fit, and the close
+/// control. `id` is the tab's own, the same every frame, so a drag keeps
+/// hold of it while the tab moves. Returns the tab's response (click,
+/// drag, context menu) and whether the close control was clicked.
 /// The active tab's shapes go to `late` instead of the painter, for
 /// the row to paint over the other tabs.
 #[allow(clippy::too_many_arguments)]
@@ -3680,15 +3821,12 @@ fn tab_widget(
         is_active,
         is_selected,
         favicon,
+        loading,
         deferred,
     } = tab;
-    let width = rect.width();
+    let ppp = ui.painter().pixels_per_point();
+    let px = 1.0 / ppp;
     let font = egui::FontId::new(TAB_FONT_SIZE, FontFamily::Proportional);
-    let icon_width = if favicon.is_some() {
-        FAVICON_SIZE + 6.0
-    } else {
-        0.0
-    };
     let response = ui.interact(rect, id, Sense::click_and_drag());
     let fill = if is_active {
         palette.toolbar
@@ -3700,95 +3838,90 @@ fn tab_widget(
         palette.tab_idle
     };
     let ink = palette.ink_on(fill);
-    let text_color = if deferred {
-        Color32::from_rgba_unmultiplied(ink.r(), ink.g(), ink.b(), 140)
-    } else {
-        ink
-    };
-    let show_close = is_active || width >= TAB_CLOSE_MIN_WIDTH || response.hovered();
+    let alpha: u8 = if deferred { 140 } else { 255 };
+    let text_color = faded(ink, alpha);
+    let layout = tab_layout(rect.width(), is_active, response.hovered());
     let close_rect = Rect::from_center_size(
         Pos2::new(
-            rect.right() - TAB_PADDING_X - CLOSE_SIZE / 2.0 + 4.0,
+            rect.right() - TAB_PADDING_X + CLOSE_INSET - CLOSE_SIZE / 2.0,
             rect.center().y,
         ),
         Vec2::splat(CLOSE_SIZE),
     );
     // Added after the tab, so it is on top and takes the pointer over it.
-    let close =
-        show_close.then(|| ui.interact(close_rect, response.id.with("close"), Sense::click()));
-    let close_room = if show_close { 8.0 + CLOSE_SIZE } else { 0.0 };
-    let title_room = (width - 2.0 * TAB_PADDING_X - icon_width - close_room).max(0.0);
-    let mut job =
-        egui::text::LayoutJob::simple_singleline(title.to_string(), font.clone(), text_color);
-    job.wrap = egui::text::TextWrapping::truncate_at_width(title_room);
-    let galley = ui.painter().layout_job(job);
+    let close = layout
+        .close
+        .then(|| ui.interact(close_rect, response.id.with("close"), Sense::click()));
+    // The title, cut at the first glyph that does not fit; no ellipsis,
+    // a fade over its end says the same without spending the room.
+    let galley = layout.title.map(|(_, room)| {
+        let mut job = egui::text::LayoutJob::simple_singleline(title.to_string(), font, text_color);
+        job.wrap = egui::text::TextWrapping {
+            max_width: room,
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: None,
+        };
+        ui.painter().layout_job(job)
+    });
+    let cut = galley.as_ref().is_some_and(|galley| galley.elided);
 
     if ui.is_rect_visible(rect) {
         let mut shapes: Vec<egui::Shape> = Vec::new();
         if is_active {
-            shapes.extend(active_tab_body(rect, palette));
+            shapes.extend(active_tab_body(rect, palette, px));
         } else {
-            let stroke = if is_selected {
-                Stroke::new(1.0_f32, palette.tab_outline)
-            } else {
-                Stroke::NONE
-            };
-            let corners = CornerRadius {
-                nw: TAB_CORNER,
-                ne: TAB_CORNER,
-                sw: 0,
-                se: 0,
-            };
-            shapes.push(egui::Shape::Rect(egui::epaint::RectShape::new(
-                rect,
-                corners,
-                fill,
-                stroke,
-                StrokeKind::Inside,
-            )));
+            let outline = is_selected.then_some(palette.tab_outline);
+            shapes.extend(inactive_tab_body(rect, fill, outline, px));
         }
 
-        let mut x = rect.left() + TAB_PADDING_X;
-        if let Some(texture) = favicon {
-            let icon = Rect::from_center_size(
-                Pos2::new(x + FAVICON_SIZE / 2.0, rect.center().y),
+        if let Some(left) = layout.icon_left {
+            let slot = Rect::from_min_size(
+                Pos2::new(rect.left() + left, rect.center().y - FAVICON_SIZE / 2.0),
                 Vec2::splat(FAVICON_SIZE),
             );
-            shapes.push(egui::Shape::image(
-                texture,
-                icon,
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            ));
-            x += icon_width;
+            if loading {
+                shapes.push(throbber(ui, slot, text_color));
+            } else if let Some(texture) = favicon {
+                let icon = favicon::snap(slot, favicon::icon_px(FAVICON_SIZE, ppp), ppp);
+                shapes.push(egui::Shape::image(
+                    texture,
+                    icon,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                ));
+            } else {
+                shapes.extend(globe(slot, faded(ink, alpha / 2)));
+            }
         }
-        shapes.push(egui::Shape::galley(
-            Pos2::new(x, rect.center().y - galley.size().y / 2.0),
-            galley,
-            text_color,
-        ));
+        if let (Some((left, room)), Some(galley)) = (layout.title, galley) {
+            let pos = Pos2::new(rect.left() + left, rect.center().y - galley.size().y / 2.0)
+                .round_to_pixels(ppp);
+            shapes.push(egui::Shape::galley(pos, galley, text_color));
+            if cut {
+                let fade = TAB_TITLE_FADE.min(room / 2.0);
+                let right = rect.left() + left + room;
+                shapes.push(title_fade(
+                    Rect::from_min_max(
+                        Pos2::new(right - fade, rect.top() + px),
+                        Pos2::new(right, rect.bottom() - px),
+                    ),
+                    fill,
+                ));
+            }
+        }
 
         if let Some(close) = &close {
+            let centre = close_rect.center().round_to_pixel_center(ppp);
             if close.hovered() {
                 let ring = if is_active {
                     Color32::from_black_alpha(28)
                 } else {
                     palette.tab_hover
                 };
-                shapes.push(egui::Shape::circle_filled(
-                    close_rect.center(),
-                    CLOSE_SIZE / 2.0,
-                    ring,
-                ));
+                shapes.push(egui::Shape::circle_filled(centre, CLOSE_SIZE / 2.0, ring));
             }
-            let cross = ui
-                .painter()
-                .layout_no_wrap("×".to_string(), font, text_color);
-            shapes.push(egui::Shape::galley(
-                close_rect.center() - cross.size() / 2.0,
-                cross,
-                text_color,
-            ));
+            shapes.extend(cross(centre, text_color));
         }
         if is_active {
             late.extend(shapes);
@@ -3797,7 +3930,86 @@ fn tab_widget(
         }
     }
     let close_clicked = close.is_some_and(|close| close.on_hover_text("Close tab").clicked());
+    // The whole title, where the tab shows less of it.
+    if cut || layout.title.is_none() {
+        response.clone().on_hover_text(title);
+    }
     (response, close_clicked)
+}
+
+/// The glyph of the close control: two strokes crossing at `centre`.
+fn cross(centre: Pos2, ink: Color32) -> Vec<egui::Shape> {
+    let h = 3.5;
+    let stroke = Stroke::new(1.2_f32, ink);
+    vec![
+        egui::Shape::line_segment(
+            [
+                Pos2::new(centre.x - h, centre.y - h),
+                Pos2::new(centre.x + h, centre.y + h),
+            ],
+            stroke,
+        ),
+        egui::Shape::line_segment(
+            [
+                Pos2::new(centre.x - h, centre.y + h),
+                Pos2::new(centre.x + h, centre.y - h),
+            ],
+            stroke,
+        ),
+    ]
+}
+
+/// A page's stand-in for an icon when it has none: a globe (its outline,
+/// equator and a meridian) in `ink`, filling `slot`.
+fn globe(slot: Rect, ink: Color32) -> Vec<egui::Shape> {
+    use std::f32::consts::TAU;
+    const STEPS: usize = 24;
+    let c = slot.center();
+    let r = slot.width() / 2.0 - 2.0;
+    let stroke = Stroke::new(1.0_f32, ink);
+    let meridian: Vec<Pos2> = (0..STEPS)
+        .map(|i| {
+            let a = TAU * i as f32 / STEPS as f32;
+            Pos2::new(c.x + r * 0.45 * a.cos(), c.y + r * a.sin())
+        })
+        .collect();
+    vec![
+        egui::Shape::circle_stroke(c, r, stroke),
+        egui::Shape::line_segment([Pos2::new(c.x - r, c.y), Pos2::new(c.x + r, c.y)], stroke),
+        egui::Shape::closed_line(meridian, stroke),
+    ]
+}
+
+/// The arc that turns in a loading tab's icon slot: three quarters of a
+/// circle in `ink`, once around a second. Asks for the next frame.
+fn throbber(ui: &Ui, slot: Rect, ink: Color32) -> egui::Shape {
+    use std::f32::consts::TAU;
+    const STEPS: usize = 18;
+    ui.ctx().request_repaint_after(Duration::from_millis(16));
+    let turn = (ui.input(|i| i.time) % 1.0) as f32;
+    let c = slot.center();
+    let r = slot.width() / 2.0 - 2.5;
+    let points: Vec<Pos2> = (0..=STEPS)
+        .map(|i| {
+            let a = TAU * (turn + 0.75 * i as f32 / STEPS as f32);
+            Pos2::new(c.x + r * a.cos(), c.y + r * a.sin())
+        })
+        .collect();
+    egui::Shape::line(points, Stroke::new(1.5_f32, ink))
+}
+
+/// A veil over the end of a title that does not fit: `fill` (the tab's
+/// own) from clear at the left of `rect` to solid at its right, so the
+/// text under it fades out.
+fn title_fade(rect: Rect, fill: Color32) -> egui::Shape {
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.left_top(), Color32::TRANSPARENT);
+    mesh.colored_vertex(rect.right_top(), fill);
+    mesh.colored_vertex(rect.right_bottom(), fill);
+    mesh.colored_vertex(rect.left_bottom(), Color32::TRANSPARENT);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    egui::Shape::mesh(mesh)
 }
 
 /// The glyph of a window control, drawn as lines so it never depends on
@@ -3980,13 +4192,15 @@ fn action_button(
     let (rect, response, _) = icon_button_rect(ui, palette, id);
     state.action_anchors.insert(extension.id.clone(), rect);
     if ui.is_rect_visible(rect) {
+        let ppp = ui.painter().pixels_per_point();
+        let px = favicon::icon_px(ACTION_ICON, ppp);
         let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(ACTION_ICON));
-        match extension_icon_texture(ui, state, extension) {
+        match extension_icon_texture(ui, state, extension, px) {
             Some(texture) => {
                 let id = texture.id();
                 ui.painter().image(
                     id,
-                    icon_rect,
+                    favicon::snap(icon_rect, px, ppp),
                     Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                     Color32::WHITE,
                 );
@@ -4131,84 +4345,94 @@ fn select_all(ui: &Ui, id: Id, len: usize) {
     }
 }
 
+/// The texture of `image` fitted to `px` pixels, kept in `cache` under
+/// `key`: uploaded (as `name`) on first use and again when the image or
+/// the size changes.
+fn icon_texture<'a, K: std::hash::Hash + Eq>(
+    ui: &Ui,
+    cache: &'a mut HashMap<K, CachedFavicon>,
+    key: K,
+    name: &str,
+    image: &RgbaImage,
+    px: u32,
+) -> &'a TextureHandle {
+    use std::collections::hash_map::Entry;
+    let fresh = cache
+        .get(&key)
+        .is_some_and(|cached| cached.is_for(image, px));
+    let upload = || CachedFavicon {
+        width: image.width,
+        height: image.height,
+        rgba: image.rgba.clone(),
+        px,
+        texture: ui
+            .ctx()
+            .load_texture(name, favicon::fit(image, px), TextureOptions::LINEAR),
+    };
+    let cached = match cache.entry(key) {
+        Entry::Occupied(entry) => {
+            let cached = entry.into_mut();
+            if !fresh {
+                *cached = upload();
+            }
+            cached
+        }
+        Entry::Vacant(entry) => entry.insert(upload()),
+    };
+    &cached.texture
+}
+
+/// The texture of a tab's favicon fitted to `px` pixels, uploaded on
+/// first use and again when the engine reports a different icon or the
+/// size changes.
 fn favicon_texture<'a>(
     ui: &Ui,
     state: &'a mut ChromeState,
     tab: TabId,
     favicon: Option<&Favicon>,
+    px: u32,
 ) -> Option<&'a TextureHandle> {
     let favicon = favicon?;
-    let fresh = state
-        .favicons
-        .get(&tab)
-        .is_some_and(|cached| cached.is_for(favicon));
-    if !fresh {
-        let image = ColorImage::from_rgba_unmultiplied(
-            [favicon.width as usize, favicon.height as usize],
-            &favicon.rgba,
-        );
-        let texture =
-            ui.ctx()
-                .load_texture(format!("favicon-{}", tab.0), image, TextureOptions::LINEAR);
-        state.favicons.insert(
-            tab,
-            CachedFavicon {
-                width: favicon.width,
-                height: favicon.height,
-                rgba: favicon.rgba.clone(),
-                texture,
-            },
-        );
-    }
-    state.favicons.get(&tab).map(|cached| &cached.texture)
+    Some(icon_texture(
+        ui,
+        &mut state.favicons,
+        tab,
+        &format!("favicon-{}", tab.0),
+        favicon,
+        px,
+    ))
 }
 
-/// The texture of a pinned extension's icon, uploaded on first use and
-/// again when the engine reports a different icon.
+/// The texture of a pinned extension's icon fitted to `px` pixels,
+/// uploaded on first use and again when the engine reports a different
+/// icon or the size changes.
 fn extension_icon_texture<'a>(
     ui: &Ui,
     state: &'a mut ChromeState,
     extension: &Extension,
+    px: u32,
 ) -> Option<&'a TextureHandle> {
     let icon = extension.icon.as_ref()?;
-    let fresh = state
-        .extension_icons
-        .get(&extension.id)
-        .is_some_and(|cached| cached.is_for(icon));
-    if !fresh {
-        let image = ColorImage::from_rgba_unmultiplied(
-            [icon.width as usize, icon.height as usize],
-            &icon.rgba,
-        );
-        let texture = ui.ctx().load_texture(
-            format!("extension-{}", extension.id),
-            image,
-            TextureOptions::LINEAR,
-        );
-        state.extension_icons.insert(
-            extension.id.clone(),
-            CachedFavicon {
-                width: icon.width,
-                height: icon.height,
-                rgba: icon.rgba.clone(),
-                texture,
-            },
-        );
-    }
-    state
-        .extension_icons
-        .get(&extension.id)
-        .map(|cached| &cached.texture)
+    Some(icon_texture(
+        ui,
+        &mut state.extension_icons,
+        extension.id.clone(),
+        &format!("extension-{}", extension.id),
+        icon,
+        px,
+    ))
 }
 
 impl CachedFavicon {
-    /// True if this texture was uploaded from `favicon`'s pixels. The model
-    /// replaces the `Arc` whenever the engine reports a new icon, so the
-    /// pointer comparison is exact and costs nothing per frame.
-    fn is_for(&self, favicon: &Favicon) -> bool {
-        self.width == favicon.width
-            && self.height == favicon.height
-            && Arc::ptr_eq(&self.rgba, &favicon.rgba)
+    /// True if this texture was uploaded from `image`'s pixels at `px`.
+    /// The model replaces the `Arc` whenever the engine reports a new
+    /// icon, so the pointer comparison is exact and costs nothing per
+    /// frame.
+    fn is_for(&self, image: &RgbaImage, px: u32) -> bool {
+        self.width == image.width
+            && self.height == image.height
+            && self.px == px
+            && Arc::ptr_eq(&self.rgba, &image.rgba)
     }
 }
 
@@ -4489,6 +4713,70 @@ mod tests {
         assert_eq!(tab_width_for(1000.0, 10, 2.0), (1000.0 - 18.0) / 10.0);
         assert_eq!(tab_width_for(100.0, 10, 2.0), TAB_MIN_WIDTH);
         assert_eq!(tab_width_for(-50.0, 3, 2.0), TAB_MIN_WIDTH);
+    }
+
+    #[test]
+    fn a_narrow_inactive_tab_centres_its_icon_and_shows_the_close_control_hovered() {
+        let idle = tab_layout(TAB_MIN_WIDTH, false, false);
+        assert_eq!(
+            idle,
+            TabLayout {
+                icon_left: Some((TAB_MIN_WIDTH - FAVICON_SIZE) / 2.0),
+                title: None,
+                close: false,
+            }
+        );
+        let hovered = tab_layout(TAB_MIN_WIDTH, false, true);
+        assert_eq!(hovered.icon_left, Some(TAB_PADDING_X));
+        assert_eq!(hovered.title, None);
+        assert!(hovered.close);
+        // Narrower than both: the icon stays, the control goes.
+        let tight = tab_layout(40.0, false, true);
+        assert_eq!(tight.icon_left, Some((40.0 - FAVICON_SIZE) / 2.0));
+        assert!(!tight.close);
+    }
+
+    #[test]
+    fn a_narrow_active_tab_keeps_its_close_control_before_its_icon() {
+        assert_eq!(
+            tab_layout(TAB_MIN_WIDTH, true, false),
+            TabLayout {
+                icon_left: Some(TAB_PADDING_X),
+                title: None,
+                close: true,
+            }
+        );
+        let tight = tab_layout(40.0, true, false);
+        assert_eq!(tight.icon_left, None);
+        assert!(tight.close);
+    }
+
+    #[test]
+    fn a_wide_tab_shows_everything_with_the_title_between() {
+        let layout = tab_layout(TAB_WIDTH, false, false);
+        assert_eq!(layout.icon_left, Some(TAB_PADDING_X));
+        assert!(layout.close);
+        let (left, room) = layout.title.unwrap();
+        assert_eq!(left, TAB_PADDING_X + FAVICON_SIZE + TAB_ICON_GAP);
+        assert_eq!(
+            left + room,
+            TAB_WIDTH - TAB_PADDING_X + CLOSE_INSET - CLOSE_SIZE - TAB_ICON_GAP
+        );
+        // Under the close threshold and not hovered, the title has the
+        // control's room too.
+        let (_, wider) = tab_layout(100.0, false, false).title.unwrap();
+        assert_eq!(
+            wider,
+            100.0 - 2.0 * TAB_PADDING_X - FAVICON_SIZE - TAB_ICON_GAP
+        );
+    }
+
+    #[test]
+    fn the_strip_edge_is_the_last_pixel_row() {
+        assert_eq!(strip_edge_y(38.0, 1.0), 37.5);
+        // 38 points at 1.25 is 47.5 pixels, rounded to 48: the row
+        // ending there, centred at 47.5 pixels.
+        assert!((strip_edge_y(38.0, 1.25) - 47.5 / 1.25).abs() < 1e-4);
     }
 
     #[test]

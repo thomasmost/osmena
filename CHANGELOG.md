@@ -4,8 +4,40 @@ All notable changes to the osmena crates. The crates version together.
 
 ## Unreleased
 
+### Fixed
+
+- Tab favicons blurred at some tab widths. A 16-pixel icon drawn at a
+  position between pixels (which an odd or fractional tab width gives
+  every tab after the first) was resampled by the GPU into a smear,
+  and a larger icon was shrunk the same crude way. Every icon (tabs,
+  the folder list, the bookmarks bar, pinned extensions, the Launch
+  Panel's Most visited tile) is now resampled once on the CPU
+  (Lanczos, in premultiplied colour, aspect kept) to exactly the
+  pixels its slot covers at the display's scale and drawn on pixel
+  boundaries; tabs, chips and the strip's edge snap to the same grid.
+- The active tab had a one-pixel line between it and the toolbar:
+  egui's default separator under the strip panel, painted over the
+  tabs. It is off. The strip's own edge line now stops at the active
+  tab, whose body opens into the toolbar (its fill runs a pixel past
+  the strip, so no seam opens at a fractional display scale either),
+  and runs on under the other tabs, which stop a pixel short of it.
+
 ### Changed
 
+- Tabs lay out by Chromium's rules as they narrow (`tab_layout`): the
+  active tab keeps its close control first and its icon second, an
+  inactive tab keeps its icon (centred when nothing else fits) and
+  shows the close control hovered only while there is room beside the
+  icon; the title is left out under two glyphs' room rather than
+  showing a lone ellipsis, and a title that does not fit is cut at a
+  glyph and fades out over its last 20 points instead of ending in
+  "…". A tab that shows less than its whole title gives it in a
+  tooltip.
+- A loading tab shows a turning arc in its icon's place, and a page
+  without a favicon a globe, so titles line up whatever the page has.
+  The close control's cross is drawn as strokes rather than a font's
+  "×". A multi-selected tab's outline and a folder chip's are open
+  at the bottom, like the active tab's.
 - `keyutils::key_input_from_winit` gives a modifier key's own event its
   modifier on the press and not on the release (`with_own_modifier`):
   winit reports the key before the `ModifiersChanged` it causes, so

@@ -23,6 +23,7 @@ use crate::chrome::{
     ChromeContext, ChromeState, LAUNCHER_FONT_SIZE, blend, caret_to_end, site_icon_texture,
     step_pick, suggestion_row, truncate,
 };
+use crate::favicon;
 use crate::theme;
 
 /// The panel's widest; narrower windows get what is left of 48 px.
@@ -790,6 +791,8 @@ fn top_sites_tile(
             ui.painter()
                 .rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill);
         }
+        let ppp = ui.painter().pixels_per_point();
+        let px = favicon::icon_px(ROW_ICON, ppp);
         let icon_rect = Rect::from_center_size(
             Pos2::new(rect.left() + 4.0 + ROW_ICON / 2.0, rect.center().y),
             Vec2::splat(ROW_ICON),
@@ -797,12 +800,12 @@ fn top_sites_tile(
         let texture = context
             .site_icons
             .get(&site.host)
-            .and_then(|favicon| site_icon_texture(ui, state, &site.host, favicon).map(|t| t.id()));
+            .map(|favicon| site_icon_texture(ui, state, &site.host, favicon, px).id());
         match texture {
             Some(texture) => {
                 ui.painter().image(
                     texture,
-                    icon_rect,
+                    favicon::snap(icon_rect, px, ppp),
                     Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                     Color32::WHITE,
                 );

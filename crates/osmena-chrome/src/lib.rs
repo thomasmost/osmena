@@ -3,7 +3,8 @@
 //! `osmena-core` and returns the [`Command`]s the user issued.
 //!
 //! - [`chrome`]: the tab strip, toolbar, status overlay, and crash panel;
-//!   `launch` (private) draws the Launch Panel for it.
+//!   `launch` (private) draws the Launch Panel for it, and `favicon`
+//!   (private) fits icons to the pixel grid.
 //! - [`menus`]: the window and tab menus as [`MenuEntry`] data, and
 //!   [`native_menu`], which shows them as native popups through `muda`.
 //! - [`routing`]: where a pointer or key event goes (chrome, page, or a
@@ -18,6 +19,7 @@
 
 pub mod chrome;
 pub mod fatal;
+mod favicon;
 pub mod icon;
 pub mod input;
 pub mod keyutils;

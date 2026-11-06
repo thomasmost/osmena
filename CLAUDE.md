@@ -5,7 +5,9 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-11-05 (the Profiles menu shaped like Chromium's,
+_Last updated: 2026-11-05 (the strip on the pixel grid, icons fitted to
+their pixels, Chromium's order as tabs narrow, the active tab open into
+the toolbar; earlier that day the Profiles menu shaped like Chromium's,
 guest profiles and the Manage Profiles dialog; before that the default
 browser on macOS: the status, the offer bar, the settings section, the
 shell's Apple Event handlers for links and pages other apps hand over;
@@ -166,7 +168,17 @@ No engine is needed; the workspace builds in under a minute.
   a gap opened at the index `Command::MoveTabs` would get. A drop inside
   the window is that command; outside it is a `TabDrop` for the
   application. A tab's widget id is `("tab", id)` every frame, which is
-  what lets egui keep the drag while the tab moves.
+  what lets egui keep the drag while the tab moves. Everything in
+  the strip sits on the pixel grid: a slot's rect is rounded to
+  pixels before it is drawn, the strip's edge is one pixel row
+  (`strip_edge_y`), the active tab's body (`active_tab_body`) opens
+  into the toolbar and every other tab (`inactive_tab_body`) stops
+  a pixel above the edge. An icon is never drawn at its model size:
+  `favicon::fit` resamples it to the pixels its slot covers, cached
+  per size in `CachedFavicon` through `icon_texture`, and
+  `favicon::snap` gives the box to draw it in. A tab's parts are
+  placed by `tab_layout` (Chromium's order as a tab narrows), a
+  pure function with tests.
 - **Folders are contiguous runs of tabs.** `Tab::folder` names the
   folder; `Window::gather_folder` keeps a folder's tabs together where
   its first tab is, `prune_folders` drops a folder whose last tab went
@@ -357,6 +369,26 @@ No engine is needed; the workspace builds in under a minute.
   adds; the shared behaviour is documented here only.
 
 ## Status and handoff (2026-10-19)
+
+Added 2026-11-05 (night, on the branch `worktree-tab-presentation`,
+not merged): the strip on the pixel grid with icons fitted to their
+pixels (`favicon.rs`), Chromium's order as tabs narrow (`tab_layout`),
+the title fade, the throbber and the globe, and the active tab open
+into the toolbar with egui's panel separator off (see Conventions and
+the CHANGELOG). Verified: `cargo test` (the resampler's identity,
+premultiplied averaging and letterboxing, the layout rules, the edge
+row), clippy, fmt, and a debug Nautilus built from a copy of its
+source against this checkout, on Windows at 100% scale: twelve tabs
+of 70 points show crisp centred favicons, no titles and the edge line
+under them; the active tab's body meets the toolbar with no line;
+example.com shows the globe; a page served slowly shows the turning
+arc; five tabs of 165 points show titles fading out before the close
+cross. Not verified: hover (no synthetic input was sent), a
+fractional display scale (only the edge-row test covers its
+arithmetic), the bookmarks bar and Launch Panel icons by eye, macOS,
+Paladin (nothing it implements changed). To see the GL window in a
+capture, `PrintWindow` with `PW_RENDERFULLCONTENT` on the window of
+the started process works; `CopyFromScreen` shows whatever is over it.
 
 Added 2026-11-05: the Profiles menu in Chromium's shape (the "Other
 <brand> Profiles" heading, "Add <brand> Profile…", "Open Guest

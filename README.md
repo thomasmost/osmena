@@ -143,6 +143,17 @@ The engine contract, in `osmena-engine`:
   address bar of an existing tab as you type. The history
   (`history.toml` in the profile) keeps every page that finished
   loading, with its title and visit count, up to 5000 entries.
+- **Tabs that read at any width.** Favicons are fitted to the pixels
+  their slot covers and drawn on pixel boundaries, so they are crisp
+  at every tab width and display scale; a loading tab shows a turning
+  arc there, a page without an icon a globe. As tabs narrow they give
+  up parts in Chromium's order: the active tab keeps its close control
+  and then its icon, an inactive one keeps its icon (centred when it
+  is all that fits) and shows the close control only under the
+  pointer; a title that does not fit fades out rather than ending in
+  an ellipsis, and the tooltip has the whole of it. The active tab
+  opens into the toolbar with no line between them; the strip's edge
+  runs under the others.
 - **Tabs that drag.** A tab (or the selected tabs) dragged along the
   strip slides between the others, which move out of its way, and lands
   where it is let go; dropped between two tabs of a folder it joins the
