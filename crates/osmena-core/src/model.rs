@@ -105,6 +105,11 @@ pub struct Tab {
     /// A restored tab the engine has not been asked for yet: it loads
     /// when first shown. Never the active tab.
     pub deferred: bool,
+    /// A deferred tab the engine is loading out of sight for its title
+    /// and favicon (`Command::WarmTab`); the engine's tab goes again
+    /// once they are in (`Command::WarmDone`), or stays and is shown if
+    /// the user gets there first. Only ever set with `deferred`.
+    pub warming: bool,
 }
 
 impl Tab {
@@ -122,6 +127,7 @@ impl Tab {
             folder: None,
             zoom: 100,
             deferred: false,
+            warming: false,
         }
     }
 

@@ -253,9 +253,10 @@ pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
         EngineEvent::LoadStateChanged { tab, state } => {
             with_tab(browser, *tab, |t| t.load = *state);
             // A visit is a page that finished loading, under its address
-            // and title at that moment; the title may still arrive.
+            // and title at that moment; the title may still arrive. A
+            // deferred tab warming out of sight is nobody's visit.
             let changed = match browser.tab(*tab) {
-                Some(t) if *state == LoadState::Complete => {
+                Some(t) if *state == LoadState::Complete && !t.deferred => {
                     let (url, title) = (t.url.clone(), t.title.clone());
                     browser
                         .history
@@ -362,7 +363,14 @@ pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
             open_window(browser, url.clone())
         }
         EngineEvent::ContextMenuRequested { .. } | EngineEvent::ClipboardImage(_) => Vec::new(),
+        // A warming page that closed itself: its engine tab is gone and
+        // the model's tab stays, deferred, with what it got.
+        EngineEvent::TabClosed(tab) if crate::command::end_warm(browser, *tab) => Vec::new(),
         EngineEvent::TabClosed(tab) => close_tab(browser, *tab),
+        // A warm that crashed is over; the tab loads afresh when shown.
+        EngineEvent::TabCrashed { tab, .. } if crate::command::end_warm(browser, *tab) => {
+            vec![EngineAction::CloseTab(*tab)]
+        }
         EngineEvent::TabCrashed { tab, reason } => {
             with_tab(browser, *tab, |t| {
                 t.crashed = Some(reason.clone());
@@ -761,6 +769,54 @@ mod tests {
             vec![EngineAction::CloseTab(t2), EngineAction::Show(t1)]
         );
         assert_eq!(b.window(window).unwrap().tabs.len(), 1);
+    }
+
+    #[test]
+    fn a_warming_tab_is_no_visit_and_outlives_its_engine_tab() {
+        let (mut b, _, _) = one_window();
+        let tab = b.allocate_tab_id();
+        let mut t = Tab::new(tab, url("https://warm.example/"));
+        t.deferred = true;
+        b.windows[0].tabs.push(t);
+        assert!(!dispatch(&mut b, &Command::WarmTab(tab)).is_empty());
+        apply(
+            &mut b,
+            &EngineEvent::TitleChanged {
+                tab,
+                title: "Warm".to_string(),
+            },
+        );
+        assert!(
+            apply(
+                &mut b,
+                &EngineEvent::LoadStateChanged {
+                    tab,
+                    state: LoadState::Complete,
+                },
+            )
+            .is_empty()
+        );
+        assert!(b.history.entries().is_empty(), "a warm is not a visit");
+        assert_eq!(b.tab(tab).unwrap().title, "Warm");
+        // The page closed itself: the tab stays, deferred, warm over.
+        assert!(apply(&mut b, &EngineEvent::TabClosed(tab)).is_empty());
+        let t = b.tab(tab).unwrap();
+        assert!(t.deferred && !t.warming && t.load == LoadState::Idle);
+        // Crashed while warming: the engine's tab goes, and nothing is
+        // marked crashed.
+        dispatch(&mut b, &Command::WarmTab(tab));
+        assert_eq!(
+            apply(
+                &mut b,
+                &EngineEvent::TabCrashed {
+                    tab,
+                    reason: "gone".to_string(),
+                },
+            ),
+            vec![EngineAction::CloseTab(tab)]
+        );
+        let t = b.tab(tab).unwrap();
+        assert!(t.crashed.is_none() && t.deferred && !t.warming);
     }
 
     #[test]

@@ -246,6 +246,14 @@ pub enum Command {
     RestoreSession(WindowId),
     /// Decline that offer.
     DismissRestore,
+    /// Load a restored, deferred tab in the engine out of sight, for
+    /// its title and favicon (`Tab::warming`); the strip goes on drawing
+    /// it faint. The shell sends one for each tab of
+    /// `EngineAction::WarmTabs`, a moment apart.
+    WarmTab(TabId),
+    /// The warm of a tab is over, its title and favicon in or not: the
+    /// engine's tab goes and the model's stays, deferred.
+    WarmDone(TabId),
     NextTab(WindowId),
     PreviousTab(WindowId),
     /// Activate the tab at `index` in `window`'s strip; nothing if there
@@ -580,6 +588,12 @@ pub enum EngineAction {
     Show(TabId),
     Hide(TabId),
     CloseTab(TabId),
+    /// Warm `tabs`, restored and deferred, in this order and a moment
+    /// apart: a `Command::WarmTab` for each, so the strip fills with
+    /// their titles and favicons without every page loading at once,
+    /// and a `Command::WarmDone` once each has them, or has had long
+    /// enough. The shell keeps the time.
+    WarmTabs(Vec<TabId>),
     /// Open a native window for `window` whose first tab is `tab` at `url`.
     OpenWindow {
         window: WindowId,
@@ -1265,6 +1279,8 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             browser.crashed_session = None;
             Vec::new()
         }
+        Command::WarmTab(tab) => warm_tab(browser, *tab),
+        Command::WarmDone(tab) => warm_done(browser, *tab),
         Command::PromptRenameFolder(folder) => {
             let Some(window) = browser.window_of_folder(*folder) else {
                 return Vec::new();
@@ -1573,9 +1589,12 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
 /// Open the windows of `session`: each with its active tab loading and
 /// its other tabs deferred until shown, its folders back by name, and a
 /// `PlaceWindow` before its `OpenWindow` when its place is known. The
-/// closed-tab list comes back too.
+/// closed-tab list comes back too. Last comes a `WarmTabs` naming the
+/// deferred tabs in strip order, window by window, for their titles
+/// and favicons.
 pub fn restore_session(browser: &mut Browser, session: &Session) -> Vec<EngineAction> {
     let mut actions = Vec::new();
+    let mut warm = Vec::new();
     for sw in &session.windows {
         if sw.tabs.is_empty() {
             continue;
@@ -1628,24 +1647,79 @@ pub fn restore_session(browser: &mut Browser, session: &Session) -> Vec<EngineAc
         w.active = created.id;
         w.select_only(created.id);
         w.prune_folders();
+        warm.extend(w.tabs.iter().filter(|t| t.deferred).map(|t| t.id));
     }
     for url in &session.closed_tabs {
         browser.remember_closed(url.clone());
     }
+    if !warm.is_empty() {
+        actions.push(EngineAction::WarmTabs(warm));
+    }
     actions
 }
 
+/// Load `tab`, a deferred one, in the engine out of sight for its title
+/// and favicon: created hidden, it stays deferred (faint, no throbber)
+/// until [`warm_done`] lets the engine's tab go again or the user shows
+/// it first. Nothing for a tab that is not deferred, is warming
+/// already, or is gone.
+fn warm_tab(browser: &mut Browser, tab: TabId) -> Vec<EngineAction> {
+    let Some(window) = browser.window_of_tab(tab) else {
+        return Vec::new();
+    };
+    match browser.tab_mut(tab) {
+        Some(t) if t.deferred && !t.warming => {
+            t.warming = true;
+            vec![EngineAction::CreateHiddenTab {
+                window,
+                tab,
+                url: t.url.clone(),
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The warm of `tab` is over: the engine's tab goes, the model's stays
+/// deferred with whatever title and favicon arrived. Nothing unless the
+/// tab is warming.
+fn warm_done(browser: &mut Browser, tab: TabId) -> Vec<EngineAction> {
+    if end_warm(browser, tab) {
+        vec![EngineAction::CloseTab(tab)]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Take `tab` out of its warm, whichever way it ends: deferred as
+/// before, idle, with whatever arrived. Whether it was warming at all.
+pub(crate) fn end_warm(browser: &mut Browser, tab: TabId) -> bool {
+    match browser.tab_mut(tab) {
+        Some(t) if t.warming => {
+            t.warming = false;
+            t.load = LoadState::Idle;
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Show `tab` in `w`: a deferred tab is created in the engine now (it
-/// comes up visible), any other is shown again.
+/// comes up visible), unless a warm has it there already, in which
+/// case it is shown like any other.
 fn show_tab(w: &mut Window, tab: TabId) -> EngineAction {
     let window = w.id;
     match w.tab_mut(tab) {
         Some(t) if t.deferred => {
             t.deferred = false;
-            EngineAction::CreateTab {
-                window,
-                tab,
-                url: t.url.clone(),
+            if std::mem::take(&mut t.warming) {
+                EngineAction::Show(tab)
+            } else {
+                EngineAction::CreateTab {
+                    window,
+                    tab,
+                    url: t.url.clone(),
+                }
             }
         }
         _ => EngineAction::Show(tab),
@@ -2066,8 +2140,9 @@ pub(crate) fn close_tab(browser: &mut Browser, tab: TabId) -> Vec<EngineAction> 
     {
         return ask;
     }
-    // A deferred tab was never created in the engine.
-    let deferred = browser.tab(tab).is_some_and(|t| t.deferred);
+    // A deferred tab was never created in the engine, unless a warm
+    // has it there.
+    let deferred = browser.tab(tab).is_some_and(|t| t.deferred && !t.warming);
     let mut actions = if deferred {
         Vec::new()
     } else {
@@ -2321,7 +2396,7 @@ fn close_window(browser: &mut Browser, window: WindowId) -> Vec<EngineAction> {
     let mut actions: Vec<EngineAction> = removed
         .tabs
         .iter()
-        .filter(|t| !t.deferred)
+        .filter(|t| !t.deferred || t.warming)
         .map(|t| EngineAction::CloseTab(t.id))
         .collect();
     actions.push(EngineAction::CloseWindow(window));
@@ -4004,7 +4079,9 @@ mod tests {
             &actions[1],
             EngineAction::OpenWindow { tab, url, .. } if *tab == bb && url.as_str() == "https://b.example/"
         ));
-        assert_eq!(actions.len(), 2);
+        // The deferred tabs, in strip order, for the shell to warm.
+        assert_eq!(actions[2], EngineAction::WarmTabs(vec![a, c]));
+        assert_eq!(actions.len(), 3);
         assert_eq!(b.closed_tabs, vec![url("https://gone.example/")]);
         // Showing a deferred tab creates it; closing one asks nothing
         // of the engine.
@@ -4053,6 +4130,83 @@ mod tests {
                 .any(|x| matches!(x, EngineAction::CreateTab { tab, .. } if *tab == d)),
             "{actions:?}"
         );
+    }
+
+    #[test]
+    fn a_restored_tab_warms_out_of_sight_and_is_let_go_again() {
+        let mut b = browser();
+        restore_session(&mut b, &saved_session());
+        let w = &b.windows[0];
+        let (window, a, bb, c) = (w.id, w.tabs[0].id, w.tabs[1].id, w.tabs[2].id);
+        // Warming creates the tab hidden and leaves it deferred.
+        assert_eq!(
+            dispatch(&mut b, &Command::WarmTab(a)),
+            vec![EngineAction::CreateHiddenTab {
+                window,
+                tab: a,
+                url: url("https://a.example/")
+            }]
+        );
+        let t = b.tab(a).unwrap();
+        assert!(t.deferred && t.warming);
+        // Again, or a tab that is not deferred, or none: nothing.
+        assert!(dispatch(&mut b, &Command::WarmTab(a)).is_empty());
+        assert!(dispatch(&mut b, &Command::WarmTab(bb)).is_empty());
+        assert!(dispatch(&mut b, &Command::WarmTab(TabId(99))).is_empty());
+        // Done: the engine's tab goes; the model's stays, deferred,
+        // with what came in.
+        crate::apply(
+            &mut b,
+            &crate::EngineEvent::TitleChanged {
+                tab: a,
+                title: "A, warmed".to_string(),
+            },
+        );
+        crate::apply(
+            &mut b,
+            &crate::EngineEvent::LoadStateChanged {
+                tab: a,
+                state: LoadState::Complete,
+            },
+        );
+        assert_eq!(
+            dispatch(&mut b, &Command::WarmDone(a)),
+            vec![EngineAction::CloseTab(a)]
+        );
+        let t = b.tab(a).unwrap();
+        assert!(t.deferred && !t.warming);
+        assert_eq!(t.title, "A, warmed");
+        assert_eq!(t.load, LoadState::Idle);
+        assert!(dispatch(&mut b, &Command::WarmDone(a)).is_empty());
+        // Shown while warming: the engine has it, so it is shown, not
+        // created again.
+        dispatch(&mut b, &Command::WarmTab(c));
+        assert_eq!(
+            dispatch(&mut b, &Command::ActivateTab(c)),
+            vec![EngineAction::Hide(bb), EngineAction::Show(c)]
+        );
+        let t = b.tab(c).unwrap();
+        assert!(!t.deferred && !t.warming);
+        assert!(dispatch(&mut b, &Command::WarmDone(c)).is_empty());
+        // Closed while warming: the engine's tab has to go with it.
+        dispatch(&mut b, &Command::WarmTab(a));
+        assert_eq!(
+            dispatch(&mut b, &Command::CloseTab(a)),
+            vec![EngineAction::CloseTab(a)]
+        );
+        assert!(b.tab(a).is_none());
+    }
+
+    #[test]
+    fn a_closing_window_takes_its_warming_tabs_with_it() {
+        let mut b = browser();
+        restore_session(&mut b, &saved_session());
+        let w = &b.windows[0];
+        let (window, a, c) = (w.id, w.tabs[0].id, w.tabs[2].id);
+        dispatch(&mut b, &Command::WarmTab(a));
+        let actions = dispatch(&mut b, &Command::CloseWindow(window));
+        assert!(actions.contains(&EngineAction::CloseTab(a)), "{actions:?}");
+        assert!(!actions.contains(&EngineAction::CloseTab(c)), "{actions:?}");
     }
 
     #[test]

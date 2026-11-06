@@ -48,9 +48,9 @@ const TAB_CORNER: u8 = theme::CORNER;
 /// The tab titles' font: a notch under the body text.
 const TAB_FONT_SIZE: f32 = 11.5;
 
-/// The letters a strip label's band is measured from: a capital for
-/// the top of it, a descender for the foot. See [`text_top_centered`].
-const TEXT_BAND: &str = "Hg";
+/// The letter a strip label's band is measured from: a capital, from
+/// its top to the baseline. See [`text_top_centered`].
+const TEXT_BAND: &str = "H";
 const CLOSE_SIZE: f32 = 18.0;
 /// How far the close control reaches into the tab's right padding,
 /// so its hover ring has room without pushing the title.
@@ -1660,14 +1660,17 @@ const CHIP_GLYPH_WIDTH: f32 = 12.0;
 /// for the accents a title may not have and stops at the descenders,
 /// so centring the box hangs the words below the middle — two pixels
 /// of it at the strip's size, which is plain to see beside a favicon.
-/// What is centred here instead is the band the letters fill, from the
-/// top of a capital to the foot of a descender.
+/// What is centred here instead is the band from the top of a capital
+/// to the baseline: the body of the words, where the eye puts a line
+/// of text. Descenders hang under it, as they do on a page; counting
+/// them in the band lifted every title a pixel or two above the
+/// favicon's middle, since most letters never reach below the line.
 ///
-/// The band is measured from a reference word ([`TEXT_BAND`]), never
-/// from the label itself: a title with no descender in it has a
-/// shorter band, and measuring that would leave every tab's words at
-/// a slightly different height. egui keeps laid-out text, so the
-/// reference costs a cache lookup after the first one.
+/// The band is measured from a reference letter ([`TEXT_BAND`]), never
+/// from the label itself: a title in lower case has a shorter band,
+/// and measuring that would leave every tab's words at a slightly
+/// different height. egui keeps laid-out text, so the reference costs
+/// a cache lookup after the first one.
 fn text_top_centered(painter: &egui::Painter, font: &egui::FontId, y: f32) -> f32 {
     let reference = painter.layout_no_wrap(TEXT_BAND.to_string(), font.clone(), Color32::WHITE);
     let band = reference.rows.first().and_then(|row| {
@@ -4902,10 +4905,10 @@ mod tests {
         (top, bottom)
     }
 
-    /// A strip label is placed by the band its letters fill, not by the
-    /// box the galley reports: that box has room over the capitals and
-    /// none under the baseline, which is what left titles sitting low
-    /// beside a favicon.
+    /// A strip label is placed by the band its capitals fill: not by the
+    /// box the galley reports, which has room over the capitals and none
+    /// under the baseline and so hung titles low beside a favicon, and
+    /// not by a band with descenders in it, which lifted them.
     #[test]
     fn a_strip_label_is_centred_by_its_letters_not_by_its_box() {
         let ctx = with_fonts();
@@ -4921,36 +4924,37 @@ mod tests {
             "the band sits at {centre}, not {middle}"
         );
 
-        // The box would have hung it low; this is the fault being fixed,
-        // so it is worth holding on to the size of it.
-        let galley_box = ctx.fonts_mut(|f| {
-            f.layout_job(egui::text::LayoutJob::simple_singleline(
-                TEXT_BAND.to_string(),
-                font.clone(),
-                Color32::WHITE,
-            ))
-        });
-        let by_the_box = middle - galley_box.size().y / 2.0;
+        // A band with a descender in it (the rule before this one) would
+        // lift the words above the favicon's middle; that is the fault
+        // being fixed, so it is worth holding on to the size of it.
+        let (hg_top, hg_bottom) = ink(&ctx, &font, "Hg");
+        let by_the_descender = middle - f32::midpoint(hg_top, hg_bottom);
         assert!(
-            placed < by_the_box - 0.5,
-            "placed {placed} is no higher than the box would put it ({by_the_box})"
+            placed > by_the_descender + 0.5,
+            "placed {placed} is no lower than a band with a descender would put it ({by_the_descender})"
         );
     }
 
-    /// The reference the band is taken from has to reach both ends of
-    /// it. Cut the descender out of it and the rule quietly becomes
-    /// the old one, centring the capitals and hanging every `p` and
-    /// `g` below the favicon again.
+    /// The reference the band is taken from runs from the top of a
+    /// capital to the baseline and no further. Put a descender in it
+    /// and every title climbs a pixel or two above the favicon's
+    /// middle, since the band is centred and few letters hang below
+    /// the line.
     #[test]
-    fn the_reference_word_reaches_under_the_baseline() {
+    fn the_reference_band_stops_at_the_baseline() {
         let ctx = with_fonts();
         let font = egui::FontId::new(TAB_FONT_SIZE, FontFamily::Proportional);
         let (top, bottom) = ink(&ctx, &font, TEXT_BAND);
         let (cap_top, baseline) = ink(&ctx, &font, "H");
+        let (_, descender) = ink(&ctx, &font, "g");
         assert_eq!(top, cap_top, "{TEXT_BAND:?} has no capital in it");
+        assert_eq!(
+            bottom, baseline,
+            "{TEXT_BAND:?} reaches past the baseline: {bottom} against {baseline}"
+        );
         assert!(
-            bottom > baseline,
-            "{TEXT_BAND:?} has no descender in it: {bottom} is no lower than {baseline}"
+            descender > baseline,
+            "a descender does hang below the baseline in this font"
         );
     }
 }

@@ -1,7 +1,7 @@
 //! The winit application: owns the engine, the browser model, and the
 //! native windows, and runs the dispatch loop (see the crate docs).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -10,8 +10,9 @@ use osmena_chrome::{icon, menus, native_menu};
 use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
     Bookmarks, BookmarksFile, Brand, Browser, Command, CommandKind, DownloadPolicy, EngineAction,
-    EngineEvent, EngineInfo, ExtensionSource, InstalledExtensions, Keymap, PageCommand, Profile,
-    Session, TabId, UpdateStatus, WindowGeometry, WindowId, apply, bookmarks_html, dispatch,
+    EngineEvent, EngineInfo, ExtensionSource, InstalledExtensions, Keymap, LoadState, PageCommand,
+    Profile, Session, TabId, UpdateStatus, WindowGeometry, WindowId, apply, bookmarks_html,
+    dispatch,
 };
 use osmena_engine::{Engine, TabHost, Waker};
 use url::Url;
@@ -36,6 +37,24 @@ use crate::window::BrowserWindow;
 const HISTORY_SAVE_DELAY: Duration = Duration::from_secs(3);
 /// How long after the windows or tabs last changed the session is written.
 const SESSION_SAVE_DELAY: Duration = Duration::from_secs(2);
+/// How far apart restored tabs are warmed for their titles and favicons
+/// (`EngineAction::WarmTabs`), the first one this long after the restore.
+const WARM_SPACING: Duration = Duration::from_millis(500);
+/// How long a warm waits for the favicon once its page has loaded.
+const WARM_GRACE: Duration = Duration::from_secs(3);
+/// How long a warm may take altogether, page loaded or not.
+const WARM_LIMIT: Duration = Duration::from_secs(20);
+
+/// A restored tab loading out of sight for its title and favicon
+/// (`Command::WarmTab`); `App::tick_warms` says when it ends.
+struct Warm {
+    started: Instant,
+    /// When its page finished loading, if it has.
+    loaded: Option<Instant>,
+    /// Whether the page reported its favicon since the warm began (the
+    /// tab may have had one from disk before).
+    favicon: bool,
+}
 /// How long after the start a link the system hands over still counts as
 /// the one the browser was launched for (`App::startup_tab`).
 const LAUNCH_URL_WINDOW: Duration = Duration::from_secs(10);
@@ -116,6 +135,12 @@ pub struct App<E: Engine> {
     /// When the windows or tabs last changed without the session being
     /// written since.
     session_dirty: Option<Instant>,
+    /// Restored tabs still to warm, in strip order, and when the next
+    /// one is due (`EngineAction::WarmTabs`).
+    warm_queue: VecDeque<TabId>,
+    warm_next: Option<Instant>,
+    /// The tabs warming now.
+    warms: HashMap<TabId, Warm>,
     /// Where a window about to open goes (`EngineAction::PlaceWindow`
     /// arrives before its `OpenWindow`).
     pending_geometry: HashMap<WindowId, WindowGeometry>,
@@ -224,6 +249,9 @@ impl<E: Engine> App<E> {
             favicons,
             launch,
             session_dirty: None,
+            warm_queue: VecDeque::new(),
+            warm_next: None,
+            warms: HashMap::new(),
             pending_geometry: HashMap::new(),
             session_final: false,
             started: Instant::now(),
@@ -289,6 +317,105 @@ impl<E: Engine> App<E> {
         if let Some(w) = self.window_for_core_id(window) {
             w.bring_to_front();
         }
+    }
+
+    /// Restored tabs to warm, a moment apart, in this order. Until each
+    /// is, its favicon is the one on disk for its site, if there is one.
+    fn warm_tabs(&mut self, tabs: Vec<TabId>) {
+        let hosts: Vec<String> = tabs
+            .iter()
+            .filter_map(|tab| self.browser.tab(*tab))
+            .filter_map(|t| Bookmarks::site_key(&t.url))
+            .collect();
+        self.favicons.preload(hosts.into_iter());
+        for tab in &tabs {
+            if let Some(t) = self.browser.tab_mut(*tab)
+                && t.favicon.is_none()
+                && let Some(host) = Bookmarks::site_key(&t.url)
+                && let Some(icon) = self.favicons.icons().get(&host)
+            {
+                t.favicon = Some(icon.clone());
+            }
+        }
+        self.warm_queue.extend(tabs);
+        if self.warm_next.is_none() && !self.warm_queue.is_empty() {
+            self.warm_next = Some(Instant::now() + WARM_SPACING);
+        }
+    }
+
+    /// Start the next warm when it is due and end the ones that are
+    /// done. A warm ends once its page has loaded and reported its
+    /// favicon, a moment after loading with no favicon coming, or after
+    /// long enough whatever happened; a tab the user showed or closed in
+    /// the meantime is no longer warming and is simply forgotten.
+    /// Returns when this wants running again.
+    fn tick_warms(&mut self, event_loop: &ActiveEventLoop) -> Option<Instant> {
+        let now = Instant::now();
+        if let Some(due) = self.warm_next
+            && due <= now
+        {
+            self.warm_next = None;
+            // A tab shown or closed before its turn asks for nothing;
+            // the next one in line takes the turn.
+            while let Some(tab) = self.warm_queue.pop_front() {
+                let actions = dispatch(&mut self.browser, &Command::WarmTab(tab));
+                if actions.is_empty() {
+                    continue;
+                }
+                if let Some(t) = self.browser.tab(tab) {
+                    log::debug!("warming {tab:?} at {}", t.url);
+                }
+                self.warms.insert(
+                    tab,
+                    Warm {
+                        started: now,
+                        loaded: None,
+                        favicon: false,
+                    },
+                );
+                self.perform_all(actions, event_loop);
+                break;
+            }
+            if !self.warm_queue.is_empty() {
+                self.warm_next = Some(now + WARM_SPACING);
+            }
+        }
+        let mut next = self.warm_next;
+        let mut done = Vec::new();
+        for (tab, warm) in &self.warms {
+            let over = match self.browser.tab(*tab) {
+                Some(t) if t.warming => {
+                    let limit = warm.started + WARM_LIMIT;
+                    let deadline = warm.loaded.map_or(limit, |at| (at + WARM_GRACE).min(limit));
+                    if (warm.loaded.is_some() && warm.favicon) || deadline <= now {
+                        true
+                    } else {
+                        next = repaint::earliest(next, Some(deadline));
+                        false
+                    }
+                }
+                _ => true,
+            };
+            if over {
+                done.push(*tab);
+            }
+        }
+        for tab in done {
+            let warm = self.warms.remove(&tab);
+            if let (Some(warm), Some(t)) = (warm, self.browser.tab(tab))
+                && t.warming
+            {
+                log::debug!(
+                    "{tab:?} warmed in {:.1} s: title {:?}, favicon {}",
+                    warm.started.elapsed().as_secs_f32(),
+                    t.title,
+                    if warm.favicon { "in" } else { "not reported" }
+                );
+            }
+            let actions = dispatch(&mut self.browser, &Command::WarmDone(tab));
+            self.perform_all(actions, event_loop);
+        }
+        next
     }
 
     /// Write the session a moment from now.
@@ -861,6 +988,7 @@ impl<E: Engine> App<E> {
                     w.close_tab(tab);
                 }
             }
+            EngineAction::WarmTabs(tabs) => self.warm_tabs(tabs),
             EngineAction::FocusAddressBar(window) => {
                 if let Some(w) = self.window_for_core_id(window) {
                     w.focus_address_bar();
@@ -1293,6 +1421,23 @@ impl<E: Engine> App<E> {
                     .and_then(|t| Bookmarks::site_key(&t.url))
             {
                 self.favicons.remember(&host, favicon);
+            }
+            // What a warm waits for.
+            match &event {
+                EngineEvent::FaviconChanged { tab, .. } => {
+                    if let Some(warm) = self.warms.get_mut(tab) {
+                        warm.favicon = true;
+                    }
+                }
+                EngineEvent::LoadStateChanged {
+                    tab,
+                    state: LoadState::Complete,
+                } => {
+                    if let Some(warm) = self.warms.get_mut(tab) {
+                        warm.loaded.get_or_insert_with(Instant::now);
+                    }
+                }
+                _ => {}
             }
             if matches!(event, EngineEvent::ExtensionsChanged(_))
                 && self.browser.settings.profile.copy_extensions
@@ -1762,6 +1907,10 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
             } else {
                 next = repaint::earliest(next, Some(due));
             }
+        }
+        next = repaint::earliest(next, self.tick_warms(event_loop));
+        if self.exiting {
+            return;
         }
         for w in self.windows.values_mut() {
             next = repaint::earliest(next, w.redraw_deadline());

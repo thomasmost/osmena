@@ -6,6 +6,18 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- Restored tabs get their titles and favicons without being opened.
+  After a session restore the deferred tabs are warmed one after
+  another, half a second apart from left to right, window by window:
+  each loads in a hidden engine tab until its page has loaded and
+  reported its favicon, or a few seconds have passed without one, and
+  then the engine's tab goes while the model's stays deferred, faint,
+  with what came in, to load afresh when first shown. A warming tab
+  the user reaches first is simply shown, since the engine has it; a
+  warm is no visit in the history. Until a tab's turn comes it shows
+  the favicon on disk for its site, if there is one (`Tab::warming`,
+  `Command::WarmTab` and `WarmDone`, `EngineAction::WarmTabs`; the
+  spacing and the limits are the shell's).
 - The Launch Panel's weather tile follows this device. Opening the
   panel asks the system where it is, which is what asks the user for
   permission, names the position through BigDataCloud and fetches the
@@ -76,9 +88,13 @@ All notable changes to the osmena crates. The crates version together.
   text is laid out in. That box keeps room over the capitals for
   accents the title may not have and stops at the descenders, so
   centring it hung every title about two pixels below the middle of
-  its favicon; the words now sit on the icon's centre line, and a
-  title with no `p` or `g` in it is not lifted above its neighbours
-  (the band is measured from a reference word, not from the title).
+  its favicon. The band runs from the top of a capital to the
+  baseline, so the body of the words sits on the icon's centre line
+  and descenders hang under it as on a page (a band that counted the
+  descenders in lifted every title a pixel or two above the middle,
+  since few letters reach below the line); it is measured from a
+  reference letter, not from the title, so a title in lower case is
+  placed no differently from its neighbours.
 - Tabs lay out by Chromium's rules as they narrow (`tab_layout`): the
   active tab keeps its close control first and its icon second, an
   inactive tab keeps its icon (centred when nothing else fits) and

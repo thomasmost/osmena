@@ -206,9 +206,11 @@ The engine contract, in `osmena-engine`:
   (their place on screen, their order, folders, the active tab, the
   closed-tab list). With "Continue where you left off" in Settings
   (`restore_windows_on_launch`), the next start opens them again where
-  they were: each window's active tab loads, the others wait, drawn
-  faint, until first shown; a URL on the command line opens as a tab in
-  the last window. "Restart to update" comes back the same way whatever
+  they were: each window's active tab loads; the others wait, drawn
+  faint, until first shown, but are warmed one after another half a
+  second apart (each loaded out of sight for its title and favicon,
+  then let go); a URL on the command line opens as a tab in the last
+  window. "Restart to update" comes back the same way whatever
   the setting says (`--restore`). After a crash (the profile's claim
   names no live process), a bar under the toolbar offers the last
   session: Restore brings it back and closes the home-page window,

@@ -5,7 +5,9 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-11-06 (the weather tile follows this device, asking
+_Last updated: 2026-11-06 (restored tabs warmed one by one for their
+titles and favicons, tab titles centred by their capitals; before that
+the weather tile follows this device, asking
 the system for the location, with Fahrenheit and Celsius a row of their
 own in the Launch Settings and the units following the system's locale
 or, failing that, the country the tile is showing; before that the strip on the pixel grid,
@@ -421,6 +423,33 @@ No engine is needed; the workspace builds in under a minute.
 - Commit to `main` unless asked for a branch. Conventional Commits.
 - The browsers' own docs (`README.md`, `CLAUDE.md`) describe what each one
   adds; the shared behaviour is documented here only.
+
+## Status and handoff (2026-11-06, evening)
+
+Restored tabs are warmed: after a session restore the deferred tabs
+load one after another in hidden engine tabs, half a second apart in
+strip order, each let go once its page has loaded and reported its
+favicon (`App::tick_warms` in osmena-shell; `WARM_SPACING` 500 ms,
+`WARM_GRACE` 3 s after the load with no favicon, `WARM_LIMIT` 20 s).
+The model side is `Tab::warming`, only ever set with `deferred`:
+`show_tab` shows rather than creates a warming tab, `close_tab` and
+`close_window` close its engine tab, `apply` counts a warming tab's
+load as no visit and ends the warm on `TabClosed` or `TabCrashed`
+(`command::end_warm`). Before its turn a restored tab shows the icon
+on disk for its site (`App::warm_tabs`). Verified with the debug
+Nautilus on a six-tab session: the five warms started 0.5 s apart,
+four ended in under a second with title and favicon, example.com (no
+favicon) after the 3 s grace, and the strip showed every icon; the
+run wrote the five icons to the profile's `favicons/`. Paladin was
+not run; its `close_tab` unregisters the webview before Servo
+reports it closed, so no `TabClosed` echoes back either.
+
+Tab titles centre by the band from a capital's top to the baseline
+(`TEXT_BAND` is "H", not "Hg"): with descenders counted in, the
+capitals sat a pixel or two above the favicon's middle. Measured off
+a capture of the same build: capitals on rows 19–27 against a 16-px
+favicon on 15–30, half a pixel below its centre, which is as close
+as an 8-px cap height gets.
 
 ## Status and handoff (2026-11-06, later still)
 
