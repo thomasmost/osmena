@@ -420,7 +420,10 @@ impl Settings {
             chrome_color: brand.chrome_color,
             ..Settings::default()
         };
-        settings.launch.weather.units = Units::for_locale(system_locale().as_deref());
+        // A locale that names no country ("C", "en") leaves this
+        // unset, and the weather tile takes the units from wherever it
+        // turns out to be.
+        settings.launch.weather.units = system_locale().as_deref().and_then(Units::for_locale);
         settings
     }
 
@@ -665,7 +668,7 @@ mod tests {
         set_system_locale("en-US");
         assert_eq!(
             Settings::for_brand(&BRAND).launch.weather.units,
-            Units::Fahrenheit
+            Some(Units::Fahrenheit)
         );
     }
 

@@ -75,6 +75,10 @@ pub enum Units {
     Celsius,
 }
 
+/// The countries that measure temperature in Fahrenheit, as ISO 3166-1
+/// alpha-2 codes. Everywhere else is Celsius.
+const FAHRENHEIT_COUNTRIES: [&str; 8] = ["US", "BS", "BZ", "KY", "PW", "LR", "FM", "MH"];
+
 impl Units {
     pub fn symbol(self) -> &'static str {
         match self {
@@ -83,35 +87,46 @@ impl Units {
         }
     }
 
-    /// What a fresh profile gets: Fahrenheit where the system locale is
-    /// one of the few countries that use it, Celsius elsewhere. The
-    /// locale is read from the environment the way the shell sees it.
-    pub fn for_locale(locale: Option<&str>) -> Units {
-        let Some(locale) = locale else {
-            return Units::Celsius;
-        };
+    /// How a country measures temperature (ISO 3166-1 alpha-2, in
+    /// either case). An unknown code is Celsius, which all but a
+    /// handful of countries use.
+    pub fn for_country(code: &str) -> Units {
+        if FAHRENHEIT_COUNTRIES.contains(&code.trim().to_ascii_uppercase().as_str()) {
+            Units::Fahrenheit
+        } else {
+            Units::Celsius
+        }
+    }
+
+    /// How a system locale measures temperature, or `None` when the
+    /// locale names no country ("C", "en") and so says nothing about
+    /// it. The locale is whatever the shell read from the system
+    /// ("en-US", "fr_FR.UTF-8").
+    pub fn for_locale(locale: &str) -> Option<Units> {
         let upper = locale.to_ascii_uppercase();
         // The region is the first two-letter part after the language
         // ("en_US.UTF-8", "en-GB", "fr_FR").
-        let region = upper
+        upper
             .split(|c: char| !c.is_ascii_alphanumeric())
             .skip(1)
-            .find(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_uppercase()));
-        match region {
-            Some("US") | Some("BS") | Some("BZ") | Some("KY") | Some("PW") | Some("LR")
-            | Some("FM") | Some("MH") => Units::Fahrenheit,
-            _ => Units::Celsius,
-        }
+            .find(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_uppercase()))
+            .map(Units::for_country)
     }
 }
 
-/// A place the weather is asked for: a name to show and the coordinates
-/// the provider takes.
+/// A place the weather is asked for: a name to show, the coordinates
+/// the provider takes, and the country it is in, which decides the
+/// units when nothing else has.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Place {
     pub name: String,
     pub latitude: f64,
     pub longitude: f64,
+    /// ISO 3166-1 alpha-2, as the provider gave it. `None` when the
+    /// provider did not say, or when the place was saved by a version
+    /// that did not ask.
+    #[serde(default)]
+    pub country: Option<String>,
 }
 
 /// Coordinates are never NaN (they come from a provider's JSON numbers),
@@ -126,7 +141,34 @@ impl Eq for Place {}
 #[serde(default)]
 pub struct WeatherSettings {
     pub location: Option<Place>,
-    pub units: Units,
+    /// Fahrenheit or Celsius, once anyone has said. `None` means
+    /// nobody has: neither the user in the Launch Settings nor the
+    /// system's locale when the profile was made, so the units follow
+    /// the place the tile is showing ([`WeatherSettings::units`]).
+    pub units: Option<Units>,
+}
+
+impl WeatherSettings {
+    /// What temperatures read in: the choice if there is one, or how
+    /// the country of the place the tile is showing measures, or
+    /// Celsius.
+    ///
+    /// The fall-back matters where the system has no locale to read
+    /// (a Mac app bundle, some Linux sessions): a device that turns
+    /// out to be in the United States reads Fahrenheit without anyone
+    /// having to say so. It is a fall-back, not a correction: a user
+    /// who picked Celsius in Denver keeps Celsius.
+    pub fn units(&self, located: &Fetched<Place>) -> Units {
+        if let Some(units) = self.units {
+            return units;
+        }
+        self.location
+            .as_ref()
+            .or_else(|| located.value())
+            .and_then(|place| place.country.as_deref())
+            .map(Units::for_country)
+            .unwrap_or_default()
+    }
 }
 
 /// `[launch]` in `settings.toml`: which widgets, in what order, and what
@@ -643,8 +685,9 @@ mod tests {
             name: "Seattle".into(),
             latitude: 47.6,
             longitude: -122.3,
+            country: Some("US".into()),
         });
-        s.weather.units = Units::Fahrenheit;
+        s.weather.units = Some(Units::Fahrenheit);
         s.remove_widget(WidgetKind::AskChatGpt);
         s.hide_site("news.example");
         let text = toml::to_string(&s).unwrap();
@@ -782,9 +825,10 @@ mod tests {
     #[test]
     fn a_located_device_carries_its_forecast_with_it() {
         let here = Place {
-            name: "Seattle, Washington, United States".into(),
+            name: "Seattle, Washington".into(),
             latitude: 47.6,
             longitude: -122.3,
+            country: Some("US".into()),
         };
         let mut d = LaunchData::default();
         d.apply(LaunchUpdate::Location(Ok(here.clone())), 40);
@@ -812,10 +856,47 @@ mod tests {
 
     #[test]
     fn units_follow_the_locale_region() {
-        assert_eq!(Units::for_locale(Some("en_US.UTF-8")), Units::Fahrenheit);
-        assert_eq!(Units::for_locale(Some("en-GB")), Units::Celsius);
-        assert_eq!(Units::for_locale(Some("fr_FR")), Units::Celsius);
-        assert_eq!(Units::for_locale(Some("C")), Units::Celsius);
-        assert_eq!(Units::for_locale(None), Units::Celsius);
+        assert_eq!(Units::for_locale("en_US.UTF-8"), Some(Units::Fahrenheit));
+        assert_eq!(Units::for_locale("en-GB"), Some(Units::Celsius));
+        assert_eq!(Units::for_locale("fr_FR"), Some(Units::Celsius));
+        // A locale that names no country says nothing about units, so
+        // the place the tile is showing gets to.
+        assert_eq!(Units::for_locale("C"), None);
+        assert_eq!(Units::for_locale("en"), None);
+        assert_eq!(Units::for_country("us"), Units::Fahrenheit);
+        assert_eq!(Units::for_country("DE"), Units::Celsius);
+        assert_eq!(Units::for_country(""), Units::Celsius);
+    }
+
+    /// Nobody having chosen, the units follow the country of whatever
+    /// the tile is showing: the place the user named, or failing that
+    /// where the system says the device is. A choice stands wherever
+    /// the device goes.
+    #[test]
+    fn unchosen_units_follow_the_place_on_show() {
+        let place = |country: Option<&str>| Place {
+            name: "Somewhere".into(),
+            latitude: 0.0,
+            longitude: 0.0,
+            country: country.map(str::to_string),
+        };
+        let mut s = WeatherSettings::default();
+        // Nothing known at all.
+        assert_eq!(s.units(&Fetched::Empty), Units::Celsius);
+        // Where the device turned out to be.
+        let in_the_states = Fetched::Ready {
+            value: place(Some("US")),
+            at: 0,
+        };
+        assert_eq!(s.units(&in_the_states), Units::Fahrenheit);
+        // A place the user named outranks the device's own country.
+        s.location = Some(place(Some("DE")));
+        assert_eq!(s.units(&in_the_states), Units::Celsius);
+        // A place saved before countries were asked for says nothing.
+        s.location = Some(place(None));
+        assert_eq!(s.units(&in_the_states), Units::Celsius);
+        // A choice is a choice.
+        s.units = Some(Units::Fahrenheit);
+        assert_eq!(s.units(&Fetched::Empty), Units::Fahrenheit);
     }
 }

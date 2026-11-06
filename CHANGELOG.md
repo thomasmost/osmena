@@ -22,13 +22,23 @@ All notable changes to the osmena crates. The crates version together.
   Settings, labelled "Temperature" and named in words, where they were
   two bare degree signs tucked under the weather place and read as a
   caption rather than a control.
+- With nobody having chosen units — no country in the system's locale
+  when the profile was made, and no visit to the Launch Settings — the
+  weather tile measures the way the country it is showing does. A
+  device that turns out to be in the United States reads Fahrenheit
+  without anyone saying so, and a place named in France reads Celsius.
+  `WeatherSettings::units` is an `Option<Units>` now, `None` meaning
+  nobody has said; `WeatherSettings::units(&located)` resolves it, and
+  `Place` carries the country it is in (`Units::for_country`). A
+  choice, once made, stands wherever the device goes.
 
 ### Fixed
 
 - A fresh profile on Windows always measured in Celsius. The units
   follow the system's locale, which osmena read from `LC_ALL`,
   `LC_MESSAGES` and `LANG`: Windows sets none of them, so every new
-  profile fell through to the default. The shell now asks the system
+  profile fell through to the default. (A system with no locale at all
+  now falls back to the country instead, above.) The shell now asks the system
   (`GetUserDefaultLocaleName`) and tells the model through
   `settings::set_system_locale` before a profile is loaded. A profile
   that already has a settings file keeps its answer, and the Launch

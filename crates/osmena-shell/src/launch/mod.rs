@@ -150,7 +150,7 @@ impl LaunchFetcher {
     /// is (which asks the user the first time), name the position, and
     /// go straight on to its forecast, so one opening of the panel
     /// costs the user one wait rather than two.
-    pub fn fetch_location(&self, units: Units) {
+    pub fn fetch_location(&self, units: Option<Units>) {
         self.spawn("location", move |f| {
             let (latitude, longitude) = match location::current() {
                 Ok(position) => position,
@@ -160,7 +160,7 @@ impl LaunchFetcher {
                     return;
                 }
             };
-            let name = get_text(
+            let position = get_text(
                 &f.agent(),
                 &weather::reverse_geocode_url(latitude, longitude),
                 None,
@@ -168,13 +168,23 @@ impl LaunchFetcher {
             )
             .ok()
             .as_deref()
-            .and_then(weather::parse_reverse_place)
-            .unwrap_or_else(|| weather::HERE.to_string());
+            .map(weather::parse_reverse)
+            .unwrap_or_default();
             let place = Place {
-                name,
+                name: position.name.unwrap_or_else(|| weather::HERE.to_string()),
                 latitude,
                 longitude,
+                country: position.country,
             };
+            // With no units chosen, the country this fix landed in
+            // decides them, and the model has not seen it yet.
+            let units = units.unwrap_or_else(|| {
+                place
+                    .country
+                    .as_deref()
+                    .map(Units::for_country)
+                    .unwrap_or_default()
+            });
             f.report(LaunchUpdate::Location(Ok(place.clone())));
             let result = get_text(
                 &f.agent(),

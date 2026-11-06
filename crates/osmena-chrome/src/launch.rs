@@ -1551,7 +1551,12 @@ fn settings_view(
             // field read as a caption rather than as a control.
             ui.label("Temperature");
             ui.vertical(|ui| {
-                let units = context.launch_settings.weather.units;
+                // The resolved units, so the lit chip is what the
+                // tile is showing even when nobody has chosen.
+                let units = context
+                    .launch_settings
+                    .weather
+                    .units(&context.launch.located);
                 ui.horizontal_wrapped(|ui| {
                     for (choice, label) in [
                         (Units::Fahrenheit, "Fahrenheit (°F)"),

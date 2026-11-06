@@ -58,6 +58,8 @@ struct GeocodeResult {
     admin1: Option<String>,
     #[serde(default)]
     country: Option<String>,
+    #[serde(default)]
+    country_code: Option<String>,
 }
 
 /// The places in a geocoder answer, named "City, Region, Country" with
@@ -79,6 +81,7 @@ pub fn parse_places(json: &str) -> Result<Vec<Place>, String> {
                 name: parts.join(", "),
                 latitude: r.latitude,
                 longitude: r.longitude,
+                country: r.country_code,
             }
         })
         .collect())
@@ -100,15 +103,34 @@ struct ReverseResponse {
     principal_subdivision: Option<String>,
     #[serde(default)]
     country_name: Option<String>,
+    #[serde(default)]
+    country_code: Option<String>,
 }
 
-/// The name in a reverse-geocoding answer: "City, Region", repeats
-/// dropped. Unlike a searched place this leaves the country out, since
-/// it is the country the user is standing in and the tile has room for
-/// a line rather than three. `None` when the answer names nowhere: out
+/// What a position turned out to be: what to call it, and the country
+/// it is in (ISO 3166-1 alpha-2), either of which the service may not
+/// give.
+#[derive(Debug, Default, PartialEq)]
+pub struct Position {
+    pub name: Option<String>,
+    pub country: Option<String>,
+}
+
+/// A reverse-geocoding answer: the name is "City, Region", repeats
+/// dropped. Unlike a searched place the name leaves the country out,
+/// since it is the country the user is standing in and the tile has
+/// room for a line rather than three; the country rides along as a
+/// code instead, which is what decides the units when nobody has
+/// chosen any. The name is `None` when the answer names nowhere: out
 /// at sea, or a service having a bad day; the caller shows [`HERE`].
-pub fn parse_reverse_place(json: &str) -> Option<String> {
-    let response: ReverseResponse = serde_json::from_str(json).ok()?;
+pub fn parse_reverse(json: &str) -> Position {
+    let Ok(response) = serde_json::from_str::<ReverseResponse>(json) else {
+        return Position::default();
+    };
+    let country = response
+        .country_code
+        .map(|c| c.trim().to_ascii_uppercase())
+        .filter(|c| c.len() == 2);
     // `city` is empty outside towns, where `locality` still names the
     // district or the municipality.
     let town = [response.city, response.locality]
@@ -128,7 +150,10 @@ pub fn parse_reverse_place(json: &str) -> Option<String> {
     }
     // The country is the fallback only when nothing closer was named.
     parts.truncate(2);
-    (!parts.is_empty()).then(|| parts.join(", "))
+    Position {
+        name: (!parts.is_empty()).then(|| parts.join(", ")),
+        country,
+    }
 }
 
 #[derive(Deserialize)]
@@ -207,6 +232,7 @@ mod tests {
                 name: "Seattle".into(),
                 latitude: 47.60621,
                 longitude: -122.33207,
+                country: Some("US".into()),
             },
             Units::Fahrenheit,
         );
@@ -223,7 +249,11 @@ mod tests {
         assert_eq!(places.len(), 3);
         assert_eq!(places[0].name, "Seattle, Washington, United States");
         assert_eq!(places[0].latitude, 47.60621);
+        // The country code rides along: with no units chosen, it is
+        // what decides them.
+        assert_eq!(places[0].country.as_deref(), Some("US"));
         assert_eq!(places[1].name, "Singapore");
+        assert_eq!(places[1].country, None);
         assert_eq!(places[2].name, "Nowhere");
         // No match: an answer without `results`.
         assert!(
@@ -240,6 +270,7 @@ mod tests {
             name: "Seattle, Washington, United States".into(),
             latitude: 47.6,
             longitude: -122.3,
+            country: Some("US".into()),
         };
         let report = parse_forecast(FORECAST, &place, Units::Fahrenheit).unwrap();
         assert_eq!(report.place, place.name);
@@ -257,29 +288,29 @@ mod tests {
     }
 
     #[test]
-    fn a_position_is_named_like_a_searched_place() {
+    fn a_position_is_named_like_a_searched_place_and_says_its_country() {
         let answer = r#"{"latitude":47.6,"longitude":-122.33,"continent":"North America",
-            "countryName":"United States","principalSubdivision":"Washington",
+            "countryName":"United States","countryCode":"US",
+            "principalSubdivision":"Washington",
             "city":"Seattle","locality":"Belltown","postcode":"98121"}"#;
-        assert_eq!(
-            parse_reverse_place(answer).as_deref(),
-            Some("Seattle, Washington")
-        );
+        let position = parse_reverse(answer);
+        assert_eq!(position.name.as_deref(), Some("Seattle, Washington"));
+        assert_eq!(position.country.as_deref(), Some("US"));
         // No city: the locality names the place, and a region equal to
         // the country is not repeated.
-        let city_state = r#"{"city":"","locality":"Singapore",
+        let city_state = r#"{"city":"","locality":"Singapore","countryCode":"sg",
             "principalSubdivision":"Singapore","countryName":"Singapore"}"#;
-        assert_eq!(
-            parse_reverse_place(city_state).as_deref(),
-            Some("Singapore")
-        );
+        let position = parse_reverse(city_state);
+        assert_eq!(position.name.as_deref(), Some("Singapore"));
+        assert_eq!(position.country.as_deref(), Some("SG"));
         // Nothing nearer than the country: the country alone.
         let at_sea = r#"{"city":"","locality":"","principalSubdivision":"",
             "countryName":"Norway"}"#;
-        assert_eq!(parse_reverse_place(at_sea).as_deref(), Some("Norway"));
+        assert_eq!(parse_reverse(at_sea).name.as_deref(), Some("Norway"));
+        assert_eq!(parse_reverse(at_sea).country, None);
         // Nowhere, and nonsense: the caller says "Current location".
-        assert_eq!(parse_reverse_place(r#"{"latitude":0.0}"#), None);
-        assert_eq!(parse_reverse_place("not json"), None);
+        assert_eq!(parse_reverse(r#"{"latitude":0.0}"#), Position::default());
+        assert_eq!(parse_reverse("not json"), Position::default());
         assert!(
             reverse_geocode_url(47.60621, -122.33207)
                 .starts_with("https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=47.6062&longitude=-122.3321")

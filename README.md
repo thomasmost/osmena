@@ -142,7 +142,8 @@ The engine contract, in `osmena-engine`:
   Settings in the panel: the search engine as presets or a custom
   template (the same setting the address bar uses), the two question
   templates, the weather location and whether temperatures read in
-  Fahrenheit or Celsius, the Google account, and the tiles in edit mode, dragged to reorder and closed to remove, with
+  Fahrenheit or Celsius (unchosen, they follow the country the tile is
+  showing), the Google account, and the tiles in edit mode, dragged to reorder and closed to remove, with
   "Restore default widgets". The same matches drop down under the
   address bar of an existing tab as you type. The history
   (`history.toml` in the profile) keeps every page that finished

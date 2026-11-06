@@ -7,8 +7,8 @@ git revision. `README.md` has the crate table and the engine contract.
 
 _Last updated: 2026-11-06 (the weather tile follows this device, asking
 the system for the location, with Fahrenheit and Celsius a row of their
-own in the Launch Settings and a fresh profile's units following the
-system's locale; before that the strip on the pixel grid,
+own in the Launch Settings and the units following the system's locale
+or, failing that, the country the tile is showing; before that the strip on the pixel grid,
 icons fitted to their pixels, Chromium's order as tabs narrow, the
 active tab open into the toolbar; earlier that day the Profiles menu shaped like Chromium's,
 guest profiles and the Manage Profiles dialog; before that the default
@@ -249,10 +249,23 @@ No engine is needed; the workspace builds in under a minute.
   that, `LC_ALL`/`LC_MESSAGES`/`LANG`. The environment covers Linux
   and a Mac started from a terminal; Windows keeps its locale nowhere
   an environment variable can see it, so `osmena-shell`'s `locale.rs`
-  asks `GetUserDefaultLocaleName`. So far it decides one thing, the
-  weather tile's units, and only for a profile with no settings file
-  yet. A Mac app bundle started from the Dock has no locale in its
-  environment either and would need `NSLocale`.
+  asks `GetUserDefaultLocaleName`. A Mac app bundle started from the
+  Dock has no locale in its environment either and would need
+  `NSLocale`. So far it decides one thing, the weather tile's units,
+  and only for a profile with no settings file yet.
+- **Units nobody has chosen follow the country on show.**
+  `WeatherSettings::units` is an `Option<Units>`: `None` means neither
+  the user nor the locale has said. `WeatherSettings::units(&located)`
+  resolves it from the country of the place the tile is showing (the
+  named place first, then the device's own fix), through
+  `Units::for_country`, and Celsius when nothing is known. `Place`
+  carries that country as an ISO code, from either provider. The one
+  wrinkle is ordering: when the device's location is still being
+  asked for, nobody knows the country yet, so `EngineAction::
+  FetchLocation` carries the *stored* `Option<Units>` and the
+  fetcher — which learns the country first — resolves it with the same
+  core function. A choice stands wherever the device goes; following
+  does not.
 - **A profile is a directory; its face is in its settings.** The
   directory name is the identity (`--profile <dir>`, `Profile::name`);
   the display name, avatar and colour live in that profile's
@@ -396,6 +409,18 @@ No engine is needed; the workspace builds in under a minute.
 - Commit to `main` unless asked for a branch. Conventional Commits.
 - The browsers' own docs (`README.md`, `CLAUDE.md`) describe what each one
   adds; the shared behaviour is documented here only.
+
+## Status and handoff (2026-11-06, later still)
+
+Units nobody has chosen follow the country the tile is showing (see
+Conventions), which is what covers a system with no locale to read:
+macOS from the Dock, some Linux sessions. Verified on Windows by
+driving the debug Nautilus against a profile whose `settings.toml`
+names no units: the forecast went out as `temperature_unit=fahrenheit`
+with nothing stored, the tile drew 67°F in New York, the Launch
+Settings lit "Fahrenheit (°F)", and nothing was written to the file.
+Not verified by hand: a device in a Celsius country (the resolution
+is unit-tested both ways), and the named-place branch end to end.
 
 ## Status and handoff (2026-11-06, later)
 

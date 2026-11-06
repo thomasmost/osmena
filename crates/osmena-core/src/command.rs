@@ -736,14 +736,18 @@ pub enum EngineAction {
     /// Find places named this for the weather tile; answered with
     /// `LaunchUpdate::Places`.
     LookUpPlace(String),
-    /// Fetch today's weather at `place`; answered with
-    /// `LaunchUpdate::Weather`.
     /// Ask the system where this device is, which asks the user for
     /// permission the first time. The answer is a `LaunchUpdate::
-    /// Location`, and the forecast for it follows in `units`.
+    /// Location`, and the forecast for it follows.
     FetchLocation {
-        units: Units,
+        /// The units to ask the forecast in, or `None` when nobody has
+        /// chosen any: the fetcher then takes them from the country
+        /// the fix lands in (`Units::for_country`), which it learns
+        /// before the model does.
+        units: Option<Units>,
     },
+    /// Fetch today's weather at `place`; answered with
+    /// `LaunchUpdate::Weather`.
     FetchWeather {
         place: Place,
         units: Units,
@@ -1512,10 +1516,21 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             actions
         }
         Command::SetWeatherUnits(units) => {
-            if browser.settings.launch.weather.units == *units {
+            if browser.settings.launch.weather.units == Some(*units) {
                 return Vec::new();
             }
-            browser.settings.launch.weather.units = *units;
+            // Choosing what was being followed anyway is still a
+            // choice: it stops the tile changing units when the device
+            // moves.
+            let followed = browser
+                .settings
+                .launch
+                .weather
+                .units(&browser.launch.located);
+            browser.settings.launch.weather.units = Some(*units);
+            if followed == *units {
+                return vec![EngineAction::SaveSettings];
+            }
             browser.launch.weather = Fetched::Empty;
             let mut actions = vec![EngineAction::SaveSettings];
             actions.extend(launch_fetches(browser, true));
@@ -2337,7 +2352,7 @@ fn launch_fetches(browser: &mut Browser, force: bool) -> Vec<EngineAction> {
     let settings = &browser.settings.launch;
     let shown = |kind: WidgetKind| settings.widgets.contains(&kind);
     if shown(WidgetKind::Weather) {
-        let units = settings.weather.units;
+        let units = settings.weather.units(&browser.launch.located);
         let chosen = settings.weather.location.clone();
         let report_wanted = browser.launch.weather != Fetched::Loading
             && (force || browser.launch.weather.is_stale(now, WEATHER_LIFETIME));
@@ -2364,7 +2379,13 @@ fn launch_fetches(browser: &mut Browser, force: bool) -> Vec<EngineAction> {
                     Fetched::Ready { at, .. } => now.saturating_sub(*at) >= LOCATION_LIFETIME,
                 };
                 if relocate {
-                    actions.push(EngineAction::FetchLocation { units });
+                    // The stored choice, not the resolved units: with
+                    // none stored and nowhere known yet, the country
+                    // the fix lands in is the first word on the
+                    // matter, and only the fetcher will know it.
+                    actions.push(EngineAction::FetchLocation {
+                        units: settings.weather.units,
+                    });
                     browser.launch.located = Fetched::Loading;
                 } else if report_wanted && let Some(place) = browser.launch.located.value().cloned()
                 {
@@ -2572,9 +2593,7 @@ mod tests {
             actions,
             vec![
                 EngineAction::ShowLauncher { window },
-                EngineAction::FetchLocation {
-                    units: Units::Celsius
-                }
+                EngineAction::FetchLocation { units: None }
             ]
         );
         assert_eq!(b.window(window).unwrap().tabs.len(), 1);
@@ -4871,11 +4890,15 @@ mod tests {
         assert_eq!(next_color(ChromeColor::Peach), ChromeColor::Shell);
     }
 
+    /// A place with no country, as one saved before countries were
+    /// asked for: these tests are about what is fetched, not about
+    /// which units a country implies.
     fn seattle() -> Place {
         Place {
             name: "Seattle".to_string(),
             latitude: 47.6,
             longitude: -122.3,
+            country: None,
         }
     }
 
@@ -5000,9 +5023,7 @@ mod tests {
             dispatch(&mut b, &open),
             vec![
                 EngineAction::ShowLauncher { window },
-                EngineAction::FetchLocation {
-                    units: Units::Celsius
-                }
+                EngineAction::FetchLocation { units: None }
             ]
         );
         assert_eq!(b.launch.located, Fetched::Loading);
@@ -5106,11 +5127,72 @@ mod tests {
             vec![
                 EngineAction::SaveSettings,
                 EngineAction::FetchLocation {
-                    units: Units::Fahrenheit
+                    units: Some(Units::Fahrenheit)
                 }
             ]
         );
         assert_eq!(b.launch.weather, Fetched::Empty);
+    }
+
+    /// Nobody having chosen units — no country in the locale when the
+    /// profile was made, and no visit to the Launch Settings — the
+    /// country the tile is showing decides them. The fetcher is asked
+    /// for a location with no units at all, because the country it
+    /// lands in is news to the model too.
+    #[test]
+    fn the_units_follow_the_country_until_someone_chooses() {
+        let (mut b, _, _) = one_window();
+        let now = unix_now();
+        assert_eq!(b.settings.launch.weather.units, None);
+        assert_eq!(
+            dispatch(&mut b, &Command::RefreshLaunch),
+            vec![EngineAction::FetchLocation { units: None }]
+        );
+        // The fix landed in the United States, so the forecasts that
+        // follow are in Fahrenheit without anyone saying so.
+        let denver = Place {
+            name: "Denver, Colorado".into(),
+            latitude: 39.74,
+            longitude: -104.98,
+            country: Some("US".into()),
+        };
+        b.launch.located = Fetched::Ready {
+            value: denver.clone(),
+            at: now,
+        };
+        b.launch.weather = Fetched::Empty;
+        assert_eq!(
+            dispatch(&mut b, &Command::RefreshLaunch),
+            vec![EngineAction::FetchWeather {
+                place: denver.clone(),
+                units: Units::Fahrenheit
+            }]
+        );
+        // Choosing what was being followed anyway changes no fetch,
+        // but it is still a choice: it is saved, and it stands when
+        // the device moves to a country that measures differently.
+        assert_eq!(
+            dispatch(&mut b, &Command::SetWeatherUnits(Units::Fahrenheit)),
+            vec![EngineAction::SaveSettings]
+        );
+        assert_eq!(
+            b.settings.launch.weather.units,
+            Some(Units::Fahrenheit),
+            "the choice is stored"
+        );
+        b.launch.located = Fetched::Ready {
+            value: Place {
+                name: "Berlin".into(),
+                latitude: 52.52,
+                longitude: 13.4,
+                country: Some("DE".into()),
+            },
+            at: now,
+        };
+        assert_eq!(
+            b.settings.launch.weather.units(&b.launch.located),
+            Units::Fahrenheit
+        );
     }
 
     /// With no place named, the tile follows the device: the system is
@@ -5125,13 +5207,12 @@ mod tests {
             name: "Current location".into(),
             latitude: 47.6,
             longitude: -122.3,
+            country: None,
         };
         // Nothing known: ask the system, and not twice over.
         assert_eq!(
             dispatch(&mut b, &Command::RefreshLaunch),
-            vec![EngineAction::FetchLocation {
-                units: Units::Celsius
-            }]
+            vec![EngineAction::FetchLocation { units: None }]
         );
         assert!(dispatch(&mut b, &Command::RefreshLaunch).is_empty());
         // The answer arrived: its forecast is what the tile asks for,
@@ -5157,9 +5238,7 @@ mod tests {
         assert!(launch_fetches(&mut b, false).is_empty());
         assert_eq!(
             dispatch(&mut b, &Command::RefreshLaunch),
-            vec![EngineAction::FetchLocation {
-                units: Units::Celsius
-            }]
+            vec![EngineAction::FetchLocation { units: None }]
         );
         // A fix older than its lifetime is asked for afresh.
         b.launch.located = Fetched::Ready {
@@ -5168,9 +5247,7 @@ mod tests {
         };
         assert_eq!(
             launch_fetches(&mut b, false),
-            vec![EngineAction::FetchLocation {
-                units: Units::Celsius
-            }]
+            vec![EngineAction::FetchLocation { units: None }]
         );
     }
 
