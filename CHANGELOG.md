@@ -216,6 +216,16 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- Tabs, after Chromium's: the active tab's body is rounded at the top
+  and flares out at the bottom through concave quarter circles into a
+  new one-pixel edge along the strip's bottom (`Palette::strip_edge`),
+  in the toolbar's fill with a one-pixel outline that the edge
+  continues on either side, painted over its neighbours
+  (`active_tab_body`; a collapsed folder chip holding the active tab
+  takes the same shape). Tab titles and folder names are a little
+  smaller (12.5 px, `TAB_FONT_SIZE`) and dark on every swatch
+  (`Palette::tab_text`; light in dark mode), where they used to be
+  white on a dark swatch.
 - The "☰" window menu button moved from the tab strip's right end to
   the toolbar's, right of the profile avatar, drawn as three strokes
   (`menu_button`) like the window controls. The strip's right end now

@@ -41,6 +41,8 @@ const TAB_MIN_WIDTH: f32 = 64.0;
 const TAB_CLOSE_MIN_WIDTH: f32 = 110.0;
 const TAB_PADDING_X: f32 = 12.0;
 const TAB_CORNER: u8 = theme::CORNER;
+/// The tab titles' font: a little under the body text.
+const TAB_FONT_SIZE: f32 = 12.5;
 const CLOSE_SIZE: f32 = 18.0;
 /// The "+" button on the strip.
 const MENU_WIDTH: f32 = 28.0;
@@ -102,16 +104,24 @@ const UPDATE_PILL_HOVER: Color32 = Color32::from_rgb(42, 134, 88);
 
 /// The shades the chrome paints with, all derived from the profile's
 /// [`ChromeColor`]: the tab strip is the swatch at its top and fades to
-/// the toolbar's fill at its bottom edge ([`Palette::strip_at`]), tabs
+/// the toolbar's fill at its bottom edge ([`Palette::strip_at`]), where
+/// a one-pixel edge (`strip_edge`) separates it from the toolbar; tabs
 /// are veils of white (or black, on a light swatch) over it, and the
 /// active tab shares the toolbar's fill, which is the swatch washed most
-/// of the way to the page background, so it reads as attached to the
-/// page with no edge between strip and toolbar.
+/// of the way to the page background, and flares out over that edge
+/// ([`active_tab_body`]), so it reads as part of the toolbar. Tab titles
+/// are dark (`tab_text`) whatever the swatch; the strip's other glyphs
+/// pick `text_on_strip` by the swatch's luminance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palette {
     pub strip: Color32,
     pub toolbar: Color32,
     pub text_on_strip: Color32,
+    /// Tab titles and folder names, on any tab.
+    pub tab_text: Color32,
+    /// The one-pixel line along the strip's bottom edge, which the
+    /// active tab's outline continues.
+    pub strip_edge: Color32,
     pub tab_idle: Color32,
     pub tab_hover: Color32,
     pub tab_selected: Color32,
@@ -142,6 +152,18 @@ impl Palette {
             } else {
                 Color32::WHITE
             },
+            // The edge sits where the strip has faded to the toolbar's
+            // fill, so it contrasts with that, not with the swatch.
+            tab_text: if dark_mode {
+                Color32::from_gray(230)
+            } else {
+                Color32::from_gray(24)
+            },
+            strip_edge: if dark_mode {
+                Color32::from_white_alpha(56)
+            } else {
+                Color32::from_black_alpha(48)
+            },
             tab_idle: veil_alpha(26),
             tab_hover: veil_alpha(56),
             tab_selected: veil_alpha(96),
@@ -163,7 +185,8 @@ impl Palette {
 /// The strip's background: `rect` filled with [`Palette::strip_at`] from
 /// top to bottom, as a mesh of horizontal bands whose vertex colours
 /// egui interpolates (the bands keep the quadratic ease from flattening
-/// into one linear ramp).
+/// into one linear ramp), and the one-pixel edge along its bottom,
+/// which the active tab's body covers and whose outline continues it.
 fn strip_background(rect: Rect, palette: &Palette) -> egui::Shape {
     const BANDS: u32 = 8;
     let mut mesh = egui::Mesh::default();
@@ -181,7 +204,88 @@ fn strip_background(rect: Rect, palette: &Palette) -> egui::Shape {
         mesh.add_triangle(base, base + 1, base + 2);
         mesh.add_triangle(base, base + 2, base + 3);
     }
-    egui::Shape::mesh(mesh)
+    let edge = rect.bottom() - 0.5;
+    egui::Shape::Vec(vec![
+        egui::Shape::mesh(mesh),
+        egui::Shape::line_segment(
+            [Pos2::new(rect.left(), edge), Pos2::new(rect.right(), edge)],
+            Stroke::new(1.0_f32, palette.strip_edge),
+        ),
+    ])
+}
+
+/// The active tab's body, shaped like Chromium's: rounded at the top,
+/// and flaring out at the bottom through concave quarter circles into
+/// the strip's bottom edge, in the toolbar's fill so the tab and the
+/// toolbar read as one surface, with a one-pixel outline that ends at
+/// that edge on either side, where the strip's own line continues it.
+/// The flares reach `TAB_CORNER` past `rect` on each side, over the
+/// neighbouring tabs, so the caller paints the result after them.
+fn active_tab_body(rect: Rect, palette: &Palette) -> Vec<egui::Shape> {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    const STEPS: usize = 8;
+    let r = f32::from(TAB_CORNER);
+    let bottom = rect.bottom();
+    // A quarter circle around `centre` from angle `from` to `to`
+    // (radians, y down), as `STEPS` segments.
+    let arc = |centre: Pos2, from: f32, to: f32| -> Vec<Pos2> {
+        (0..=STEPS)
+            .map(|i| {
+                let a = from + (to - from) * i as f32 / STEPS as f32;
+                Pos2::new(centre.x + r * a.cos(), centre.y + r * a.sin())
+            })
+            .collect()
+    };
+    // Each flare runs from the strip's edge up into the tab's side.
+    let left_flare = arc(Pos2::new(rect.left() - r, bottom - r), FRAC_PI_2, 0.0);
+    let right_flare = arc(Pos2::new(rect.right() + r, bottom - r), FRAC_PI_2, PI);
+    let top_left = arc(
+        Pos2::new(rect.left() + r, rect.top() + r),
+        PI,
+        3.0 * FRAC_PI_2,
+    );
+    let top_right = arc(
+        Pos2::new(rect.right() - r, rect.top() + r),
+        3.0 * FRAC_PI_2,
+        2.0 * PI,
+    );
+
+    // The flares' fill: each is a fan from the tab's bottom corner over
+    // its arc (the corner sees every point of the arc, so the fan tiles
+    // the region between the side, the edge and the arc).
+    let mut flares = egui::Mesh::default();
+    for (corner, arc) in [
+        (Pos2::new(rect.left(), bottom), &left_flare),
+        (Pos2::new(rect.right(), bottom), &right_flare),
+    ] {
+        let base = flares.vertices.len() as u32;
+        flares.colored_vertex(corner, palette.toolbar);
+        for p in arc {
+            flares.colored_vertex(*p, palette.toolbar);
+        }
+        for i in 0..STEPS as u32 {
+            flares.add_triangle(base, base + 1 + i, base + 2 + i);
+        }
+    }
+
+    let mut outline = left_flare;
+    outline.extend(top_left);
+    outline.extend(top_right);
+    outline.extend(right_flare.into_iter().rev());
+    vec![
+        egui::Shape::rect_filled(
+            rect,
+            CornerRadius {
+                nw: TAB_CORNER,
+                ne: TAB_CORNER,
+                sw: 0,
+                se: 0,
+            },
+            palette.toolbar,
+        ),
+        egui::Shape::mesh(flares),
+        egui::Shape::line(outline, Stroke::new(1.0_f32, palette.strip_edge)),
+    ]
 }
 
 /// `a` moved `t` of the way to `b`, per channel.
@@ -1201,6 +1305,9 @@ fn strip_row(
         drag.index = index;
     }
 
+    // The active tab (or the chip standing for it) is painted after
+    // the rest: its body flares out over its neighbours' feet.
+    let mut late: Vec<egui::Shape> = Vec::new();
     // The slots that stay, each sliding to where it belongs now.
     let mut live_drag = false;
     for slot in &slots {
@@ -1218,9 +1325,11 @@ fn strip_row(
         );
         match &slot.kind {
             SlotKind::Tab(tab) => {
-                live_drag |= strip_tab(ui, rect, window, tab, look, state, commands);
+                live_drag |= strip_tab(ui, rect, window, tab, look, state, commands, &mut late);
             }
-            SlotKind::Chip(chip) => strip_folder(ui, rect, chip, window, state, commands),
+            SlotKind::Chip(chip) => {
+                strip_folder(ui, rect, chip, window, state, commands, &mut late)
+            }
         }
     }
     // The dragged tabs ride with the pointer, over the rest. Their slide
@@ -1236,8 +1345,16 @@ fn strip_row(
                 .animate_value_with_time(Id::new(("strip-slide", tab.id)), x - row.left(), 0.0);
             let rect =
                 Rect::from_min_size(Pos2::new(x, row.top()), Vec2::new(look.width, TAB_HEIGHT));
-            live_drag |= strip_tab(ui, rect, window, tab, look, state, commands);
+            live_drag |= strip_tab(ui, rect, window, tab, look, state, commands, &mut late);
         }
+    }
+    if !late.is_empty() {
+        // The flares reach past the first and last tab's rect, where
+        // the scroll area would clip them.
+        let clip = ui
+            .clip_rect()
+            .expand2(Vec2::new(f32::from(TAB_CORNER), 0.0));
+        ui.painter().with_clip_rect(clip).extend(late);
     }
     if !live_drag {
         // The drag ended without a drop here (focus went elsewhere).
@@ -1271,6 +1388,7 @@ fn strip_row(
 /// One tab of the strip at `rect`, with everything a tab answers to:
 /// click, Ctrl/Shift click, middle click, the close control, the context
 /// menu, and dragging. Returns whether the tab is being dragged.
+#[allow(clippy::too_many_arguments)]
 fn strip_tab(
     ui: &mut Ui,
     rect: Rect,
@@ -1279,6 +1397,7 @@ fn strip_tab(
     look: &StripTabs<'_>,
     state: &mut ChromeState,
     commands: &mut Vec<Command>,
+    late: &mut Vec<egui::Shape>,
 ) -> bool {
     let is_active = tab.id == window.active;
     let is_selected = window.is_selected(tab.id);
@@ -1295,6 +1414,7 @@ fn strip_tab(
             deferred: tab.deferred,
         },
         tab.display_title(),
+        late,
     );
     if close_clicked {
         commands.push(Command::CloseTab(tab.id));
@@ -1401,12 +1521,8 @@ impl Chip {
                 tabs.len()
             )
         };
-        let font = TextStyle::Body.resolve(ui.style());
-        let text_color = if as_active {
-            ui.visuals().text_color()
-        } else {
-            palette.text_on_strip
-        };
+        let font = egui::FontId::new(TAB_FONT_SIZE, FontFamily::Proportional);
+        let text_color = palette.tab_text;
         let galley = ui.painter().layout_no_wrap(label, font, text_color);
         // Room for the disclosure triangle before the name.
         let width = TAB_PADDING_X + CHIP_GLYPH_WIDTH + galley.size().x + TAB_PADDING_X;
@@ -1439,6 +1555,7 @@ fn strip_folder(
     window: &Window,
     state: &mut ChromeState,
     commands: &mut Vec<Command>,
+    late: &mut Vec<egui::Shape>,
 ) {
     let Chip {
         folder,
@@ -1460,27 +1577,29 @@ fn strip_folder(
             format!("{name}: click to list its tabs")
         });
     if ui.is_rect_visible(rect) {
-        let fill = if as_active {
-            palette.toolbar
-        } else if response.hovered() || state.open_folder == Some(folder) {
-            palette.tab_hover
+        let mut shapes: Vec<egui::Shape> = Vec::new();
+        if as_active {
+            shapes.extend(active_tab_body(rect, palette));
         } else {
-            palette.tab_selected
-        };
-        let corners = CornerRadius {
-            nw: TAB_CORNER,
-            ne: TAB_CORNER,
-            sw: 0,
-            se: 0,
-        };
-        let painter = ui.painter();
-        painter.rect(
-            rect,
-            corners,
-            fill,
-            Stroke::new(1.0_f32, palette.tab_outline),
-            StrokeKind::Inside,
-        );
+            let fill = if response.hovered() || state.open_folder == Some(folder) {
+                palette.tab_hover
+            } else {
+                palette.tab_selected
+            };
+            let corners = CornerRadius {
+                nw: TAB_CORNER,
+                ne: TAB_CORNER,
+                sw: 0,
+                se: 0,
+            };
+            shapes.push(egui::Shape::Rect(egui::epaint::RectShape::new(
+                rect,
+                corners,
+                fill,
+                Stroke::new(1.0_f32, palette.tab_outline),
+                StrokeKind::Inside,
+            )));
+        }
         // The disclosure triangle, drawn (the fonts lack the glyphs):
         // pointing right when collapsed, down when expanded.
         let c = Pos2::new(rect.left() + TAB_PADDING_X + 4.0, rect.center().y);
@@ -1498,19 +1617,24 @@ fn strip_folder(
                 Pos2::new(c.x + h / 2.0 + 1.0, c.y),
             ]
         };
-        painter.add(egui::Shape::convex_polygon(
+        shapes.push(egui::Shape::convex_polygon(
             points,
             text_color,
             Stroke::NONE,
         ));
-        painter.galley(
+        shapes.push(egui::Shape::galley(
             Pos2::new(
                 rect.left() + TAB_PADDING_X + CHIP_GLYPH_WIDTH,
                 rect.center().y - galley.size().y / 2.0,
             ),
             galley.clone(),
             text_color,
-        );
+        ));
+        if as_active {
+            late.extend(shapes);
+        } else {
+            ui.painter().extend(shapes);
+        }
     }
     if response.clicked() {
         state.open_folder = if state.open_folder == Some(folder) {
@@ -3529,6 +3653,9 @@ struct TabState {
 /// tab's own, the same every frame, so a drag keeps hold of it while
 /// the tab moves. Returns the tab's response (click, drag, context
 /// menu) and whether the close control was clicked.
+/// The active tab's shapes go to `late` instead of the painter, for
+/// the row to paint over the other tabs.
+#[allow(clippy::too_many_arguments)]
 fn tab_widget(
     ui: &mut Ui,
     rect: Rect,
@@ -3536,6 +3663,7 @@ fn tab_widget(
     palette: &Palette,
     tab: TabState,
     title: &str,
+    late: &mut Vec<egui::Shape>,
 ) -> (egui::Response, bool) {
     let TabState {
         is_active,
@@ -3544,13 +3672,12 @@ fn tab_widget(
         deferred,
     } = tab;
     let width = rect.width();
-    let font = TextStyle::Body.resolve(ui.style());
-    let text_color = if is_active {
-        ui.visuals().text_color()
-    } else if deferred {
-        ui.visuals().weak_text_color()
+    let font = egui::FontId::new(TAB_FONT_SIZE, FontFamily::Proportional);
+    let ink = palette.tab_text;
+    let text_color = if deferred {
+        Color32::from_rgba_unmultiplied(ink.r(), ink.g(), ink.b(), 140)
     } else {
-        palette.text_on_strip
+        ink
     };
     let icon_width = if favicon.is_some() {
         FAVICON_SIZE + 6.0
@@ -3577,28 +3704,36 @@ fn tab_widget(
     let galley = ui.painter().layout_job(job);
 
     if ui.is_rect_visible(rect) {
-        let painter = ui.painter();
-        let fill = if is_active {
-            palette.toolbar
-        } else if is_selected {
-            palette.tab_selected
-        } else if response.hovered() || response.dragged() {
-            palette.tab_hover
+        let mut shapes: Vec<egui::Shape> = Vec::new();
+        if is_active {
+            shapes.extend(active_tab_body(rect, palette));
         } else {
-            palette.tab_idle
-        };
-        let stroke = if is_selected && !is_active {
-            Stroke::new(1.0_f32, palette.tab_outline)
-        } else {
-            Stroke::NONE
-        };
-        let corners = CornerRadius {
-            nw: TAB_CORNER,
-            ne: TAB_CORNER,
-            sw: 0,
-            se: 0,
-        };
-        painter.rect(rect, corners, fill, stroke, StrokeKind::Inside);
+            let fill = if is_selected {
+                palette.tab_selected
+            } else if response.hovered() || response.dragged() {
+                palette.tab_hover
+            } else {
+                palette.tab_idle
+            };
+            let stroke = if is_selected {
+                Stroke::new(1.0_f32, palette.tab_outline)
+            } else {
+                Stroke::NONE
+            };
+            let corners = CornerRadius {
+                nw: TAB_CORNER,
+                ne: TAB_CORNER,
+                sw: 0,
+                se: 0,
+            };
+            shapes.push(egui::Shape::Rect(egui::epaint::RectShape::new(
+                rect,
+                corners,
+                fill,
+                stroke,
+                StrokeKind::Inside,
+            )));
+        }
 
         let mut x = rect.left() + TAB_PADDING_X;
         if let Some(texture) = favicon {
@@ -3606,19 +3741,19 @@ fn tab_widget(
                 Pos2::new(x + FAVICON_SIZE / 2.0, rect.center().y),
                 Vec2::splat(FAVICON_SIZE),
             );
-            painter.image(
+            shapes.push(egui::Shape::image(
                 texture,
                 icon,
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
-            );
+            ));
             x += icon_width;
         }
-        painter.galley(
+        shapes.push(egui::Shape::galley(
             Pos2::new(x, rect.center().y - galley.size().y / 2.0),
             galley,
             text_color,
-        );
+        ));
 
         if let Some(close) = &close {
             if close.hovered() {
@@ -3627,15 +3762,25 @@ fn tab_widget(
                 } else {
                     palette.tab_hover
                 };
-                painter.circle_filled(close_rect.center(), CLOSE_SIZE / 2.0, ring);
+                shapes.push(egui::Shape::circle_filled(
+                    close_rect.center(),
+                    CLOSE_SIZE / 2.0,
+                    ring,
+                ));
             }
-            painter.text(
-                close_rect.center(),
-                Align2::CENTER_CENTER,
-                "×",
-                font,
+            let cross = ui
+                .painter()
+                .layout_no_wrap("×".to_string(), font, text_color);
+            shapes.push(egui::Shape::galley(
+                close_rect.center() - cross.size() / 2.0,
+                cross,
                 text_color,
-            );
+            ));
+        }
+        if is_active {
+            late.extend(shapes);
+        } else {
+            ui.painter().extend(shapes);
         }
     }
     let close_clicked = close.is_some_and(|close| close.on_hover_text("Close tab").clicked());
