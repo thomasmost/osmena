@@ -546,6 +546,29 @@ after a block load, which has not been traced.
 Known limitation, recorded in the README's TabHost bullet: Forward after
 Back from a block page lands on the bare `about:blank`.
 
+Both browsers adopted revision a5fc846 on 2026-11-08, each on its own
+`main`. Nautilus cancels a main-frame navigation to a blocked site in
+`on_before_browse` and reports `NavigationBlocked`, and swaps the tab's
+entry for `about:blank` through `location.replace`. Paladin denies a
+navigation in `request_navigation`, frames included since Servo does
+not name the frame (its S15), and swaps the entry through
+`evaluate_javascript`. Both were checked by hand on Windows with
+scripted input: a page script's link to a blocked site was refused
+before any request for it (Nautilus logs `blocked navigation to
+https://example.com/`, Paladin the same line), the tab menu's block
+replaced the page, Remove returned it, and Back went to the page
+before. Known and accepted: Forward onto the replaced blank entry shows
+a plain blank page. Not verified: an HTTP redirect onto a blocked site
+in Paladin, since Servo's hook does not see those.
+
+Two follow-ups are open. `apply`'s blank-page exemption compares the
+exact string `about:blank`, so a URL change to `about:blank#x` on a
+blocked tab clears the block; it should match the scheme and path and
+ignore the fragment, with a test. A typed `view-source:https://<blocked
+site>/` is exempt from the guard and from both hooks by AC1.4 and AC5.2,
+so the engine fetches the blocked site to show its source; whether
+`site_for` should refuse it is a design decision still open.
+
 ## Status and handoff (2026-11-06, evening)
 
 Restored tabs are warmed: after a session restore the deferred tabs
