@@ -84,12 +84,12 @@ const STRIP_SLIDE_SECS: f32 = 0.12;
 /// The Launch Panel's field's font size.
 pub(crate) const LAUNCHER_FONT_SIZE: f32 = 22.0;
 /// The widest a history match's title and address are drawn.
-const SUGGESTION_TITLE_MAX_CHARS: usize = 64;
-const SUGGESTION_URL_MAX_CHARS: usize = 90;
+pub(crate) const SUGGESTION_TITLE_MAX_CHARS: usize = 64;
+pub(crate) const SUGGESTION_URL_MAX_CHARS: usize = 90;
 /// Inside a suggestion row, around its text.
-const SUGGESTION_PADDING: f32 = 4.0;
+pub(crate) const SUGGESTION_PADDING: f32 = 4.0;
 /// The icon at the left of a suggestion row (a star for a bookmark).
-const SUGGESTION_ICON: f32 = 14.0;
+pub(crate) const SUGGESTION_ICON: f32 = 14.0;
 
 /// The bookmarks bar: its chips' height, the gap between them, the
 /// padding inside one, the widest title drawn in one, and the width of
@@ -4230,7 +4230,7 @@ fn cross(centre: Pos2, ink: Color32) -> Vec<egui::Shape> {
 
 /// A page's stand-in for an icon when it has none: a globe (its outline,
 /// equator and a meridian) in `ink`, filling `slot`.
-fn globe(slot: Rect, ink: Color32) -> Vec<egui::Shape> {
+pub(crate) fn globe(slot: Rect, ink: Color32) -> Vec<egui::Shape> {
     use std::f32::consts::TAU;
     const STEPS: usize = 24;
     let c = slot.center();
@@ -4869,11 +4869,20 @@ pub(crate) fn caret_to_end(ui: &Ui, id: Id, len: usize) {
 }
 
 fn select_all(ui: &Ui, id: Id, len: usize) {
+    select_range(ui, id, 0, len);
+}
+
+/// Select the characters `from..to` in the field `id`, for text put
+/// there from outside that the next keystroke should replace (the
+/// completion the launcher fills in ahead of the typist).
+pub(crate) fn select_range(ui: &Ui, id: Id, from: usize, to: usize) {
     use egui::text::{CCursor, CCursorRange};
     use egui::text_edit::TextEditState;
     if let Some(mut edit) = TextEditState::load(ui.ctx(), id) {
-        edit.cursor
-            .set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(len))));
+        edit.cursor.set_char_range(Some(CCursorRange::two(
+            CCursor::new(from),
+            CCursor::new(to),
+        )));
         edit.store(ui.ctx(), id);
     }
 }

@@ -67,6 +67,6 @@ pub use settings::{
     ChromeColor, DownloadSettings, ProfileSettings, SearchSettings, Settings, SettingsError,
     UrlTemplate,
 };
-pub use suggest::{Suggestion, SuggestionSource, suggestions};
+pub use suggest::{Completion, Suggestion, SuggestionSource, completion, suggestions};
 pub use update::{Asset, AvailableUpdate, BuildId, Manifest, UpdateSource, UpdateStatus};
 pub use zoom::{SiteZoom, ZOOM_MAX, ZOOM_MIN, ZOOM_STEPS, ZoomError, next_step};

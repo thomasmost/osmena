@@ -154,7 +154,16 @@ The engine contract, in `osmena-engine`:
   button open a wide panel over the window instead of a blank page.
   At its top, a large field: type an address or a search and press
   Enter, or pick a page from the history and bookmark matches that
-  drop down under it; Escape or a click outside opens nothing. Under
+  drop down under it; Escape or a click outside opens nothing. Before
+  the first space the field completes the typing to the most visited
+  page whose address starts with it (`gi` becomes `github.com`, the
+  rest selected after the caret, so typing on replaces it and Enter
+  opens the page); Backspace drops the completion and leaves the
+  typing, and a space makes the text a phrase, so Enter then searches.
+  The first row of the dropdown is always what Enter opens (the
+  completed page, the typed address with "Open", or the words with
+  "Search Google"), and the engine's name sits in a chip at the
+  field's right end while the text is a search. Under
   the field, a mosaic of tiles: **Recent Drive files** (the five files
   the connected Google account opened last; "Connect Google Drive"
   signs in through Google in a tab, only in a build whose brand has a

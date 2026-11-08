@@ -5,7 +5,9 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-11-08 (the chrome refresh: a per-profile accent
+_Last updated: 2026-11-08 (night: the Launch Panel's field completes
+an address ahead of the typist, with the dropdown's first row as what
+Enter opens; earlier the chrome refresh: a per-profile accent
 installed on the egui context by `theme::tint`, painted round toolbar
 buttons, the filled address pill, softer popups, and the Launch Panel's
 surface, entrance, magnifier field, per-row tile heights and shelf of
@@ -272,7 +274,19 @@ No engine is needed; the workspace builds in under a minute.
   `Command::NewTab` without a URL is `EngineAction::ShowLauncher`,
   never a tab; the chrome's panel (`osmena-chrome/src/launch.rs`,
   `ChromeState::open_launcher`) answers with `NewTab { url: Some(..) }`,
-  `SearchInNewTab` or `AskInNewTab`, or with nothing. The `new_tab_url`
+  `SearchInNewTab` or `AskInNewTab`, or with nothing. The field
+  completes ahead of the typist: `osmena_core::completion` (pure,
+  tested; visits, then the shorter address, then recency, matched
+  against the address without scheme and `www.` unless those were
+  typed) gives `Launcher::completion`, whose text stands in the field
+  with the rest selected (`select_range`) so the next character
+  replaces it; `address_field` works it out again only on a change
+  that is not a deletion (Backspace, Delete, a cut leave the typing
+  alone), and never once the typing holds a space. `Head` is what the
+  field stands for (the completed page, the typed address, or a
+  search) and is both the dropdown's first row and what Enter opens
+  while no match is picked; keep the two the same by construction, not
+  by two branches. The `new_tab_url`
   setting is what a new *window* opens on. The tiles under the field
   are `osmena_core::launch`: `WidgetKind` names them, `Settings::launch`
   (`LaunchSettings`) holds the order and what they need, and
@@ -486,6 +500,54 @@ No engine is needed; the workspace builds in under a minute.
 - Commit to `main` unless asked for a branch. Conventional Commits.
 - The browsers' own docs (`README.md`, `CLAUDE.md`) describe what each one
   adds; the shared behaviour is documented here only.
+
+## Status and handoff (2026-11-08, night)
+
+The Launch Panel's field completes an address ahead of the typist (the
+Launch Panel bullet under Conventions, and the CHANGELOG's Added
+entry). `osmena_core::completion` ranks the pages whose address starts
+with the typing by visits, then the shorter address, then recency,
+with a never-visited bookmark last; the chrome's `Launcher::completion`
+holds the pick, `address_field` fills the field and selects the rest
+(`select_range` in chrome.rs), works the completion out again on any
+change that is not a deletion (Backspace, Delete, a cut) and drops it
+once the typing holds a space. `Head` is what the field stands for
+and is drawn as the dropdown's first row (`head_row`: the completed
+page through `suggestion_row`, the typed address with the globe, or
+the words with a small magnifier and "Search <engine>", through
+`action_row`) and opened by Enter when no match is picked; the
+matches follow under a `hairline`; the engine's name fades in as a
+chip at the field's right end while the text is a search (the field's
+right margin grows to keep the text clear of it; egui margins are
+`i8`, so the name is cut at `CHIP_MAX_CHARS`). `magnifier` takes its
+radius now.
+
+Verified: `cargo test` (401 tests, one ignored: the three new ones
+cover the ranking by visits, the user's case kept, `www.` skipped
+and matched, the typed slash kept, the scheme only after its colon,
+a phrase and a word inside the address completing nothing, the front
+page winning at equal visits, the bookmark as last resort), clippy
+with `-D warnings`, `cargo fmt --check`; and by eye in a debug
+Nautilus built against this checkout on Windows, light theme, driven
+by scripted keys on a profile seeded with six history entries, with a
+capture after each step: "gi" shows `github.com` with `thub.com`
+selected in the tinted selection and the GitHub row lit at the top of
+the dropdown, the two other matches under the hairline; Backspace
+leaves "gi", the Google chip at the field's right end and a lit "gi
+Search Google" row with the three matches under it; "t" completes
+again; a space makes it a search; "do" completes to the most visited
+docs.rs page (5 visits, a deep page, since the root was never
+visited); Down picks Example Domain (its address in the field, the
+head row unlit); Up brings the completion and its selection back;
+Enter opened the docs.rs page in a new tab. The debug run exited
+cleanly on close.
+
+Not verified: a dark system theme; the chip and the selection against
+other swatches (the probe profile had the default); Delete and Ctrl+X
+by hand (the rule is the same code path as Backspace); a custom engine
+with a long or empty name (cut at 14 characters, "Search" when empty,
+by code only); Paladin (nothing it implements changed; its pin moves
+with Nautilus's); macOS.
 
 ## Status and handoff (2026-11-08, evening)
 

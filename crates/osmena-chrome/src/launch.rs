@@ -17,10 +17,14 @@ use egui::{
 use osmena_core::launch::{
     DriveKind, DriveState, Fetched, TOP_SITES, TopSite, Units, WeatherCode, WidgetKind, top_sites,
 };
-use osmena_core::{Command, UrlTemplate, Window, suggestions};
+use osmena_core::{
+    Command, Completion, Suggestion, UrlTemplate, Window, WindowId, completion, suggestions,
+};
+use url::Url;
 
 use crate::chrome::{
-    ChromeContext, ChromeState, LAUNCHER_FONT_SIZE, Palette, blend, caret_to_end,
+    ChromeContext, ChromeState, LAUNCHER_FONT_SIZE, Palette, SUGGESTION_ICON, SUGGESTION_PADDING,
+    SUGGESTION_TITLE_MAX_CHARS, blend, caret_to_end, globe, location_input_to_url, select_range,
     site_icon_texture, step_pick, suggestion_row, truncate,
 };
 use crate::favicon;
@@ -49,6 +53,15 @@ const FIELD_MARGIN: Margin = Margin {
     top: 10,
     bottom: 10,
 };
+/// The engine's chip at the field's right end while the text is a
+/// search: its text size, its padding, its distance from the field's
+/// edge, and how long it takes to fade in and out.
+const CHIP_FONT_SIZE: f32 = 12.0;
+const CHIP_PADDING: Vec2 = Vec2::new(9.0, 3.0);
+const CHIP_INSET: f32 = 12.0;
+const CHIP_FADE_SECS: f32 = 0.12;
+/// The most of an engine's name the chip shows.
+const CHIP_MAX_CHARS: usize = 14;
 /// A shortcut on the Most visited shelf: the disc, the icon in it, the
 /// widest a cell is given, and the shelf's height under the heading.
 const SHORTCUT_DISC: f32 = 44.0;
@@ -110,12 +123,18 @@ struct SettingsForm {
 }
 
 /// The panel's state while it is open: what the user typed in the
-/// field, the match picked with the arrow keys (`typed` keeps what they
-/// typed, for going back up), the tiles' own fields, and the view.
+/// field, the page the field completed it to, the match picked with
+/// the arrow keys (`typed` keeps what they typed, for going back up),
+/// the tiles' own fields, and the view.
 #[derive(Default)]
 pub(crate) struct Launcher {
+    /// What the field shows: the typing, the typing with the completion
+    /// after it, or the picked match's address.
     pub(crate) text: String,
     pub(crate) typed: String,
+    /// The page the field filled in ahead of the typing, until a
+    /// deletion or a space; what Enter opens while no match is picked.
+    pub(crate) completion: Option<Completion>,
     pub(crate) picked: Option<usize>,
     /// The field takes focus on the first frame.
     pub(crate) focus: bool,
@@ -144,8 +163,11 @@ impl Launcher {
 }
 
 /// Draw the panel over the window, when open, and return the commands
-/// it produced. Enter in the field opens what was typed in a new tab
-/// (an address loads, anything else is a search) or the picked match;
+/// it produced. Before the first space the field fills in the most
+/// visited page whose address starts with the typing, the rest of the
+/// address selected after the caret (see [`address_field`]); Enter opens
+/// what the field stands for in a new tab (the completed page, else an
+/// address loads and anything else is a search) or the picked match;
 /// Up and Down pick a match, whose address then stands in the field;
 /// Escape, or a click anywhere outside the panel, opens nothing (in the
 /// settings view, Escape goes back to the tiles first).
@@ -277,8 +299,72 @@ struct FieldOutcome {
     close: bool,
 }
 
+/// What the field stands for as it reads, and so what Enter opens while
+/// no match is picked: the first row of the dropdown, so the user reads
+/// it before pressing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Head {
+    /// The page the field completed the typing to.
+    Page(Suggestion),
+    /// The typed address.
+    Address(Url),
+    /// The typed words, searched with the profile's engine.
+    Search(String),
+}
+
+impl Head {
+    /// What the field reads as: the completion while there is one,
+    /// else the typing as an address or as a search; nothing while the
+    /// field is empty.
+    fn of(launcher: &Launcher) -> Option<Head> {
+        if let Some(c) = &launcher.completion {
+            return Some(Head::Page(c.suggestion.clone()));
+        }
+        let text = launcher.typed.trim();
+        if text.is_empty() {
+            return None;
+        }
+        Some(match location_input_to_url(text) {
+            Some(url) => Head::Address(url),
+            None => Head::Search(text.to_string()),
+        })
+    }
+
+    /// Open it in a new tab on `window`.
+    fn command(&self, window: WindowId) -> Command {
+        match self {
+            Head::Page(s) => Command::NewTab {
+                window,
+                url: Some(s.url.clone()),
+            },
+            Head::Address(url) => Command::NewTab {
+                window,
+                url: Some(url.clone()),
+            },
+            Head::Search(query) => Command::SearchInNewTab {
+                window,
+                query: query.clone(),
+            },
+        }
+    }
+}
+
 /// The address-or-search field at the panel's top, with the history and
 /// bookmark matches dropping down over the tiles.
+///
+/// Before the first space the field completes the typing to the most
+/// visited page whose address starts with it (`osmena_core::completion`):
+/// the rest of the address stands after the caret, selected in the
+/// accent, so the next character replaces it and the completion is
+/// worked out again for the longer typing. A deletion (Backspace,
+/// Delete, a cut) takes the completion away and leaves the typing,
+/// which then reads as an address or a search; a space makes the text a
+/// phrase, which is a search. The dropdown's first row is what the
+/// field stands for ([`Head`]): the completed page with its title, the
+/// typed address with a globe, or the words with a magnifier and the
+/// engine's name, lit while it is what Enter opens; the matches follow
+/// it, and the engine's name sits in a chip at the field's right end
+/// while the text is a search.
 fn address_field(ui: &mut Ui, scene: &Scene<'_>, launcher: &mut Launcher) -> FieldOutcome {
     let Scene {
         window,
@@ -287,8 +373,26 @@ fn address_field(ui: &mut Ui, scene: &Scene<'_>, launcher: &mut Launcher) -> Fie
     } = scene;
     let mut commands = Vec::new();
     let mut close = false;
-    let matches = suggestions(context.history, context.bookmarks, &launcher.typed);
     let id = Id::new(("launcher-field", window.id));
+    let engine = search_engine_name(context.search);
+    // The chip is sized before the field so the text can keep clear of
+    // it; it answers the field as it read last frame, which the fade
+    // hides.
+    let searching = matches!(Head::of(launcher), Some(Head::Search(_)));
+    let chip_t = ui
+        .ctx()
+        .animate_bool_with_time(id.with("chip"), searching, CHIP_FADE_SECS);
+    let chip_font = FontId::new(CHIP_FONT_SIZE, egui::FontFamily::Name(theme::MEDIUM.into()));
+    let chip_galley =
+        ui.painter()
+            .layout_no_wrap(truncate(engine, CHIP_MAX_CHARS), chip_font, palette.ink);
+    let chip_width = chip_galley.size().x + 2.0 * CHIP_PADDING.x;
+    let mut margin = FIELD_MARGIN;
+    if searching {
+        // egui's margins are `i8`s; the chip's text is cut to keep
+        // well inside that.
+        margin.right = (f32::from(FIELD_MARGIN.right) + chip_width + CHIP_INSET).min(120.0) as i8;
+    }
     // The pill is filled at rest and the page's colour with the accent
     // ring once it has the keyboard, like the address bar; on the
     // first frame it is about to take focus, so it opens lit.
@@ -299,7 +403,7 @@ fn address_field(ui: &mut Ui, scene: &Scene<'_>, launcher: &mut Launcher) -> Fie
             ui.add(
                 egui::TextEdit::singleline(&mut launcher.text)
                     .id(id)
-                    .margin(FIELD_MARGIN)
+                    .margin(margin)
                     .background_color(palette.field_at(focused))
                     .font(FontId::proportional(LAUNCHER_FONT_SIZE))
                     // The hint takes the field's font: egui lays it out
@@ -316,15 +420,63 @@ fn address_field(ui: &mut Ui, scene: &Scene<'_>, launcher: &mut Launcher) -> Fie
         ui.painter(),
         Pos2::new(field.rect.left() + 24.0, field.rect.center().y),
         ui.visuals().weak_text_color(),
+        6.5,
     );
+    if chip_t > 0.0 {
+        let chip = Rect::from_min_max(
+            Pos2::new(
+                field.rect.right() - CHIP_INSET - chip_width,
+                field.rect.center().y - chip_galley.size().y / 2.0 - CHIP_PADDING.y,
+            ),
+            Pos2::new(
+                field.rect.right() - CHIP_INSET,
+                field.rect.center().y + chip_galley.size().y / 2.0 + CHIP_PADDING.y,
+            ),
+        );
+        let painter = ui.painter();
+        painter.rect_filled(
+            chip,
+            chip.height() / 2.0,
+            palette.selection.gamma_multiply(chip_t),
+        );
+        painter.galley(
+            chip.min + CHIP_PADDING,
+            chip_galley,
+            palette.ink.gamma_multiply(chip_t),
+        );
+    }
     if launcher.focus {
         launcher.focus = false;
         field.request_focus();
     }
+    // A deletion never completes: Backspace over the selected rest of
+    // the address leaves the typing, and the typing alone is what the
+    // user then has.
+    let deleting = ui.input(|i| {
+        i.key_pressed(Key::Backspace)
+            || i.key_pressed(Key::Delete)
+            || i.events.iter().any(|e| matches!(e, egui::Event::Cut))
+    });
     if field.changed() {
         launcher.typed = launcher.text.clone();
         launcher.picked = None;
+        launcher.completion = if deleting {
+            None
+        } else {
+            completion(context.history, context.bookmarks, &launcher.typed)
+        };
+        if let Some(c) = &launcher.completion {
+            launcher.text = c.text.clone();
+            select_completion(ui, id, launcher);
+        }
     }
+    // The matches for the typing, less the page the field completed to,
+    // which heads the list.
+    let mut matches = suggestions(context.history, context.bookmarks, &launcher.typed);
+    if let Some(c) = &launcher.completion {
+        matches.retain(|m| m.url != c.suggestion.url);
+    }
+    let head = Head::of(launcher);
     if field.has_focus() && !matches.is_empty() {
         let (down, up) = ui.input_mut(|i| {
             (
@@ -334,47 +486,44 @@ fn address_field(ui: &mut Ui, scene: &Scene<'_>, launcher: &mut Launcher) -> Fie
         });
         if down || up {
             launcher.picked = step_pick(launcher.picked, matches.len(), down);
-            launcher.text = match launcher.picked {
-                Some(i) => matches[i].url.to_string(),
-                None => launcher.typed.clone(),
-            };
-            caret_to_end(ui, id, launcher.text.chars().count());
+            match (launcher.picked, &launcher.completion) {
+                (Some(i), _) => {
+                    launcher.text = matches[i].url.to_string();
+                    caret_to_end(ui, id, launcher.text.chars().count());
+                }
+                (None, Some(c)) => {
+                    launcher.text = c.text.clone();
+                    select_completion(ui, id, launcher);
+                }
+                (None, None) => {
+                    launcher.text = launcher.typed.clone();
+                    caret_to_end(ui, id, launcher.text.chars().count());
+                }
+            }
         }
     }
     let enter = ui.input(|i| i.key_pressed(Key::Enter));
     if field.lost_focus() && enter {
-        let text = launcher.text.trim();
-        if let Some(i) = launcher.picked {
-            commands.push(Command::NewTab {
-                window: window.id,
-                url: Some(matches[i].url.clone()),
-            });
-        } else if let Some(url) = crate::chrome::location_input_to_url(text) {
-            commands.push(Command::NewTab {
-                window: window.id,
-                url: Some(url),
-            });
-        } else if !text.is_empty() {
-            commands.push(Command::SearchInNewTab {
-                window: window.id,
-                query: text.to_string(),
-            });
+        let opening = match launcher.picked {
+            Some(i) => Some(Head::Page(matches[i].clone())),
+            None => head.clone(),
+        };
+        if let Some(opening) = opening {
+            commands.push(opening.command(window.id));
         }
         close = true;
     }
-    // The matches drop down in their own area, above the tiles, so the
-    // tiles never jump while the user types. The list stays while the
-    // field has focus or the pointer is over where the list was last
-    // frame (a click on a row takes the focus away first).
+    // The list drops down in its own area, above the tiles, so the
+    // tiles never jump while the user types. It stays while the field
+    // has focus or the pointer is over where the list was last frame (a
+    // click on a row takes the focus away first).
     let over_list = launcher
         .dropdown
         .zip(ui.ctx().pointer_latest_pos())
         .is_some_and(|(rect, p)| rect.contains(p));
     launcher.dropdown = None;
-    let show_list = !matches.is_empty()
-        && !launcher.typed.trim().is_empty()
-        && (field.has_focus() || over_list);
-    if show_list {
+    let show_list = head.is_some() && (field.has_focus() || over_list);
+    if let (true, Some(head)) = (show_list, &head) {
         let picked = launcher.picked;
         let list = egui::Area::new(Id::new(("launcher-matches", window.id)))
             .order(egui::Order::Tooltip)
@@ -384,6 +533,13 @@ fn address_field(ui: &mut Ui, scene: &Scene<'_>, launcher: &mut Launcher) -> Fie
                     .corner_radius(10)
                     .show(ui, |ui| {
                         ui.set_width(field.rect.width() - 16.0);
+                        if head_row(ui, engine, head, picked.is_none()).clicked() {
+                            commands.push(head.command(window.id));
+                            close = true;
+                        }
+                        if !matches.is_empty() {
+                            hairline(ui, palette);
+                        }
                         for (i, entry) in matches.iter().enumerate() {
                             if suggestion_row(ui, entry, picked == Some(i)).clicked() {
                                 commands.push(Command::NewTab {
@@ -398,6 +554,127 @@ fn address_field(ui: &mut Ui, scene: &Scene<'_>, launcher: &mut Launcher) -> Fie
         launcher.dropdown = Some(list.response.rect);
     }
     FieldOutcome { commands, close }
+}
+
+/// The engine's name for the chip and the search row: the template's,
+/// or a plain "Search" for a custom engine left unnamed.
+fn search_engine_name(search: &UrlTemplate) -> &str {
+    let name = search.name.trim();
+    if name.is_empty() { "Search" } else { name }
+}
+
+/// Select the completed rest of the address in the field, after the
+/// typing, so the next character replaces it.
+fn select_completion(ui: &Ui, id: Id, launcher: &Launcher) {
+    select_range(
+        ui,
+        id,
+        launcher.typed.chars().count(),
+        launcher.text.chars().count(),
+    );
+}
+
+/// The dropdown's first row, what the field stands for: the completed
+/// page as a match row with its title, the typed address with a globe
+/// and "Open", or the words with a magnifier and the engine's name.
+fn head_row(ui: &mut Ui, engine: &str, head: &Head, lit: bool) -> egui::Response {
+    match head {
+        Head::Page(suggestion) => suggestion_row(ui, suggestion, lit),
+        Head::Address(url) => action_row(ui, lit, url.as_str(), "Open", |painter, center, ink| {
+            painter.extend(globe(
+                Rect::from_center_size(center, Vec2::splat(SUGGESTION_ICON)),
+                ink,
+            ));
+        }),
+        Head::Search(query) => action_row(
+            ui,
+            lit,
+            query,
+            &format!("Search {engine}"),
+            |painter, center, ink| magnifier(painter, center + Vec2::new(1.0, 1.0), ink, 4.0),
+        ),
+    }
+}
+
+/// A row of the dropdown shaped like a match row (`suggestion_row`):
+/// `icon` painted at the left in the weak ink, `primary` in the body
+/// size with `secondary` small and weak after it; filled when `lit` or
+/// under the pointer.
+fn action_row(
+    ui: &mut Ui,
+    lit: bool,
+    primary: &str,
+    secondary: &str,
+    icon: impl FnOnce(&egui::Painter, Pos2, Color32),
+) -> egui::Response {
+    let (body, small) = (
+        TextStyle::Body.resolve(ui.style()),
+        TextStyle::Small.resolve(ui.style()),
+    );
+    let (text_color, weak) = (ui.visuals().text_color(), ui.visuals().weak_text_color());
+    let width = ui.available_width();
+    let row_height = ui.fonts_mut(|f| f.row_height(&body)) + 2.0 * SUGGESTION_PADDING;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, row_height), Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        &truncate(primary, SUGGESTION_TITLE_MAX_CHARS),
+        0.0,
+        egui::TextFormat {
+            font_id: body,
+            color: text_color,
+            ..Default::default()
+        },
+    );
+    job.append(
+        &format!("  {secondary}"),
+        0.0,
+        egui::TextFormat {
+            font_id: small,
+            color: weak,
+            ..Default::default()
+        },
+    );
+    let text_left = rect.left() + SUGGESTION_PADDING + SUGGESTION_ICON + SUGGESTION_PADDING;
+    job.wrap =
+        egui::text::TextWrapping::truncate_at_width(rect.right() - SUGGESTION_PADDING - text_left);
+    let galley = ui.painter().layout_job(job);
+    let painter = ui.painter();
+    if lit {
+        painter.rect_filled(rect, 4.0, ui.visuals().selection.bg_fill);
+    } else if response.hovered() {
+        painter.rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill);
+    }
+    icon(
+        painter,
+        Pos2::new(
+            rect.left() + SUGGESTION_PADDING + SUGGESTION_ICON / 2.0,
+            rect.center().y,
+        ),
+        weak,
+    );
+    painter.galley(
+        Pos2::new(text_left, rect.center().y - galley.size().y / 2.0),
+        galley,
+        text_color,
+    );
+    response
+}
+
+/// A faint line across the dropdown between its first row and the
+/// matches.
+fn hairline(ui: &mut Ui, palette: &Palette) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 7.0), Sense::hover());
+    let y = rect.center().y.round() + 0.5;
+    ui.painter().line_segment(
+        [
+            Pos2::new(rect.left() + SUGGESTION_PADDING, y),
+            Pos2::new(rect.right() - SUGGESTION_PADDING, y),
+        ],
+        Stroke::new(1.0_f32, palette.hairline),
+    );
 }
 
 /// The row under the tiles: the gear at the right (the settings view
@@ -429,20 +706,22 @@ fn bottom_row(ui: &mut Ui, launcher: &mut Launcher, commands: &mut Vec<Command>)
     });
 }
 
-/// A magnifier at `c`: a ring with a handle running down and right.
-fn magnifier(painter: &egui::Painter, c: Pos2, ink: Color32) {
-    let stroke = Stroke::new(1.8_f32, ink);
-    let r = 6.5;
-    let lens = Pos2::new(c.x - 1.5, c.y - 1.5);
+/// A magnifier at `c`: a ring of radius `r` with a handle running down
+/// and right, its strokes in proportion (the field's is 6.5, a row's
+/// icon 4).
+fn magnifier(painter: &egui::Painter, c: Pos2, ink: Color32, r: f32) {
+    let stroke = Stroke::new(r * 0.28, ink);
+    let offset = r * 0.23;
+    let lens = Pos2::new(c.x - offset, c.y - offset);
     painter.circle_stroke(lens, r, stroke);
     let along = std::f32::consts::FRAC_PI_4;
     let (sin, cos) = along.sin_cos();
     painter.line_segment(
         [
             Pos2::new(lens.x + cos * (r + 0.5), lens.y + sin * (r + 0.5)),
-            Pos2::new(lens.x + cos * (r + 6.0), lens.y + sin * (r + 6.0)),
+            Pos2::new(lens.x + cos * (r * 1.92), lens.y + sin * (r * 1.92)),
         ],
-        Stroke::new(2.2_f32, ink),
+        Stroke::new(r * 0.34, ink),
     );
 }
 

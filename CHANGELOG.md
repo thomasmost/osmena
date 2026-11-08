@@ -4,6 +4,28 @@ All notable changes to the osmena crates. The crates version together.
 
 ## Unreleased
 
+### Added
+
+- The Launch Panel's field completes an address ahead of the typist.
+  Before the first space, the most visited page whose address starts
+  with the typing stands in the field, the rest of its address after
+  the caret selected in the profile's accent (`github.com` after `gi`,
+  spelt as the user typed it, without the scheme and `www.` and a front
+  page without its slash); the next character replaces the selection
+  and the completion is worked out again, and Enter opens the page.
+  Backspace or Delete takes the completion away and leaves the typing,
+  and a space makes the text a phrase: either way Enter then searches.
+  The dropdown's first row is always what Enter opens, lit while no
+  match is picked: the completed page with its title, the typed address
+  with a globe and "Open", or the words with a magnifier and "Search
+  Google" (the engine's name); the matches follow under a hairline, and
+  while the text is a search the engine's name sits in a small chip at
+  the field's right end, faded in. Up and Down still pick a match; Up
+  from the first brings the completion back. The ranking is
+  `osmena_core::completion`: visits, then the shorter address, then the
+  later visit; a never-visited bookmark completes only what nothing in
+  the history does.
+
 ### Changed
 
 - The chrome's look, after Thorium with Zen's softness: the toolbar's
