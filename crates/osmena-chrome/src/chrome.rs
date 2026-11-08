@@ -211,27 +211,43 @@ impl Palette {
 /// quads of vertex colours, which egui interpolates, so the quadratic
 /// ease keeps its shape instead of flattening into one ramp. The curve
 /// reaches the toolbar's fill `ease_end` of the way down (1 for the
-/// strip itself) and stays there below.
+/// strip itself). The bands span only that top part, so every band
+/// edge sits on the curve, where [`Palette::strip_at`] of the band's
+/// share of the curve gives its colour; one quad in the toolbar's fill
+/// covers the rest, from `ease_end` to the bottom, and is absent when
+/// `ease_end` is 1.
 fn gradient_mesh(rect: Rect, palette: &Palette, bands: u32, ease_end: f32) -> egui::Mesh {
     let mut mesh = egui::Mesh::default();
+    let y_at = |share: f32| rect.top() + rect.height() * share;
     for band in 0..bands {
-        let t0 = band as f32 / bands as f32;
-        let t1 = (band + 1) as f32 / bands as f32;
-        let y0 = rect.top() + rect.height() * t0;
-        let y1 = rect.top() + rect.height() * t1;
-        let (c0, c1) = (
-            palette.strip_at(t0 / ease_end),
-            palette.strip_at(t1 / ease_end),
+        let u0 = band as f32 / bands as f32;
+        let u1 = (band + 1) as f32 / bands as f32;
+        push_quad(
+            &mut mesh,
+            rect,
+            y_at(u0 * ease_end),
+            y_at(u1 * ease_end),
+            palette.strip_at(u0),
+            palette.strip_at(u1),
         );
-        let base = mesh.vertices.len() as u32;
-        mesh.colored_vertex(Pos2::new(rect.left(), y0), c0);
-        mesh.colored_vertex(Pos2::new(rect.right(), y0), c0);
-        mesh.colored_vertex(Pos2::new(rect.right(), y1), c1);
-        mesh.colored_vertex(Pos2::new(rect.left(), y1), c1);
-        mesh.add_triangle(base, base + 1, base + 2);
-        mesh.add_triangle(base, base + 2, base + 3);
+    }
+    if ease_end < 1.0 {
+        let fill = palette.strip_at(1.0);
+        push_quad(&mut mesh, rect, y_at(ease_end), rect.bottom(), fill, fill);
     }
     mesh
+}
+
+/// One horizontal quad across `rect` from `y0` to `y1`, its top edge in
+/// `c0` and its bottom edge in `c1`.
+fn push_quad(mesh: &mut egui::Mesh, rect: Rect, y0: f32, y1: f32, c0: Color32, c1: Color32) {
+    let base = mesh.vertices.len() as u32;
+    mesh.colored_vertex(Pos2::new(rect.left(), y0), c0);
+    mesh.colored_vertex(Pos2::new(rect.right(), y0), c0);
+    mesh.colored_vertex(Pos2::new(rect.right(), y1), c1);
+    mesh.colored_vertex(Pos2::new(rect.left(), y1), c1);
+    mesh.add_triangle(base, base + 1, base + 2);
+    mesh.add_triangle(base, base + 2, base + 3);
 }
 
 /// The strip's background: `rect` filled with [`Palette::strip_at`] from
@@ -4415,13 +4431,13 @@ pub(crate) fn fit_size(trial: f32, width_at_trial: f32, max_width: f32) -> f32 {
     }
 }
 
-/// Replace the page area with the block page: the profile's colour
-/// easing into the toolbar's as the strip does, the tab's line large
-/// in the middle, and the site named beneath with where to unblock
-/// it. Nothing on it is a control; the page behind is `about:blank`.
 /// How far the muted lines keep their ink: a share of it, the rest the
 /// fill under them.
 const BLOCK_MUTED: f32 = 0.85;
+
+/// The bands the block page's curve is painted in: more than the strip's
+/// eight, since the page is hundreds of pixels tall.
+const BLOCK_BANDS: u32 = 24;
 
 /// Where the block page's three lines (the tab's line, the site, the
 /// hint) sit, as points below the page's top edge, given each line's
@@ -4483,6 +4499,9 @@ pub(crate) fn block_page_colours(
 /// easing into the toolbar's as the strip does, the tab's line large
 /// in the middle, and the site named beneath with where to unblock
 /// it. Nothing on it is a control; the page behind is `about:blank`.
+/// The ease finishes at the top of the tab's line
+/// ([`block_page_ease_end`]): the painted curve reaches the toolbar's
+/// fill there and stays, so the line's ink stands on that fill.
 pub fn draw_blocked_page(ui: &mut Ui, rect: Rect, color: ChromeColor, page: &BlockedPage) {
     let palette = Palette::new(color, ui.visuals().dark_mode);
     let painter = ui.painter();
@@ -4519,10 +4538,13 @@ pub fn draw_blocked_page(ui: &mut Ui, rect: Rect, color: ChromeColor, page: &Blo
     let [line_ink, site_ink, hint_ink] =
         block_page_colours(&palette, rect.height(), ease_end, tops, heights);
 
-    // The strip's curve, over the whole page: more bands than the
-    // strip's eight, since this is hundreds of pixels tall.
+    // The curve, in BLOCK_BANDS bands down to where it ends, then the
+    // toolbar's fill to the bottom.
     painter.add(egui::Shape::mesh(gradient_mesh(
-        rect, &palette, 24, ease_end,
+        rect,
+        &palette,
+        BLOCK_BANDS,
+        ease_end,
     )));
 
     let line = painter.layout_no_wrap(text, line_font(size), line_ink);
@@ -5245,6 +5267,26 @@ mod tests {
                         let ease_end = block_page_ease_end(page_height, tops);
                         let colours =
                             block_page_colours(&palette, page_height, ease_end, tops, heights);
+                        // The mesh the page paints: every row of each line
+                        // must show the colour the curve gives it.
+                        let mesh = gradient_mesh(
+                            Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, page_height)),
+                            &palette,
+                            BLOCK_BANDS,
+                            ease_end,
+                        );
+                        for line in 0..3 {
+                            for s in 0..=16 {
+                                let y = tops[line] + heights[line] * s as f32 / 16.0;
+                                let painted = painted_colour(&mesh, y);
+                                let curve = block_page_fill(&palette, page_height, ease_end, y);
+                                assert!(
+                                    max_channel_difference(painted, curve) <= PAINT_TOLERANCE,
+                                    "line {line} of {color:?} (dark: {dark_mode}) at height \
+                                     {page_height}, row {y:.1}: painted {painted:?}, curve {curve:?}"
+                                );
+                            }
+                        }
                         for (line, floor) in [3.0_f32, 4.5, 4.5].into_iter().enumerate() {
                             let samples = 16;
                             let worst = (0..=samples)
@@ -5262,6 +5304,87 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// How far a painted channel may sit from the curve, in steps. Each
+    /// band edge is rounded to a whole channel value and the band is then
+    /// blended linearly, where the curve bends; over a band of 1/24 of the
+    /// ease that bend is well under a step, so the painted value is at most
+    /// one step from the curve's own rounded value.
+    const PAINT_TOLERANCE: u8 = 1;
+
+    /// The largest difference of any channel between two colours.
+    fn max_channel_difference(a: Color32, b: Color32) -> u8 {
+        [(a.r(), b.r()), (a.g(), b.g()), (a.b(), b.b())]
+            .into_iter()
+            .map(|(x, y)| x.abs_diff(y))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The colour `mesh` paints at `y`, for a mesh built by
+    /// `gradient_mesh`: the band holding `y`, its two edge colours blended
+    /// linearly down the band, as egui blends a mesh's vertex colours.
+    fn painted_colour(mesh: &egui::Mesh, y: f32) -> Color32 {
+        for quad in mesh.vertices.chunks(4) {
+            // Each quad is top-left, top-right, bottom-right, bottom-left.
+            let (top, bottom) = (quad[0].pos.y, quad[3].pos.y);
+            if (top..=bottom).contains(&y) {
+                let share = if bottom > top {
+                    (y - top) / (bottom - top)
+                } else {
+                    0.0
+                };
+                return blend(quad[0].color, quad[3].color, share);
+            }
+        }
+        panic!("no band of the mesh covers y = {y}");
+    }
+
+    /// The strip's bands as they were written before `gradient_mesh` took
+    /// an ease end: eight bands, each coloured by the strip's curve at its
+    /// own edges. Kept here so the strip's mesh can be checked against it.
+    fn legacy_strip_mesh(rect: Rect, palette: &Palette) -> egui::Mesh {
+        let mut mesh = egui::Mesh::default();
+        for band in 0..8u32 {
+            let t0 = band as f32 / 8.0;
+            let t1 = (band + 1) as f32 / 8.0;
+            let y0 = rect.top() + rect.height() * t0;
+            let y1 = rect.top() + rect.height() * t1;
+            let (c0, c1) = (palette.strip_at(t0), palette.strip_at(t1));
+            let base = mesh.vertices.len() as u32;
+            mesh.colored_vertex(Pos2::new(rect.left(), y0), c0);
+            mesh.colored_vertex(Pos2::new(rect.right(), y0), c0);
+            mesh.colored_vertex(Pos2::new(rect.right(), y1), c1);
+            mesh.colored_vertex(Pos2::new(rect.left(), y1), c1);
+            mesh.add_triangle(base, base + 1, base + 2);
+            mesh.add_triangle(base, base + 2, base + 3);
+        }
+        mesh
+    }
+
+    /// The strip's background is the mesh it was before the ease end was
+    /// a parameter: the same vertices, indices and colours, for every
+    /// swatch in both modes.
+    #[test]
+    fn the_strip_background_is_the_mesh_it_was_before_the_ease_end() {
+        let rect = Rect::from_min_size(Pos2::new(3.0, 5.0), Vec2::new(640.0, 36.0));
+        for dark_mode in [false, true] {
+            for color in ChromeColor::FAMILIES.iter().flatten().copied() {
+                let palette = Palette::new(color, dark_mode);
+                let egui::Shape::Vec(parts) = strip_background(rect, &palette, 1.5) else {
+                    panic!("the strip is a group of shapes");
+                };
+                let egui::Shape::Mesh(mesh) = &parts[0] else {
+                    panic!("the strip's first shape is its mesh");
+                };
+                assert_eq!(
+                    **mesh,
+                    legacy_strip_mesh(rect, &palette),
+                    "the strip's mesh changed for {color:?} (dark: {dark_mode})"
+                );
             }
         }
     }
