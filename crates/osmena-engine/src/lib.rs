@@ -258,7 +258,8 @@ pub trait Engine: 'static {
     fn resume_download(&self, _id: u32) {}
     /// The profile's blocked sites, at start and after every change. The
     /// engine's before-navigate hook cancels any main-frame navigation
-    /// to one of them before a request goes out and reports it as
+    /// to one of them before a request goes out, and an engine that
+    /// cannot tell frames apart may cancel those too. It reports each as
     /// `EngineEvent::NavigationBlocked`; the model's own guard covers
     /// what the user types, so an engine without a hook still blocks
     /// typed addresses. Default: nothing.

@@ -472,13 +472,14 @@ chrome paints over `about:blank`, with its three lines; "Block on this
 profile" in a tab's menu, with its prompt; and the settings window's
 "Blocked sites" section between Bookmarks and Downloads. The engine side
 of the contract is in place (`EngineEvent::NavigationBlocked`,
-`Engine::configure_blocked_sites`, both defaulted), but no engine
-implements the before-navigate hook yet. The Nautilus and Paladin
-changes that follow in this change set add it. Until then a link, script
-or redirect onto a blocked site is caught only by the model's
-`UrlChanged` rule, which re-blocks the tab after the request has gone
-out, and Back on a tab blocked in place stays on the block page, because
-the default `replace_with_blank` pushes an entry.
+`Engine::configure_blocked_sites`, both defaulted). The Nautilus and
+Paladin changes in this change set added the engine's before-navigate
+hook the same day (see the last paragraph). Without an engine hook, the
+model's own behaviour is this: a link, script or redirect onto a blocked
+site is caught only by the `UrlChanged` rule, which re-blocks the tab
+after the request has gone out, and Back on a tab blocked in place stays
+on the block page, because the default `replace_with_blank` pushes an
+entry.
 
 Verified: `cargo test` (395 tests, one ignored: chrome 110, core 229,
 shell 50, xtask 6), clippy with `-D warnings`, and `cargo fmt --check`.
@@ -531,11 +532,7 @@ own; `blocked.toml` lists the other two. Ctrl+Q exited cleanly on every
 run. A profile whose `blocked.toml` reads `sites = 3` logged the warning
 and started normally (checked when the blocked.toml loader landed).
 
-Not verified: Paladin by hand (it type-checks against this revision, and
-nothing it implements has changed yet); macOS; an engine's
-before-navigate hook (the Nautilus and Paladin changes in this change
-set add it); the `NAUTILUS_CEF_LOG=verbose` check that no request named
-example.com was made; a held key across the moment a block page appears;
+Not verified: macOS; a held key across the moment a block page appears;
 the Block button by click (Enter was used); a resize by the window
 border (`SetWindowPos` was used). Observed and left alone: a rejected
 entry keeps its text in the field, as the extensions field does; the
@@ -557,9 +554,10 @@ scripted input: a page script's link to a blocked site was refused
 before any request for it (Nautilus logs `blocked navigation to
 https://example.com/`, Paladin the same line), the tab menu's block
 replaced the page, Remove returned it, and Back went to the page
-before. Known and accepted: Forward onto the replaced blank entry shows
-a plain blank page. Not verified: an HTTP redirect onto a blocked site
-in Paladin, since Servo's hook does not see those.
+before.
+Not verified in Paladin: a redirect onto a blocked site (it reaches the
+model's `UrlChanged` rule, S15), an `<iframe>` onto one by hand, DevTools
+on a blocked tab; macOS in either browser.
 
 Two follow-ups are open. `apply`'s blank-page exemption compares the
 exact string `about:blank`, so a URL change to `about:blank#x` on a
