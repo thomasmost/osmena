@@ -258,23 +258,22 @@ The engine contract, in `osmena-engine`:
 - **Blocked sites.** A profile keeps a list of websites it refuses to
   show, keyed by registrable domain, so blocking `youtube.com` covers
   `www.youtube.com` and `m.youtube.com` (the public suffix list keeps
-  `bbc.co.uk` a site and `co.uk` not; IP addresses and `localhost`
-  stand whole; `about:`, `data:` and `view-source:` pages have no site).
-  "Block on this profile" in a tab's menu asks first and warns that
-  only the settings window unblocks; the "Blocked sites" section there
-  lists the sites with Remove on each and a field that takes a host or
-  a URL. The model stops what the user types before any request, and
-  the engine's before-navigate hook stops links, scripts and redirects
-  before any request where it sees them. A load the hook misses (an
-  engine without one, or a redirect or popup it does not see) may be
-  requested once, and is then replaced by the block page through the
-  `UrlChanged` rule. The tab shows a block page the chrome paints over
-  `about:blank`, one of three lines on the profile's colour with the
-  site named beneath; the address bar keeps the attempted address, Back
-  returns to the page before, Reload
-  re-rolls the line. Blocking replaces the history entry of every open
-  tab on the site; unblocking sends them back. The list is
-  `blocked.toml` in the profile.
+  `bbc.co.uk` a site and `co.uk` not; IP addresses and `localhost` stand
+  whole; `about:`, `data:` and `view-source:` pages have no site). "Block
+  on this profile" in a tab's menu asks first and warns that only the
+  settings window unblocks; the "Blocked sites" section there lists the
+  sites with Remove on each and a field that takes a host or a URL. The
+  model stops what the user types before any request, and the engine's
+  before-navigate hook stops links, scripts and redirects before any
+  request where it sees them. A load the hook misses (an engine without
+  one, or a redirect, a popup's first page, or a step Back or Forward it
+  does not see) may be requested once, and is then replaced by the block
+  page through the `UrlChanged` rule. The tab shows a block page the
+  chrome paints over `about:blank`, one of three lines on the profile's
+  colour with the site named beneath; the address bar keeps the attempted
+  address, Back returns to the page before, Reload re-rolls the line.
+  Blocking replaces the history entry of every open tab on the site;
+  unblocking sends them back. The list is `blocked.toml` in the profile.
 - **Find in page**, when the engine searches pages (`EngineInfo::find`).
   `Ctrl+F` (or "Find in page…" in the ☰ menu, "Find…" in the macOS Edit
   menu) opens a pill at the top right of the page: the text is searched

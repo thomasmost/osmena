@@ -11,24 +11,24 @@ All notable changes to the osmena crates. The crates version together.
   `www.youtube.com` and `m.youtube.com` (the public suffix list keeps
   `bbc.co.uk` a site and `co.uk` not). A tab's context menu offers
   "Block on this profile" behind a confirmation; the settings window
-  gains a "Blocked sites" section to add, view and remove them, the
-  only place a site is unblocked. Every navigation the user starts is
-  checked in the model (a typed address, a new tab, a search, a
-  restored tab) before any request goes out, and the engine's
-  before-navigate hook stops links, scripts and redirects before any
-  request where it sees them. A load the hook misses (an engine without
-  one, or a redirect or popup it does not see) may be requested once,
-  and is then replaced by the block page through the `UrlChanged` rule.
-  The tab shows a block page the chrome paints over `about:blank`, one
-  of three lines on the profile's colour, with the attempted address
-  in the address bar; Back returns to the page before, Reload re-rolls
-  the line. Blocking replaces the history entry
-  of every open tab on the site; unblocking sends them back to their
-  pages. The list is `blocked.toml` in the profile
-  (`osmena_core::blocked`, `Tab::blocked`, `Command::{PromptBlockSites,
-  BlockSites, UnblockSite}`, `EngineEvent::NavigationBlocked`,
-  `Engine::configure_blocked_sites`, `TabHost::replace_with_blank`,
-  both defaulted).
+  gains a "Blocked sites" section to add, view and remove them, the only
+  place a site is unblocked. Every navigation the user starts is checked
+  in the model (a typed address, a new tab, a search, a restored tab)
+  before any request goes out, and the engine's before-navigate hook
+  stops links, scripts and redirects before any request where it sees
+  them. A load the hook misses (an engine without one, or a redirect, a
+  popup's first page, or a step Back or Forward it does not see) may be
+  requested once, and is then replaced by the block page through the
+  `UrlChanged` rule. The tab shows a block page the chrome paints over
+  `about:blank`, one of three lines on the profile's colour, with the
+  attempted address in the address bar; Back returns to the page before,
+  Reload re-rolls the line. Blocking replaces the history entry of every
+  open tab on the site; unblocking sends them back to their pages. The
+  list is `blocked.toml` in the profile (`osmena_core::blocked`,
+  `Tab::blocked`, `Command::{PromptBlockSites, BlockSites,
+  UnblockSite}`, `EngineEvent::NavigationBlocked`,
+  `Engine::configure_blocked_sites`, `TabHost::replace_with_blank`, both
+  defaulted).
 - Restored tabs get their titles and favicons without being opened.
   After a session restore the deferred tabs are warmed one after
   another, half a second apart from left to right, window by window:
