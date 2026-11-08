@@ -9,6 +9,7 @@
 //! [`dispatch`] and [`apply`], which is what keeps this crate unit-testable
 //! without a browser engine.
 
+pub mod blocked;
 pub mod bookmarks;
 pub mod bookmarks_html;
 pub mod brand;
@@ -29,6 +30,7 @@ pub mod suggest;
 pub mod update;
 pub mod zoom;
 
+pub use blocked::{BLOCKED_LINES, BlockedError, BlockedPage, BlockedSites, line_seed, pick_line};
 pub use bookmarks::{Bookmark, BookmarkGroup, Bookmarks, BookmarksError};
 pub use brand::{Brand, EngineInfo, ExtensionSupport, PageTools};
 pub use command::{

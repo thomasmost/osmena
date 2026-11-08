@@ -607,6 +607,11 @@ impl Profile {
         self.dir.join("zoom.toml")
     }
 
+    /// The sites this profile refuses to show (`crate::blocked`).
+    pub fn blocked_path(&self) -> PathBuf {
+        self.dir.join("blocked.toml")
+    }
+
     /// The downloads list.
     pub fn downloads_path(&self) -> PathBuf {
         self.dir.join("downloads.toml")
@@ -860,6 +865,17 @@ mod tests {
         if cfg!(target_os = "windows") {
             assert!(dir.contains("/AppData/Roaming/Osmena/"), "{dir}");
         }
+    }
+
+    #[test]
+    fn the_blocked_sites_file_sits_in_the_profile() {
+        let p = Profile {
+            name: "x".to_string(),
+            dir: PathBuf::from("/p"),
+            engine_dir: PathBuf::from("/p/engine"),
+            guest: false,
+        };
+        assert_eq!(p.blocked_path(), PathBuf::from("/p").join("blocked.toml"));
     }
 
     #[test]
