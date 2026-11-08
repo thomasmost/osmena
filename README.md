@@ -87,38 +87,42 @@ osmena_shell::run(osmena_shell::Launch {
 
 The engine contract, in `osmena-engine`:
 
-- `Engine`: `spin`, `drain_events`, `discard_pending`, `open_surface` (a GL
-  context on a native window), `open_host` (the tabs of one window), and,
-  for engines with extensions, `install_extension`,
+- `Engine`: `spin`, `drain_events`, `discard_pending`, `open_surface` (a
+  GL context on a native window), `open_host` (the tabs of one window),
+  and, for engines with extensions, `install_extension`,
   `set_extension_enabled`, and `uninstall_extension` (defaulted to
-  nothing); `configure_downloads` and `configure_blocked_sites`, the
-  policies the shell hands down at start and on every change (both
+  nothing); `configure_downloads` (for engines whose
+  `EngineInfo::downloads` is set) and `configure_blocked_sites`, the
+  policies the shell hands down at start and on every change (after an
+  unblock the new list comes before the navigations that return tabs to
+  their pages, so it must take effect before the next `navigate`; both
   defaulted: an engine's before-navigate hook is to cancel a main-frame
   navigation to a blocked site before any request and report
-  `EngineEvent::NavigationBlocked`; the model blocks what the user
-  types whether or not the engine has a hook).
-- `TabHost`: create, adopt, close, navigate, history, show and hide, focus,
-  resize, input (every pointer event carries the keyboard modifiers held
-  at that moment, from the window's own state; an engine never infers
+  `EngineEvent::NavigationBlocked`; the model blocks what the user types
+  whether or not the engine has a hook).
+- `TabHost`: create, adopt, close, navigate, history, show and hide,
+  focus, resize, input (every pointer event carries the keyboard modifiers
+  held at that moment, from the window's own state; an engine never infers
   them from the key events it saw), `paint_page`, which hands the shell
   either a blit function (the engine painted into GL) or a frame of BGRA
-  pixels with the rectangles that changed (the engine paints into
-  memory; the shell uploads those and draws either under the toolbar),
+  pixels with the rectangles that changed (the engine paints into memory;
+  the shell uploads those and draws either under the toolbar),
   `open_extension_action` and `close_extension_popups` (defaulted to
   nothing), and `page_command` and `context_menu_closed` for the page's
   context menu: the engine reports what is under the pointer with
   `EngineEvent::ContextMenuRequested` (a `PageContext`: link, media,
-  selection, editable state, misspelling), the chrome shows the menu,
-  and what the user picks that only the engine can do (copy, paste,
-  save, print, inspect, …) comes back as a `PageCommand`.
+  selection, editable state, misspelling), the chrome shows the menu, and
+  what the user picks that only the engine can do (copy, paste, save,
+  print, inspect, …) comes back as a `PageCommand`.
   `EngineInfo::page_tools` says which of those the engine offers.
   `replace_with_blank` replaces the tab's current history entry with
   `about:blank` when the page it shows has just been blocked, so Back
-  skips it (defaulted to a plain navigation, which adds an entry
-  instead).
-- Known limitation: Forward after Back from a block page lands on the
-  bare `about:blank` the block page sat over; the model keeps no
-  per-entry state, so the page cannot be restored. Accepted.
+  skips it (defaulted to a plain navigation, which adds an entry instead,
+  so Back from a tab blocked in place stays on the block page; an engine
+  that can replace an entry should). Forward after Back from a block page
+  then lands on the bare `about:blank` the block page sat over; the model
+  keeps no per-entry state, so the page cannot be restored and this is
+  accepted.
 - `Surface`: make current, resize, the glow handle, begin frame, present.
 
 ## What the user gets
