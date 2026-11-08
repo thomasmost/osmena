@@ -2019,6 +2019,7 @@ fn draw_prompt(
         Some(Prompt::Bookmark { .. }) => return draw_bookmark_prompt(ui, state),
         Some(Prompt::DeleteBookmarkGroup { .. }) => return draw_delete_group_prompt(ui, state),
         Some(Prompt::QuitWithDownloads { .. }) => return draw_quit_prompt(ui, state),
+        Some(Prompt::BlockSites { .. }) => return draw_block_sites_prompt(ui, state),
         Some(_) => {}
     }
     let Some(prompt) = state.prompt.as_mut() else {
@@ -3546,6 +3547,94 @@ fn draw_manage_profiles_prompt(
     picked.into_iter().collect()
 }
 
+/// What the block-sites prompt's buttons do: Block answers
+/// `BlockSites`, Cancel or Escape answer nothing, and either closes the
+/// prompt (`Some`); with neither pressed it stays open (`None`).
+pub(crate) fn block_sites_answer(
+    confirmed: bool,
+    cancelled: bool,
+    sites: &[String],
+) -> Option<Vec<Command>> {
+    if confirmed {
+        Some(vec![Command::BlockSites(sites.to_vec())])
+    } else if cancelled {
+        Some(Vec::new())
+    } else {
+        None
+    }
+}
+
+/// The title and the question of the block-sites prompt: one site is
+/// named in the question, several are listed under it.
+pub(crate) fn block_sites_prompt_text(sites: &[String]) -> (String, String) {
+    const WARNING: &str =
+        "Are you sure? Blocked sites can only be unblocked from profile settings.";
+    match sites {
+        [site] => (
+            "Block site".to_string(),
+            format!("Block {site} on this profile? {WARNING}"),
+        ),
+        _ => (
+            "Block sites".to_string(),
+            format!(
+                "Block these sites on this profile?\n{}\n{WARNING}",
+                sites
+                    .iter()
+                    .map(|s| format!("    {s}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        ),
+    }
+}
+
+/// "Block <site> on this profile?": the warning that only the settings
+/// window unblocks, and Block or Cancel.
+fn draw_block_sites_prompt(ui: &mut Ui, state: &mut ChromeState) -> Vec<Command> {
+    let Some(prompt) = state.prompt.as_ref() else {
+        return Vec::new();
+    };
+    let Prompt::BlockSites { sites } = &prompt.prompt else {
+        return Vec::new();
+    };
+    let (title, question) = block_sites_prompt_text(sites);
+    let mut confirmed = false;
+    let mut cancelled = false;
+    egui::Window::new(title)
+        .id(Id::new("chrome-prompt"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_TOP, Vec2::new(0.0, 80.0))
+        .show(ui.ctx(), |ui| {
+            ui.set_min_width(360.0);
+            ui.set_max_width(420.0);
+            ui.label(question);
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                let danger = ui.visuals().error_fg_color;
+                if ui
+                    .add(Button::new(RichText::new("Block").color(danger)))
+                    .clicked()
+                {
+                    confirmed = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancelled = true;
+                }
+            });
+            if ui.input(|i| i.key_pressed(Key::Escape)) {
+                cancelled = true;
+            }
+        });
+    match block_sites_answer(confirmed, cancelled, sites) {
+        Some(commands) => {
+            state.prompt = None;
+            commands
+        }
+        None => Vec::new(),
+    }
+}
+
 /// "Delete this profile?": what goes with it, and Delete or Cancel.
 fn draw_delete_profile_prompt(ui: &mut Ui, state: &mut ChromeState) -> Vec<Command> {
     let Some(prompt) = state.prompt.as_ref() else {
@@ -4875,6 +4964,50 @@ mod tests {
         assert_eq!(
             describe_chord(KeyChord::new(Modifiers::empty(), Code::Numpad5)),
             "Num 5"
+        );
+    }
+
+    #[test]
+    fn the_block_prompt_names_one_site_and_lists_several() {
+        assert_eq!(
+            block_sites_prompt_text(&["youtube.com".to_string()]),
+            (
+                "Block site".to_string(),
+                "Block youtube.com on this profile? Are you sure? Blocked sites can only be unblocked from profile settings."
+                    .to_string(),
+            )
+        );
+        let (title, body) =
+            block_sites_prompt_text(&["a.example".to_string(), "b.example".to_string()]);
+        assert_eq!(title, "Block sites");
+        assert!(
+            body.starts_with("Block these sites on this profile?"),
+            "{body}"
+        );
+        assert!(body.contains("\n    a.example\n"), "{body}");
+        assert!(body.contains("\n    b.example\n"), "{body}");
+        assert!(
+            body.ends_with(
+                "Are you sure? Blocked sites can only be unblocked from profile settings."
+            ),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn the_block_prompt_answers_block_sites_on_block_and_nothing_on_cancel() {
+        let sites = vec!["a.example".to_string(), "b.example".to_string()];
+        // AC2.3: Cancel and Escape (both set `cancelled`) issue no command.
+        assert_eq!(
+            block_sites_answer(true, false, &sites),
+            Some(vec![Command::BlockSites(sites.clone())])
+        );
+        assert_eq!(block_sites_answer(false, true, &sites), Some(Vec::new()));
+        assert_eq!(block_sites_answer(false, false, &sites), None);
+        // A click on Block wins over a Cancel or Escape in the same frame.
+        assert_eq!(
+            block_sites_answer(true, true, &sites),
+            Some(vec![Command::BlockSites(sites.clone())])
         );
     }
 

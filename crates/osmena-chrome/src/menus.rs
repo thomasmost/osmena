@@ -4,10 +4,10 @@
 
 use keyboard_types::{Code, Modifiers};
 use osmena_core::{
-    Bookmark, BookmarkGroup, Bookmarks, BookmarksFile, Command, CommandKind, Extension,
-    ExtensionSource, ExtensionSupport, FolderId, History, HistoryEntry, KeyChord, Keymap,
-    LoadState, MediaKind, PageCommand, PageContext, PageTools, Platform, ProfileEntry, TabId,
-    UpdateStatus, Window, WindowId,
+    BlockedSites, Bookmark, BookmarkGroup, Bookmarks, BookmarksFile, Command, CommandKind,
+    Extension, ExtensionSource, ExtensionSupport, FolderId, History, HistoryEntry, KeyChord,
+    Keymap, LoadState, MediaKind, PageCommand, PageContext, PageTools, Platform, ProfileEntry,
+    TabId, UpdateStatus, Window, WindowId,
 };
 use url::Url;
 
@@ -1189,12 +1189,14 @@ fn elide(text: &str, max: usize) -> String {
 /// right-clicked tab alone). `others` are the other windows (id and label)
 /// and `profiles` the other profiles on this machine. Moves recreate the
 /// tabs at their URLs: an engine's page is bound to the native window
-/// it was created for.
+/// it was created for. `blocked` is the profile's blocked sites, for the
+/// Block entry.
 pub fn tab_menu(
     window: &Window,
     targets: &[TabId],
     others: &[(WindowId, String)],
     profiles: &[ProfileEntry],
+    blocked: &BlockedSites,
 ) -> Vec<MenuEntry> {
     let count = targets.len();
     let plural = |one: &str, many: &str| {
@@ -1213,6 +1215,19 @@ pub fn tab_menu(
     let has_rest = !rest.is_empty();
     let selection = window.selection();
     let selected = selection.len();
+    // The sites the targets would block: the distinct ones not blocked
+    // yet. A tab without a site (`about:blank`) adds nothing.
+    let to_block = blocked.sites_to_block(
+        targets
+            .iter()
+            .filter_map(|id| window.tab(*id))
+            .map(|t| &t.url),
+    );
+    let block_label = if to_block.len() > 1 {
+        format!("Block {} sites on this profile", to_block.len())
+    } else {
+        "Block on this profile".to_string()
+    };
 
     vec![
         MenuEntry::item(
@@ -1277,6 +1292,15 @@ pub fn tab_menu(
                 })
                 .collect(),
         },
+        MenuEntry::Separator,
+        MenuEntry::item(
+            block_label,
+            !to_block.is_empty(),
+            Command::PromptBlockSites {
+                window: window.id,
+                tabs: targets.to_vec(),
+            },
+        ),
     ]
 }
 
@@ -1944,6 +1968,7 @@ mod tests {
             &[TabId(2)],
             &[(WindowId(7), "Other".to_string())],
             &[work_profile()],
+            &BlockedSites::default(),
         );
         assert_eq!(
             labels(&entries),
@@ -1958,13 +1983,22 @@ mod tests {
                 "Move tab to new window",
                 "Move tab to window",
                 "Open tab in profile",
+                "-",
+                "Block on this profile",
             ]
         );
         // One tab selected: "close all selected" has nothing more to do.
         assert_eq!(
             enabled(&entries),
-            vec![true, true, false, true, true, true, true, true, true, true]
+            vec![
+                true, true, false, true, true, true, true, true, true, true, true, true
+            ]
         );
+        assert!(matches!(
+            &entries[11],
+            MenuEntry::Item { command: Command::PromptBlockSites { window: WindowId(1), tabs }, .. }
+                if *tabs == vec![TabId(2)]
+        ));
         assert!(matches!(
             &entries[1],
             MenuEntry::Item { command: Command::CloseTabs(rest), .. } if *rest == vec![TabId(1), TabId(3)]
@@ -2006,24 +2040,66 @@ mod tests {
         let mut w = window_with(3);
         w.selected = vec![TabId(1), TabId(2), TabId(3)];
         let all = [TabId(1), TabId(2), TabId(3)];
-        let entries = tab_menu(&w, &all, &[], &[]);
+        let entries = tab_menu(&w, &all, &[], &[], &BlockedSites::default());
         assert_eq!(labels(&entries)[0], "Close 3 tabs");
         assert_eq!(labels(&entries)[2], "Close all selected (3)");
         assert_eq!(labels(&entries)[4], "Move 3 tabs to folder…");
         assert_eq!(labels(&entries)[5], "Bookmark all selected (3)…");
         assert_eq!(labels(&entries)[7], "Move 3 tabs to new window");
+        assert_eq!(labels(&entries)[11], "Block 3 sites on this profile");
         // Close others, move to new window: nothing left; no other windows
         // or profiles: the submenus are disabled.
         assert_eq!(
             enabled(&entries),
             vec![
-                true, false, true, true, true, true, true, false, false, false
+                true, false, true, true, true, true, true, false, false, false, true, true
             ]
         );
         assert!(matches!(
             &entries[2],
             MenuEntry::Item { command: Command::CloseTabs(tabs), .. } if *tabs == all.to_vec()
         ));
+    }
+
+    #[test]
+    fn the_block_entry_is_disabled_when_nothing_can_be_blocked() {
+        let mut blocked = BlockedSites::default();
+        blocked.add("2.example");
+        // The target's site is already blocked: nothing to add.
+        let w = window_with(3);
+        let entries = tab_menu(&w, &[TabId(2)], &[], &[], &blocked);
+        assert_eq!(labels(&entries)[11], "Block on this profile");
+        assert!(!enabled(&entries)[11]);
+
+        // A target at about:blank has no site to block.
+        let mut w = window_with(3);
+        w.tabs
+            .push(Tab::new(TabId(4), Url::parse("about:blank").unwrap()));
+        let entries = tab_menu(&w, &[TabId(4)], &[], &[], &BlockedSites::default());
+        assert!(!enabled(&entries)[11]);
+
+        // Three targets, one of them already blocked: two sites to add.
+        let w = window_with(3);
+        let all = [TabId(1), TabId(2), TabId(3)];
+        let entries = tab_menu(&w, &all, &[], &[], &blocked);
+        assert_eq!(labels(&entries)[11], "Block 2 sites on this profile");
+        assert!(enabled(&entries)[11]);
+
+        // Two targets on one site count once.
+        let mut w = window_with(3);
+        w.tabs.push(Tab::new(
+            TabId(4),
+            Url::parse("https://www.a.example/x").unwrap(),
+        ));
+        let entries = tab_menu(
+            &w,
+            &[TabId(1), TabId(4)],
+            &[],
+            &[],
+            &BlockedSites::default(),
+        );
+        assert_eq!(labels(&entries)[11], "Block on this profile");
+        assert!(enabled(&entries)[11]);
     }
 }
 

@@ -1125,7 +1125,13 @@ impl<E: Engine> BrowserWindow<E> {
                     .map(|w| (w.id, w.active_tab().display_title().to_string()))
                     .collect();
                 (
-                    menus::tab_menu(model, &targets, &others, &browser.profiles),
+                    menus::tab_menu(
+                        model,
+                        &targets,
+                        &others,
+                        &browser.profiles,
+                        &browser.blocked,
+                    ),
                     position,
                 )
             }
