@@ -97,7 +97,8 @@ The engine contract, in `osmena-engine`:
   unblock the new list comes before the navigations that return tabs to
   their pages, so it must take effect before the next `navigate`; both
   defaulted: an engine's before-navigate hook is to cancel a main-frame
-  navigation to a blocked site before any request and report
+  navigation to a blocked site before any request (an engine that cannot
+  tell frames apart may cancel those too) and report
   `EngineEvent::NavigationBlocked`; the model blocks what the user types
   whether or not the engine has a hook).
 - `TabHost`: create, adopt, close, navigate, history, show and hide,
@@ -262,12 +263,15 @@ The engine contract, in `osmena-engine`:
   "Block on this profile" in a tab's menu asks first and warns that
   only the settings window unblocks; the "Blocked sites" section there
   lists the sites with Remove on each and a field that takes a host or
-  a URL. A navigation to a blocked site is never requested: the model
-  stops what the user types and the engine's before-navigate hook
-  stops links, scripts and redirects. The tab shows a block page the
-  chrome paints over `about:blank`, one of three lines on the
-  profile's colour with the site named beneath; the address bar keeps
-  the attempted address, Back returns to the page before, Reload
+  a URL. The model stops what the user types before any request, and
+  the engine's before-navigate hook stops links, scripts and redirects
+  before any request where it sees them. A load the hook misses (an
+  engine without one, or a redirect or popup it does not see) may be
+  requested once, and is then replaced by the block page through the
+  `UrlChanged` rule. The tab shows a block page the chrome paints over
+  `about:blank`, one of three lines on the profile's colour with the
+  site named beneath; the address bar keeps the attempted address, Back
+  returns to the page before, Reload
   re-rolls the line. Blocking replaces the history entry of every open
   tab on the site; unblocking sends them back. The list is
   `blocked.toml` in the profile.

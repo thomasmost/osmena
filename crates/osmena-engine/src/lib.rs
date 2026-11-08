@@ -262,6 +262,8 @@ pub trait Engine: 'static {
     /// cannot tell frames apart may cancel those too. It reports each as
     /// `EngineEvent::NavigationBlocked`; the model's own guard covers
     /// what the user types, so an engine without a hook still blocks
-    /// typed addresses. Default: nothing.
+    /// typed addresses. The list must take effect before the next
+    /// `TabHost::navigate`: after an unblock the shell sends it just ahead
+    /// of the navigations that return tabs to their pages. Default: nothing.
     fn configure_blocked_sites(&self, _sites: BlockedSites) {}
 }

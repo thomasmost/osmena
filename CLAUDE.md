@@ -471,15 +471,15 @@ user-started navigation passes through in `dispatch`; the block page the
 chrome paints over `about:blank`, with its three lines; "Block on this
 profile" in a tab's menu, with its prompt; and the settings window's
 "Blocked sites" section between Bookmarks and Downloads. The engine side
-of the contract is in place (`EngineEvent::NavigationBlocked`,
-`Engine::configure_blocked_sites`, both defaulted). The Nautilus and
-Paladin changes in this change set added the engine's before-navigate
-hook the same day (see the browsers' adoption below). Without an engine
-hook, the model's own behaviour is this: a link, script or redirect onto
-a blocked site is caught only by the `UrlChanged` rule, which re-blocks
-the tab after the request has gone out, and Back on a tab blocked in
-place stays on the block page, because the default `replace_with_blank`
-pushes an entry.
+of the contract is in place (`EngineEvent::NavigationBlocked`;
+`Engine::configure_blocked_sites` and `TabHost::replace_with_blank`,
+both defaulted). The Nautilus and Paladin changes in this change set
+added the engine's before-navigate hook the same day (see the browsers'
+adoption below). Without an engine hook, the model's own behaviour is
+this: a link, script or redirect onto a blocked site is caught only by
+the `UrlChanged` rule, which re-blocks the tab after the request has
+gone out, and Back on a tab blocked in place stays on the block page,
+because the default `replace_with_blank` pushes an entry.
 
 Verified: `cargo test` (395 tests, one ignored: chrome 110, core 229,
 shell 50, xtask 6), clippy with `-D warnings`, and `cargo fmt --check`.

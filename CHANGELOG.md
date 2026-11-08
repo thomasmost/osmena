@@ -14,12 +14,15 @@ All notable changes to the osmena crates. The crates version together.
   gains a "Blocked sites" section to add, view and remove them, the
   only place a site is unblocked. Every navigation the user starts is
   checked in the model (a typed address, a new tab, a search, a
-  restored tab) and every other in the engine's before-navigate hook
-  (a link, a script, a redirect); a blocked destination is never
-  requested. The tab shows a block page the chrome paints over
-  `about:blank`, one of three lines on the profile's colour, with the
-  attempted address in the address bar; Back returns to the page
-  before, Reload re-rolls the line. Blocking replaces the history entry
+  restored tab) before any request goes out, and the engine's
+  before-navigate hook stops links, scripts and redirects before any
+  request where it sees them. A load the hook misses (an engine without
+  one, or a redirect or popup it does not see) may be requested once,
+  and is then replaced by the block page through the `UrlChanged` rule.
+  The tab shows a block page the chrome paints over `about:blank`, one
+  of three lines on the profile's colour, with the attempted address
+  in the address bar; Back returns to the page before, Reload re-rolls
+  the line. Blocking replaces the history entry
   of every open tab on the site; unblocking sends them back to their
   pages. The list is `blocked.toml` in the profile
   (`osmena_core::blocked`, `Tab::blocked`, `Command::{PromptBlockSites,
