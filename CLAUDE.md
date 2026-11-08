@@ -474,12 +474,12 @@ profile" in a tab's menu, with its prompt; and the settings window's
 of the contract is in place (`EngineEvent::NavigationBlocked`,
 `Engine::configure_blocked_sites`, both defaulted). The Nautilus and
 Paladin changes in this change set added the engine's before-navigate
-hook the same day (see the browsers' adoption below). Without an engine hook, the
-model's own behaviour is this: a link, script or redirect onto a blocked
-site is caught only by the `UrlChanged` rule, which re-blocks the tab
-after the request has gone out, and Back on a tab blocked in place stays
-on the block page, because the default `replace_with_blank` pushes an
-entry.
+hook the same day (see the browsers' adoption below). Without an engine
+hook, the model's own behaviour is this: a link, script or redirect onto
+a blocked site is caught only by the `UrlChanged` rule, which re-blocks
+the tab after the request has gone out, and Back on a tab blocked in
+place stays on the block page, because the default `replace_with_blank`
+pushes an entry.
 
 Verified: `cargo test` (395 tests, one ignored: chrome 110, core 229,
 shell 50, xtask 6), clippy with `-D warnings`, and `cargo fmt --check`.
@@ -547,18 +547,17 @@ Both browsers adopted revision a5fc846 on 2026-11-08, each on its own
 `main`. Nautilus cancels a main-frame navigation to a blocked site in
 `on_before_browse` and reports `NavigationBlocked`, and swaps the tab's
 entry for `about:blank` through `location.replace`. Paladin denies a
-navigation in `request_navigation`, frames included since Servo does
-not name the frame (its S15), and swaps the entry through
+navigation in `request_navigation`, frames included since Servo does not
+name the frame (its S15), and swaps the entry through
 `evaluate_javascript`. Both were checked by hand on Windows with
 scripted input: a page script's link to a blocked site was refused
 before any request for it (Nautilus logs `blocked navigation to
 https://example.com/`, Paladin the same line), the tab menu's block
-replaced the page, Remove returned it, and Back went to the page
-before.
+replaced the page, Remove returned it, and Back went to the page before.
 
 Not verified in Paladin: a redirect onto a blocked site (it reaches the
-model's `UrlChanged` rule, S15), an `<iframe>` onto one by hand, DevTools
-on a blocked tab; macOS in either browser.
+model's `UrlChanged` rule, S15), an `<iframe>` onto one by hand,
+DevTools on a blocked tab; macOS in either browser.
 
 Two follow-ups are open. `apply`'s blank-page exemption compares the
 exact string `about:blank`, so a URL change to `about:blank#x` on a
