@@ -209,15 +209,20 @@ impl Palette {
 
 /// `rect` filled with the strip's colour curve top to bottom: `bands`
 /// quads of vertex colours, which egui interpolates, so the quadratic
-/// ease keeps its shape instead of flattening into one ramp.
-fn gradient_mesh(rect: Rect, palette: &Palette, bands: u32) -> egui::Mesh {
+/// ease keeps its shape instead of flattening into one ramp. The curve
+/// reaches the toolbar's fill `ease_end` of the way down (1 for the
+/// strip itself) and stays there below.
+fn gradient_mesh(rect: Rect, palette: &Palette, bands: u32, ease_end: f32) -> egui::Mesh {
     let mut mesh = egui::Mesh::default();
     for band in 0..bands {
         let t0 = band as f32 / bands as f32;
         let t1 = (band + 1) as f32 / bands as f32;
         let y0 = rect.top() + rect.height() * t0;
         let y1 = rect.top() + rect.height() * t1;
-        let (c0, c1) = (palette.strip_at(t0), palette.strip_at(t1));
+        let (c0, c1) = (
+            palette.strip_at(t0 / ease_end),
+            palette.strip_at(t1 / ease_end),
+        );
         let base = mesh.vertices.len() as u32;
         mesh.colored_vertex(Pos2::new(rect.left(), y0), c0);
         mesh.colored_vertex(Pos2::new(rect.right(), y0), c0);
@@ -236,7 +241,7 @@ fn gradient_mesh(rect: Rect, palette: &Palette, bands: u32) -> egui::Mesh {
 /// which every tab but the active one stops short of, and whose
 /// outline that tab continues.
 fn strip_background(rect: Rect, palette: &Palette, pixels_per_point: f32) -> egui::Shape {
-    let mesh = gradient_mesh(rect, palette, 8);
+    let mesh = gradient_mesh(rect, palette, 8, 1.0);
     // One pixel row, the strip's last; the tabs snap to the same grid.
     let edge = strip_edge_y(rect.bottom(), pixels_per_point);
     egui::Shape::Vec(vec![
@@ -583,6 +588,14 @@ impl ChromeState {
             || self.prompt.is_some()
             || self.launcher.is_some()
             || self.suggest.open
+    }
+
+    /// Whether something the chrome has open takes every key while it is
+    /// open, focused or not: the downloads popover, the Launch Panel and a
+    /// prompt. A prompt of buttons alone gives egui no focused widget, so
+    /// the shell must send it the keys itself or its Escape never arrives.
+    pub fn takes_every_key(&self) -> bool {
+        self.downloads_open || self.has_launcher() || self.has_prompt()
     }
 }
 
@@ -4406,51 +4419,123 @@ pub(crate) fn fit_size(trial: f32, width_at_trial: f32, max_width: f32) -> f32 {
 /// easing into the toolbar's as the strip does, the tab's line large
 /// in the middle, and the site named beneath with where to unblock
 /// it. Nothing on it is a control; the page behind is `about:blank`.
+/// How far the muted lines keep their ink: a share of it, the rest the
+/// fill under them.
+const BLOCK_MUTED: f32 = 0.85;
+
+/// Where the block page's three lines (the tab's line, the site, the
+/// hint) sit, as points below the page's top edge, given each line's
+/// laid-out height. The tab's line sits just above the middle.
+pub(crate) fn block_page_tops(page_height: f32, heights: [f32; 3]) -> [f32; 3] {
+    let [line, site, _] = heights;
+    let line_top = page_height / 2.0 - line / 2.0 - 20.0;
+    let site_top = line_top + line + 18.0;
+    let hint_top = site_top + site + 6.0;
+    [line_top, site_top, hint_top]
+}
+
+/// The fraction of the page's height at which its colour has finished
+/// easing into the toolbar's: the top of the tab's line. The text then
+/// stands on the toolbar's fill, not on the part of the ramp whose
+/// luminance runs through the middle, where no one ink reads on both
+/// ends of a line.
+pub(crate) fn block_page_ease_end(page_height: f32, tops: [f32; 3]) -> f32 {
+    if page_height <= 0.0 {
+        return 1.0;
+    }
+    (tops[0] / page_height).clamp(0.01, 1.0)
+}
+
+/// The page's fill `y` points below its top edge: the strip's curve, over
+/// the page and easing into the toolbar's fill by `ease_end`.
+pub(crate) fn block_page_fill(
+    palette: &Palette,
+    page_height: f32,
+    ease_end: f32,
+    y: f32,
+) -> Color32 {
+    palette.strip_at(y / page_height.max(1.0) / ease_end)
+}
+
+/// The colours of the block page's lines, in the order of `tops`. Each
+/// line's ink is the one that reads on the fill under its middle; the
+/// two lines beneath are that ink muted towards the fill.
+pub(crate) fn block_page_colours(
+    palette: &Palette,
+    page_height: f32,
+    ease_end: f32,
+    tops: [f32; 3],
+    heights: [f32; 3],
+) -> [Color32; 3] {
+    std::array::from_fn(|i| {
+        let mid = tops[i] + heights[i] / 2.0;
+        let fill = block_page_fill(palette, page_height, ease_end, mid);
+        let ink = palette.ink_on(fill);
+        if i == 0 {
+            ink
+        } else {
+            blend(fill, ink, BLOCK_MUTED)
+        }
+    })
+}
+
+/// Replace the page area with the block page: the profile's colour
+/// easing into the toolbar's as the strip does, the tab's line large
+/// in the middle, and the site named beneath with where to unblock
+/// it. Nothing on it is a control; the page behind is `about:blank`.
 pub fn draw_blocked_page(ui: &mut Ui, rect: Rect, color: ChromeColor, page: &BlockedPage) {
     let palette = Palette::new(color, ui.visuals().dark_mode);
     let painter = ui.painter();
+    let medium = FontFamily::Name(theme::MEDIUM.into());
+    let line_font = |size: f32| FontId::new(size, medium.clone());
+    let site_font = FontId::new(15.0, FontFamily::Proportional);
+    let hint_font = FontId::new(12.0, FontFamily::Proportional);
+    let text = page.text().to_string();
+    let site_text = format!("{} is blocked on this profile", page.site);
+    let hint_text = "Unblock it under Settings \u{203a} Blocked sites".to_string();
+
+    // The line, as large as the width allows, and the lines beneath it,
+    // measured first: where they sit decides the strip's curve and the
+    // colours they are drawn in.
+    const TRIAL: f32 = 64.0;
+    let trial = painter.layout_no_wrap(text.clone(), line_font(TRIAL), Color32::BLACK);
+    let size = fit_size(TRIAL, trial.size().x, (rect.width() - 48.0).max(80.0));
+    let heights = [
+        painter
+            .layout_no_wrap(text.clone(), line_font(size), Color32::BLACK)
+            .size()
+            .y,
+        painter
+            .layout_no_wrap(site_text.clone(), site_font.clone(), Color32::BLACK)
+            .size()
+            .y,
+        painter
+            .layout_no_wrap(hint_text.clone(), hint_font.clone(), Color32::BLACK)
+            .size()
+            .y,
+    ];
+    let tops = block_page_tops(rect.height(), heights);
+    let ease_end = block_page_ease_end(rect.height(), tops);
+    let [line_ink, site_ink, hint_ink] =
+        block_page_colours(&palette, rect.height(), ease_end, tops, heights);
+
     // The strip's curve, over the whole page: more bands than the
     // strip's eight, since this is hundreds of pixels tall.
-    painter.add(egui::Shape::mesh(gradient_mesh(rect, &palette, 24)));
-    let ink = palette.ink_on(palette.strip_at(0.5));
-    let muted = ink.gamma_multiply(0.72);
-    let medium = FontFamily::Name(theme::MEDIUM.into());
+    painter.add(egui::Shape::mesh(gradient_mesh(
+        rect, &palette, 24, ease_end,
+    )));
 
-    // The line, as large as the width allows.
-    const TRIAL: f32 = 64.0;
-    let text = page.text().to_string();
-    let trial = painter.layout_no_wrap(text.clone(), FontId::new(TRIAL, medium.clone()), ink);
-    let size = fit_size(TRIAL, trial.size().x, (rect.width() - 48.0).max(80.0));
-    let line = painter.layout_no_wrap(text, FontId::new(size, medium), ink);
-    let line_size = line.size();
-    let line_pos = Pos2::new(
-        rect.center().x - line_size.x / 2.0,
-        rect.center().y - line_size.y / 2.0 - 20.0,
-    );
-    painter.galley(line_pos, line, ink);
+    let line = painter.layout_no_wrap(text, line_font(size), line_ink);
+    let line_pos = Pos2::new(rect.center().x - line.size().x / 2.0, rect.top() + tops[0]);
+    painter.galley(line_pos, line, line_ink);
 
-    // Beneath: the site, and where to undo this.
-    let site = painter.layout_no_wrap(
-        format!("{} is blocked on this profile", page.site),
-        FontId::new(15.0, FontFamily::Proportional),
-        muted,
-    );
-    let site_pos = Pos2::new(
-        rect.center().x - site.size().x / 2.0,
-        line_pos.y + line_size.y + 18.0,
-    );
-    let site_height = site.size().y;
-    painter.galley(site_pos, site, muted);
-    let hint = painter.layout_no_wrap(
-        "Unblock it under Settings \u{203a} Blocked sites".to_string(),
-        FontId::new(12.0, FontFamily::Proportional),
-        muted,
-    );
-    let hint_pos = Pos2::new(
-        rect.center().x - hint.size().x / 2.0,
-        site_pos.y + site_height + 6.0,
-    );
-    painter.galley(hint_pos, hint, muted);
+    let site = painter.layout_no_wrap(site_text, site_font, site_ink);
+    let site_pos = Pos2::new(rect.center().x - site.size().x / 2.0, rect.top() + tops[1]);
+    painter.galley(site_pos, site, site_ink);
+
+    let hint = painter.layout_no_wrap(hint_text, hint_font, hint_ink);
+    let hint_pos = Pos2::new(rect.center().x - hint.size().x / 2.0, rect.top() + tops[2]);
+    painter.galley(hint_pos, hint, hint_ink);
 }
 
 /// Turn address-bar text into a URL. Bare domains get `https://`. `localhost`,
@@ -5078,6 +5163,107 @@ mod tests {
             block_sites_answer(true, true, &sites),
             Some(vec![Command::BlockSites(sites.clone())])
         );
+    }
+
+    #[test]
+    fn an_open_prompt_takes_every_key_even_without_a_field() {
+        let mut state = ChromeState::default();
+        assert!(!state.takes_every_key());
+        state.open_prompt(Prompt::BlockSites {
+            sites: vec!["a.example".to_string()],
+        });
+        assert!(state.takes_every_key(), "a block prompt must see Escape");
+        state.prompt = None;
+        state.open_launcher();
+        assert!(state.takes_every_key(), "the Launch Panel takes every key");
+        state.launcher = None;
+        state.downloads_open = true;
+        assert!(
+            state.takes_every_key(),
+            "the downloads popover takes every key"
+        );
+    }
+
+    /// WCAG 2.x contrast ratio of two opaque colours, by the standard's own
+    /// formula: linearised channels, the 0.2126 / 0.7152 / 0.0722 weights,
+    /// and (lighter + 0.05) / (darker + 0.05).
+    fn wcag_contrast(a: Color32, b: Color32) -> f32 {
+        fn linear(channel: u8) -> f32 {
+            let c = f32::from(channel) / 255.0;
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        fn relative_luminance(c: Color32) -> f32 {
+            0.2126 * linear(c.r()) + 0.7152 * linear(c.g()) + 0.0722 * linear(c.b())
+        }
+        let (la, lb) = (relative_luminance(a), relative_luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    /// The size one line of `text` lays out to, as the block page lays it out.
+    fn galley_size(ctx: &egui::Context, text: &str, size: f32, family: FontFamily) -> egui::Vec2 {
+        ctx.fonts_mut(|f| {
+            f.layout_job(egui::text::LayoutJob::simple_singleline(
+                text.to_string(),
+                FontId::new(size, family),
+                Color32::BLACK,
+            ))
+        })
+        .size()
+    }
+
+    /// Every block page line keeps a contrast floor against the fill under
+    /// it, on every swatch in both modes: 3:1 for the tab's line and 4.5:1
+    /// for the site and the hint. Each line is checked over its whole
+    /// height, against the fill the page paints there, at three window
+    /// heights and at widths that take the line from its widest to its
+    /// smallest size.
+    #[test]
+    fn the_block_page_text_meets_its_contrast_floors_on_every_swatch() {
+        let ctx = with_fonts();
+        let medium = FontFamily::Name(theme::MEDIUM.into());
+        let page = BlockedPage::new("example.com", 1);
+        let text = page.text().to_string();
+        let site = format!("{} is blocked on this profile", page.site);
+        let hint = "Unblock it under Settings \u{203a} Blocked sites";
+        for width in [120.0_f32, 400.0, 1200.0] {
+            let widest = galley_size(&ctx, &text, 64.0, medium.clone()).x;
+            let size = fit_size(64.0, widest, (width - 48.0).max(80.0));
+            let heights = [
+                galley_size(&ctx, &text, size, medium.clone()).y,
+                galley_size(&ctx, &site, 15.0, FontFamily::Proportional).y,
+                galley_size(&ctx, hint, 12.0, FontFamily::Proportional).y,
+            ];
+            for dark_mode in [false, true] {
+                for color in ChromeColor::FAMILIES.iter().flatten().copied() {
+                    let palette = Palette::new(color, dark_mode);
+                    for page_height in [320.0_f32, 480.0, 720.0] {
+                        let tops = block_page_tops(page_height, heights);
+                        let ease_end = block_page_ease_end(page_height, tops);
+                        let colours =
+                            block_page_colours(&palette, page_height, ease_end, tops, heights);
+                        for (line, floor) in [3.0_f32, 4.5, 4.5].into_iter().enumerate() {
+                            let samples = 16;
+                            let worst = (0..=samples)
+                                .map(|s| {
+                                    let y = tops[line] + heights[line] * s as f32 / samples as f32;
+                                    let fill = block_page_fill(&palette, page_height, ease_end, y);
+                                    wcag_contrast(colours[line], fill)
+                                })
+                                .fold(f32::MAX, f32::min);
+                            assert!(
+                                worst >= floor,
+                                "line {line} of {color:?} (dark: {dark_mode}) at width {width} \
+                                 and height {page_height} is {worst:.2}:1, under {floor}:1"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// A context with the chrome's fonts in it, which egui only builds

@@ -709,13 +709,13 @@ impl<E: Engine> BrowserWindow<E> {
             }
             WindowEvent::KeyboardInput { event: key, .. } => {
                 let key_input = keyutils::key_input_from_winit(key, self.modifiers);
-                // The downloads popover has no field to hold the focus,
-                // but its Escape is egui's all the same.
-                // The downloads popover and the Launch Panel take every
-                // key while open (Escape closes them), focus or not.
-                let egui_wants_keyboard = self.egui.egui_ctx.egui_wants_keyboard_input()
-                    || self.chrome.downloads_open
-                    || self.chrome.has_launcher();
+                // Whatever the chrome has open takes every key while it is
+                // open (Escape closes it), focused or not: the downloads
+                // popover, the Launch Panel and a prompt. A prompt of buttons
+                // has no field to hold the focus, so without this its Escape
+                // would go to the page.
+                let egui_wants_keyboard =
+                    self.egui.egui_ctx.egui_wants_keyboard_input() || self.chrome.takes_every_key();
                 let stroke = KeyStroke {
                     code: key_input.code,
                     modifiers: key_input.modifiers,
@@ -733,12 +733,20 @@ impl<E: Engine> BrowserWindow<E> {
                 match target {
                     Some(KeyTarget::Page(tab)) => {
                         forward_to_egui = false;
+                        // The chrome owns the content while it shows a block
+                        // page or the crash panel, so no new press reaches
+                        // the page then. A key the page already holds still
+                        // gets its release, or the page would keep it down;
+                        // a release for a key the page never saw is dropped.
+                        let chrome_owns_content = self.content_is_egui && active == Some(tab);
                         if stroke.pressed {
-                            self.page_presses.insert(stroke.code, key_input.clone());
-                        } else {
-                            self.page_presses.remove(&stroke.code);
+                            if !chrome_owns_content {
+                                self.page_presses.insert(stroke.code, key_input.clone());
+                                self.host.input(tab, EngineInput::Key(key_input));
+                            }
+                        } else if self.page_presses.remove(&stroke.code).is_some() {
+                            self.host.input(tab, EngineInput::Key(key_input));
                         }
-                        self.host.input(tab, EngineInput::Key(key_input));
                     }
                     Some(KeyTarget::Command(kind)) => {
                         forward_to_egui = false;
