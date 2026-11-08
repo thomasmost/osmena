@@ -65,8 +65,9 @@ pub struct SettingsWindow<S: Surface> {
     block_input: String,
     /// What that field's last attempt said, if it failed.
     block_notice: Option<String>,
-    /// Commands the extensions and updates sections issued, taken by
-    /// the app after each event.
+    /// Commands the sections issued (extensions, updates, bookmarks,
+    /// downloads, blocked sites and the rest), taken by the app after
+    /// each event.
     commands: Vec<Command>,
     /// The product, for the Updates section.
     brand: &'static Brand,

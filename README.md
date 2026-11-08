@@ -254,6 +254,23 @@ The engine contract, in `osmena-engine`:
   is not the default, with a popover for −, +, and Reset. "Page zoom"
   in Settings (`page_zoom` in `settings.toml`) is the level of sites
   without one of their own.
+- **Blocked sites.** A profile keeps a list of websites it refuses to
+  show, keyed by registrable domain, so blocking `youtube.com` covers
+  `www.youtube.com` and `m.youtube.com` (the public suffix list keeps
+  `bbc.co.uk` a site and `co.uk` not; IP addresses and `localhost`
+  stand whole; `about:`, `data:` and `view-source:` pages have no site).
+  "Block on this profile" in a tab's menu asks first and warns that
+  only the settings window unblocks; the "Blocked sites" section there
+  lists the sites with Remove on each and a field that takes a host or
+  a URL. A navigation to a blocked site is never requested: the model
+  stops what the user types and the engine's before-navigate hook
+  stops links, scripts and redirects. The tab shows a block page the
+  chrome paints over `about:blank`, one of three lines on the
+  profile's colour with the site named beneath; the address bar keeps
+  the attempted address, Back returns to the page before, Reload
+  re-rolls the line. Blocking replaces the history entry of every open
+  tab on the site; unblocking sends them back. The list is
+  `blocked.toml` in the profile.
 - **Find in page**, when the engine searches pages (`EngineInfo::find`).
   `Ctrl+F` (or "Find in page…" in the ☰ menu, "Find…" in the macOS Edit
   menu) opens a pill at the top right of the page: the text is searched

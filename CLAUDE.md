@@ -5,9 +5,11 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-11-06 (restored tabs warmed one by one for their
-titles and favicons, tab titles centred by their capitals; before that
-the weather tile follows this device, asking
+_Last updated: 2026-11-08 (blocked sites: a per-profile list keyed by
+registrable domain, the guard in `dispatch`, the engine hook contract,
+the block page, the settings section; before that restored tabs warmed
+one by one for their titles and favicons, tab titles centred by their
+capitals; before that the weather tile follows this device, asking
 the system for the location, with Fahrenheit and Celsius a row of their
 own in the Launch Settings and the units following the system's locale
 or, failing that, the country the tile is showing; before that the strip on the pixel grid,
@@ -147,6 +149,42 @@ No engine is needed; the workspace builds in under a minute.
   the shell turns `Ctrl`+wheel over the page into `ZoomIn`/`ZoomOut`
   a notch at a time. The settings window's default goes through
   `command::apply_default_zoom`.
+- **Blocked sites are the model's list; the engine refuses, the chrome
+  reminds.** `Browser::blocked` (`BlockedSites`, `blocked.toml`) is a
+  set of registrable domains: `BlockedSites::site_for` reduces a URL
+  through the `psl` crate (an IP or a single label stays whole, a bare
+  public suffix and a host-less URL are no site) and `blocks` names the
+  site a URL falls under. Every navigation the user starts goes through
+  one guard in `command.rs` (`block_for`, `tab_at`, `wake_mark`: the
+  `Navigate` arm, `new_tab`, `new_background_tab`, `open_window`,
+  `show_tab`, `restore_session`; `warm_tab` declines a blocked tab): a
+  blocked destination keeps `Tab::url`, sets `Tab::blocked`
+  (`BlockedPage`, the site and which of `BLOCKED_LINES` it shows) and
+  loads `about:blank` behind the chrome's page (`chrome::draw_blocked_page`,
+  painted by `BrowserWindow::frame` like the crash panel, with
+  `content_is_egui` keeping input in the chrome; while an open prompt is
+  up, egui takes every key (`ChromeState::takes_every_key`, which is how
+  Escape reaches a buttons-only prompt; the downloads popover and the
+  Launch Panel count too), and page-bound key presses are dropped while
+  the chrome owns the content area). What the model never
+  sees, links, scripts and redirects, the engine's before-navigate hook
+  cancels before any request and reports as
+  `EngineEvent::NavigationBlocked`; `apply` sets the same state and
+  pushes `about:blank`. `UrlChanged` ignores `about:blank` while a tab
+  is blocked, re-blocks a blocked URL that reached the engine without a
+  hook (`ReplaceWithBlank`), and clears the block otherwise; a block
+  page is no visit. `BlockSites` marks every tab on the sites (a live
+  tab's entry is replaced through `TabHost::replace_with_blank`, a
+  deferred one wakes on the page), saves the file and hands the list to
+  `Engine::configure_blocked_sites`, which the shell also calls at start.
+  `UnblockSite`, issued only by the settings window, saves the file and
+  hands the new list to the engine before it sends the tabs back, so the
+  engine's hook never judges those navigations by the old list; each
+  tab blocked on the site then navigates back to its own page. Both
+  `configure_blocked_sites` and `TabHost::replace_with_blank` are
+  defaulted. The line is picked
+  by `pick_line` from `line_seed()`, never in the chrome, so it holds
+  between frames; `Reload` re-rolls it.
 - **The find bar is the window's state; the engine does the finding.**
   `Window::find` (`FindState`) is open or not; the chrome draws the bar
   from it and edits a copy of the text, sending `Command::FindText` as
@@ -423,6 +461,87 @@ No engine is needed; the workspace builds in under a minute.
 - Commit to `main` unless asked for a branch. Conventional Commits.
 - The browsers' own docs (`README.md`, `CLAUDE.md`) describe what each one
   adds; the shared behaviour is documented here only.
+
+## Status and handoff (2026-11-08)
+
+Added the blocked sites feature (see the convention bullet on blocked
+sites above, and the README's bullet of the same name): a per-profile
+list in `blocked.toml` keyed by registrable domain; the guard that every
+user-started navigation passes through in `dispatch`; the block page the
+chrome paints over `about:blank`, with its three lines; "Block on this
+profile" in a tab's menu, with its prompt; and the settings window's
+"Blocked sites" section between Bookmarks and Downloads. The engine side
+of the contract is in place (`EngineEvent::NavigationBlocked`,
+`Engine::configure_blocked_sites`, both defaulted), but no engine
+implements the before-navigate hook yet. Phases 6 and 7 add it. Until
+then a link, script or redirect onto a blocked site is caught only by
+the model's `UrlChanged` rule, which re-blocks the tab after the request
+has gone out, and Back on a tab blocked in place stays on the block page,
+because the default `replace_with_blank` pushes an entry.
+
+Verified: `cargo test` (395 tests, one ignored: chrome 110, core 229,
+shell 50, xtask 6), clippy with `-D warnings`, and `cargo fmt --check`.
+The tests cover the reduction through the public suffix list (subdomains,
+`co.uk`, IP addresses, `localhost`, punycode, host-less schemes); the
+`blocked.toml` round trip and a missing or bad file; every `dispatch`
+flow (the typed address, a new tab, a search, a question, a restored tab
+waking on the block page without being warmed, the close-tab wake, the
+reload re-roll, the prompt's distinct sites, blocking across windows,
+deferred tabs only marked, an already blocked site changing nothing, and
+unblocking sending tabs back with the list configured first); the
+`apply` rules (the engine's blocked navigation, the blank page behind a
+block page, Back clearing it, a URL change onto a blocked site
+re-blocked); the tab menu's entry and its enabled rule; the prompt's
+words and answers; the block page's sizing rule and its drawing at
+narrow and wide rects; a WCAG contrast test of the block page's three
+lines against the painted mesh, across the swatches (floors 3:1 and
+4.5:1, the worst cases 13.06 and 8.90 on light, 8.47 and 6.66 on dark);
+the strip's gradient mesh, asserted byte-identical to its state before
+the refactor; the settings field's parser and its notice; and that an
+open prompt takes every key.
+
+Verified by hand in a debug Nautilus built against this checkout on
+Windows, by scripted input, first in Phase 4 Task 5 and again after the
+fixes in Phase 5 Task 3. The tab menu's "Block on this profile" is
+enabled on example.com and disabled on about:blank in a new window. The
+prompt reads "Block site" with its words, a red Block and Cancel; Cancel
+and Escape add nothing. Escape failed on the first run, because a
+buttons-only prompt left egui without keyboard focus, so the shell never
+sent it the key; the `takes_every_key` change fixed it and the re-run
+passed. Block turns the page into the gradient with one of the three
+lines, the site line and the settings hint; the address bar keeps
+`https://example.com/`; the strip title is the address, with no favicon.
+Clicks on the page and plain keys do nothing, and Ctrl+L focuses the
+address bar. Reload re-rolls the line (twice in the run). The line fits
+one row at 420 px wide. A typed `example.com/other` is blocked at once,
+with exactly one `load started` (about:blank) in the log. A second tab
+navigated onto example.com is blocked, and Back returns it to example.org
+with the page cleared. `blocked.toml` holds `sites = ["example.com"]`.
+The look was checked in the default, "wine" and "blush" swatches: the
+colour fades out above the big line, and the three lines stand on the
+toolbar's fill. In the settings window, the section reads "No blocked
+sites." when empty; junk gives the red "Not a site."; `https://WWW.Example.COM/x`
+adds `example.com` and blocks the open tab at once; a duplicate leaves
+`blocked.toml`'s modification time unchanged; `news.bbc.co.uk` and
+`127.0.0.1` list as `127.0.0.1`, `bbc.co.uk`, `example.com`; Remove
+unblocks without a question and the tab returns to example.com on its
+own; `blocked.toml` lists the other two. Ctrl+Q exited cleanly on every
+run. A profile whose `blocked.toml` reads `sites = 3` logged the warning
+and started normally (Phase 3).
+
+Not verified: Paladin by hand (it type-checks against this revision, and
+nothing it implements has changed yet); macOS; an engine's before-navigate
+hook (Phases 6 and 7 add it); the `NAUTILUS_CEF_LOG=verbose` check that no
+request named example.com was made; a held key across the moment a block
+page appears; the Block button by click (Enter was used); a resize by the
+window border (`SetWindowPos` was used). Observed and left alone: a
+rejected entry keeps its text in the field, as the extensions field does;
+the Remove buttons sit a pixel or two below their row labels, the grid the
+extensions section uses; CEF logs "Timeout of new browser info response"
+after a block load, which has not been traced.
+
+Known limitation, recorded in the README's TabHost bullet: Forward after
+Back from a block page lands on the bare `about:blank`.
 
 ## Status and handoff (2026-11-06, evening)
 
