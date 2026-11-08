@@ -6,6 +6,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::blocked::{BlockedPage, BlockedSites};
 use crate::bookmarks::Bookmarks;
 use crate::default_browser::DefaultBrowser;
 use crate::download::Downloads;
@@ -115,6 +116,11 @@ pub struct Tab {
     /// once they are in (`Command::WarmDone`), or stays and is shown if
     /// the user gets there first. Only ever set with `deferred`.
     pub warming: bool,
+    /// The block page this tab shows instead of its page: its site is
+    /// blocked on this profile. `url` keeps the attempted address, so the
+    /// address bar says where the user tried to go; the engine shows
+    /// `about:blank` behind the chrome's page.
+    pub blocked: Option<BlockedPage>,
 }
 
 impl Tab {
@@ -133,7 +139,17 @@ impl Tab {
             zoom: 100,
             deferred: false,
             warming: false,
+            blocked: None,
         }
+    }
+
+    /// Show the block page `page` instead of the page: the title and
+    /// favicon of the page before go with it (the strip and the address
+    /// bar show the attempted address), the URL stays.
+    pub fn block(&mut self, page: BlockedPage) {
+        self.blocked = Some(page);
+        self.title.clear();
+        self.favicon = None;
     }
 
     /// The text to show in the tab strip: the page title, or the URL until
@@ -373,6 +389,8 @@ pub struct Browser {
     pub update: UpdateStatus,
     /// The zoom levels of sites that differ from the default.
     pub zoom: SiteZoom,
+    /// The sites this profile refuses to show (`blocked.toml`).
+    pub blocked: BlockedSites,
     /// What is being, and was, downloaded.
     pub downloads: Downloads,
     /// The user confirmed quitting with downloads still going.
@@ -410,6 +428,7 @@ impl Browser {
             profiles: Vec::new(),
             update: UpdateStatus::Idle,
             zoom: SiteZoom::default(),
+            blocked: BlockedSites::default(),
             downloads: Downloads::default(),
             quit_confirmed: false,
             crashed_session: None,
