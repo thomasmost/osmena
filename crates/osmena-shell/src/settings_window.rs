@@ -12,8 +12,8 @@ use osmena_chrome::input::{self, KeyRoute};
 use osmena_chrome::keyboard_types::{Code, Modifiers};
 use osmena_chrome::{icon, keyutils, theme};
 use osmena_core::{
-    BookmarksFile, Brand, Command, CommandKind, DefaultBrowser, Extension, ExtensionSource,
-    ExtensionSupport, KeyChord, Keymap, Platform, Settings, UpdateStatus,
+    BlockedSites, BookmarksFile, Brand, Command, CommandKind, DefaultBrowser, Extension,
+    ExtensionSource, ExtensionSupport, KeyChord, Keymap, Platform, Settings, UpdateStatus,
 };
 use osmena_engine::{Engine, EngineError, PhysicalSize, Surface};
 use winit::dpi::LogicalSize;
@@ -61,6 +61,10 @@ pub struct SettingsWindow<S: Surface> {
     store_input: String,
     /// What the store field's last attempt said, if it failed.
     store_notice: Option<String>,
+    /// The blocked-sites section's add field.
+    block_input: String,
+    /// What that field's last attempt said, if it failed.
+    block_notice: Option<String>,
     /// Commands the extensions and updates sections issued, taken by
     /// the app after each event.
     commands: Vec<Command>,
@@ -131,6 +135,8 @@ impl<S: Surface> SettingsWindow<S> {
             notice: None,
             store_input: String::new(),
             store_notice: None,
+            block_input: String::new(),
+            block_notice: None,
             commands: Vec::new(),
             brand,
             repaints,
@@ -183,9 +189,10 @@ impl<S: Surface> SettingsWindow<S> {
 
     /// Handle one winit event. `extensions` and `support` feed the
     /// extensions section, shown only when the engine has extensions.
-    /// `update` and `can_update` feed the Updates section: where the
-    /// browser is with updates, and whether this build can update
-    /// itself at all. `default_browser` feeds the Default browser
+    /// `blocked` is the profile's blocked sites, read-only; the section's
+    /// changes are commands. `update` and `can_update` feed the Updates
+    /// section: where the browser is with updates, and whether this build
+    /// can update itself at all. `default_browser` feeds the Default browser
     /// section, shown only where the system has one to choose.
     #[allow(clippy::too_many_arguments)]
     pub fn handle_event(
@@ -195,6 +202,7 @@ impl<S: Surface> SettingsWindow<S> {
         keymap: &mut Keymap,
         extensions: &[Extension],
         support: Option<&ExtensionSupport>,
+        blocked: &BlockedSites,
         update: &UpdateStatus,
         can_update: bool,
         can_download: bool,
@@ -226,6 +234,7 @@ impl<S: Surface> SettingsWindow<S> {
                     keymap,
                     extensions,
                     support,
+                    blocked,
                     updates,
                     can_download,
                     default_browser,
@@ -323,6 +332,7 @@ impl<S: Surface> SettingsWindow<S> {
         keymap: &mut Keymap,
         extensions: &[Extension],
         support: Option<&ExtensionSupport>,
+        blocked: &BlockedSites,
         updates: UpdatesSection<'_>,
         can_download: bool,
         default_browser: DefaultBrowser,
@@ -336,6 +346,8 @@ impl<S: Surface> SettingsWindow<S> {
             notice,
             store_input,
             store_notice,
+            block_input,
+            block_notice,
             commands,
             ..
         } = self;
@@ -346,6 +358,11 @@ impl<S: Surface> SettingsWindow<S> {
             store_notice,
             commands,
         });
+        let mut blocked_section = BlockedSection {
+            blocked,
+            input: block_input,
+            notice: block_notice,
+        };
         egui.run(window, |ui| {
             activity = draw_settings(
                 ui,
@@ -354,6 +371,7 @@ impl<S: Surface> SettingsWindow<S> {
                 capture,
                 notice,
                 extensions_section.as_mut(),
+                &mut blocked_section,
                 updates,
                 &mut update_commands,
                 can_download,
@@ -503,6 +521,13 @@ struct ExtensionsSection<'a> {
     commands: &'a mut Vec<Command>,
 }
 
+/// What the blocked-sites section draws from and into.
+struct BlockedSection<'a> {
+    blocked: &'a BlockedSites,
+    input: &'a mut String,
+    notice: &'a mut Option<String>,
+}
+
 /// What the updates section draws from: the build, the status, and
 /// whether this build can update itself at all.
 #[derive(Clone, Copy)]
@@ -522,6 +547,7 @@ fn draw_settings(
     capture: &mut Option<(CommandKind, usize)>,
     notice: &mut Option<String>,
     extensions: Option<&mut ExtensionsSection<'_>>,
+    blocked: &mut BlockedSection<'_>,
     updates: UpdatesSection<'_>,
     update_commands: &mut Vec<Command>,
     can_download: bool,
@@ -552,6 +578,10 @@ fn draw_settings(
                 ui.heading("Bookmarks");
                 ui.add_space(8.0);
                 draw_bookmarks(ui, settings, &mut activity, update_commands);
+                ui.add_space(20.0);
+                ui.heading("Blocked sites");
+                ui.add_space(8.0);
+                draw_blocked_sites(ui, blocked, update_commands);
                 ui.add_space(20.0);
                 ui.heading("Downloads");
                 ui.add_space(8.0);
@@ -1105,6 +1135,89 @@ fn store_item_from_input(input: &str, support: &ExtensionSupport) -> Option<Stri
     is_id.then(|| text.to_string())
 }
 
+/// The site the "Blocked sites" field names: a bare host or a full URL,
+/// reduced to its registrable domain (`www.youtube.com/watch` is
+/// `youtube.com`); `None` for text that is no site.
+fn site_from_input(input: &str) -> Option<String> {
+    location_input_to_url(input)
+        .as_ref()
+        .and_then(BlockedSites::site_for)
+}
+
+/// What Enter or the Block button does with the field's text: the
+/// command to issue, or the notice to show under the field.
+fn blocked_field_submit(input: &str) -> Result<Command, String> {
+    match site_from_input(input) {
+        Some(site) => Ok(Command::BlockSites(vec![site])),
+        None => Err("Not a site.".to_string()),
+    }
+}
+
+/// The sites this profile refuses to show, alphabetically, each with
+/// Remove (the only way to unblock one), and a field to add another.
+/// Both go to the model as commands; nothing here asks twice.
+fn draw_blocked_sites(
+    ui: &mut egui::Ui,
+    section: &mut BlockedSection<'_>,
+    commands: &mut Vec<Command>,
+) {
+    let input: &mut String = &mut *section.input;
+    let notice = &mut *section.notice;
+    if section.blocked.sites.is_empty() {
+        ui.label(egui::RichText::new("No blocked sites.").weak());
+    }
+    egui::Grid::new("blocked-sites-grid")
+        .num_columns(2)
+        .striped(true)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            // A BTreeSet: the sites come out in alphabetical order.
+            for site in &section.blocked.sites {
+                ui.vertical(|ui| {
+                    ui.set_min_width(240.0);
+                    ui.set_max_width(240.0);
+                    ui.label(site);
+                });
+                if ui.button("Remove").clicked() {
+                    commands.push(Command::UnblockSite(site.clone()));
+                }
+                ui.end_row();
+            }
+        });
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        let field = ui.add(
+            egui::TextEdit::singleline(input)
+                .margin(theme::INPUT_MARGIN)
+                .desired_width(300.0)
+                .hint_text("A site, such as youtube.com"),
+        );
+        let submitted = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if (ui.button("Block").clicked() || submitted) && !input.trim().is_empty() {
+            match blocked_field_submit(input) {
+                Ok(command) => {
+                    commands.push(command);
+                    input.clear();
+                    *notice = None;
+                }
+                Err(text) => *notice = Some(text),
+            }
+        }
+    });
+    if let Some(text) = notice.as_deref() {
+        let color = ui.visuals().error_fg_color;
+        ui.label(egui::RichText::new(text).small().color(color));
+    }
+    ui.label(
+        egui::RichText::new(
+            "A blocked site covers its subdomains. Open tabs on it show a block page at once; \
+             this is the only place a site is unblocked.",
+        )
+        .small()
+        .weak(),
+    );
+}
+
 /// The controls table: one row per action, a primary and a secondary
 /// slot each, and a reset button under it.
 fn draw_shortcuts(
@@ -1410,6 +1523,42 @@ mod tests {
         );
         assert_eq!(store_item_from_input("not an id", &SUPPORT), None);
         assert_eq!(store_item_from_input("", &SUPPORT), None);
+    }
+
+    #[test]
+    fn the_blocked_sites_field_takes_a_host_or_a_url_and_refuses_junk() {
+        assert_eq!(
+            site_from_input("youtube.com").as_deref(),
+            Some("youtube.com")
+        );
+        assert_eq!(
+            site_from_input(" https://www.youtube.com/watch?v=1 ").as_deref(),
+            Some("youtube.com")
+        );
+        assert_eq!(
+            site_from_input("news.bbc.co.uk").as_deref(),
+            Some("bbc.co.uk")
+        );
+        assert_eq!(
+            site_from_input("localhost:8080").as_deref(),
+            Some("localhost")
+        );
+        assert_eq!(site_from_input("co.uk"), None);
+        assert_eq!(site_from_input("not a site"), None);
+        assert_eq!(site_from_input("about:blank"), None);
+        assert_eq!(site_from_input(""), None);
+    }
+
+    #[test]
+    fn the_blocked_sites_field_submits_a_block_or_a_notice() {
+        assert_eq!(
+            blocked_field_submit("https://www.youtube.com/"),
+            Ok(Command::BlockSites(vec!["youtube.com".to_string()]))
+        );
+        assert_eq!(
+            blocked_field_submit("junk text"),
+            Err("Not a site.".to_string())
+        );
     }
 
     #[test]

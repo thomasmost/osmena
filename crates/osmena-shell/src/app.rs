@@ -1795,6 +1795,7 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
                 &mut self.keymap,
                 &self.browser.extensions,
                 self.engine_info.extensions.as_ref(),
+                &self.browser.blocked,
                 &self.browser.update,
                 self.brand.can_update(),
                 self.engine_info.downloads,
