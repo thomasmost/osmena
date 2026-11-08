@@ -473,8 +473,9 @@ profile" in a tab's menu, with its prompt; and the settings window's
 "Blocked sites" section between Bookmarks and Downloads. The engine side
 of the contract is in place (`EngineEvent::NavigationBlocked`,
 `Engine::configure_blocked_sites`, both defaulted), but no engine
-implements the before-navigate hook yet. Phases 6 and 7 add it. Until
-then a link, script or redirect onto a blocked site is caught only by
+implements the before-navigate hook yet. The Nautilus and Paladin
+changes that follow in this change set add it. Until then a link, script
+or redirect onto a blocked site is caught only by
 the model's `UrlChanged` rule, which re-blocks the tab after the request
 has gone out, and Back on a tab blocked in place stays on the block page,
 because the default `replace_with_blank` pushes an entry.
@@ -501,10 +502,10 @@ the refactor; the settings field's parser and its notice; and that an
 open prompt takes every key.
 
 Verified by hand in a debug Nautilus built against this checkout on
-Windows, by scripted input, first in Phase 4 Task 5 and again after the
-fixes in Phase 5 Task 3. The tab menu's "Block on this profile" is
-enabled on example.com and disabled on about:blank in a new window. The
-prompt reads "Block site" with its words, a red Block and Cancel; Cancel
+Windows, by scripted input, twice: once after the block page landed and
+again after the settings section and the Escape fix. The tab menu's
+"Block on this profile" is enabled on example.com and disabled on
+about:blank in a new window. The prompt reads "Block site" with its words, a red Block and Cancel; Cancel
 and Escape add nothing. Escape failed on the first run, because a
 buttons-only prompt left egui without keyboard focus, so the shell never
 sent it the key; the `takes_every_key` change fixed it and the re-run
@@ -527,13 +528,13 @@ adds `example.com` and blocks the open tab at once; a duplicate leaves
 unblocks without a question and the tab returns to example.com on its
 own; `blocked.toml` lists the other two. Ctrl+Q exited cleanly on every
 run. A profile whose `blocked.toml` reads `sites = 3` logged the warning
-and started normally (Phase 3).
+and started normally (checked when the blocked.toml loader landed).
 
 Not verified: Paladin by hand (it type-checks against this revision, and
 nothing it implements has changed yet); macOS; an engine's before-navigate
-hook (Phases 6 and 7 add it); the `NAUTILUS_CEF_LOG=verbose` check that no
-request named example.com was made; a held key across the moment a block
-page appears; the Block button by click (Enter was used); a resize by the
+hook (the Nautilus and Paladin changes in this change set add it); the
+`NAUTILUS_CEF_LOG=verbose` check that no request named example.com was
+made; a held key across the moment a block page appears; the Block button by click (Enter was used); a resize by the
 window border (`SetWindowPos` was used). Observed and left alone: a
 rejected entry keeps its text in the field, as the extensions field does;
 the Remove buttons sit a pixel or two below their row labels, the grid the
