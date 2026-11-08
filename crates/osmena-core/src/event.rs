@@ -3,10 +3,11 @@
 
 use url::Url;
 
+use crate::blocked::{BlockedPage, line_seed};
 use crate::command::{EngineAction, close_tab, open_window};
 use crate::download::DownloadReport;
 use crate::extension::Extension;
-use crate::model::{Browser, Favicon, LoadState, RgbaImage, Tab, TabId};
+use crate::model::{Browser, Favicon, LoadState, RgbaImage, Tab, TabId, about_blank};
 
 /// Handle to an engine tab that page content created (`window.open`) and
 /// that the engine is holding until the model adopts it with
@@ -232,11 +233,32 @@ pub enum EngineEvent {
 pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
     match event {
         EngineEvent::UrlChanged { tab, url } => {
-            // A page on another site takes that site's zoom level.
+            let Some(t) = browser.tab(*tab) else {
+                return Vec::new();
+            };
+            // The blank page behind a block page: the address bar keeps
+            // the address the user was going to.
+            if t.blocked.is_some() && url.as_str() == "about:blank" {
+                return Vec::new();
+            }
+            // A redirect, or a history step, landing on a blocked site
+            // without the engine's hook catching it: blocked here, and
+            // the entry replaced so Back does not land on it again.
+            if let Some(site) = browser.blocked.blocks(url).map(str::to_owned) {
+                let page = BlockedPage::new(site, line_seed());
+                with_tab(browser, *tab, |t| {
+                    t.url = url.clone();
+                    t.block(page);
+                });
+                return vec![EngineAction::ReplaceWithBlank(*tab)];
+            }
+            // A page on another site takes that site's zoom level; any
+            // block page the tab showed is over.
             let level = browser.zoom.level_for(url, browser.settings.page_zoom);
             let mut actions = Vec::new();
             with_tab(browser, *tab, |t| {
                 t.url = url.clone();
+                t.blocked = None;
                 if t.zoom != level {
                     t.zoom = level;
                     actions.push(EngineAction::SetZoom {
@@ -248,6 +270,9 @@ pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
             actions
         }
         EngineEvent::TitleChanged { tab, title } => {
+            if browser.tab(*tab).is_some_and(|t| t.blocked.is_some()) {
+                return Vec::new();
+            }
             with_tab(browser, *tab, |t| t.title = title.clone());
             let url = browser.tab(*tab).map(|t| t.url.clone());
             let changed = url.is_some_and(|url| browser.history.retitle(&url, title));
@@ -263,7 +288,7 @@ pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
             // and title at that moment; the title may still arrive. A
             // deferred tab warming out of sight is nobody's visit.
             let changed = match browser.tab(*tab) {
-                Some(t) if *state == LoadState::Complete && !t.deferred => {
+                Some(t) if *state == LoadState::Complete && !t.deferred && t.blocked.is_none() => {
                     let (url, title) = (t.url.clone(), t.title.clone());
                     browser
                         .history
@@ -293,6 +318,9 @@ pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
             Vec::new()
         }
         EngineEvent::FaviconChanged { tab, favicon } => {
+            if browser.tab(*tab).is_some_and(|t| t.blocked.is_some()) {
+                return Vec::new();
+            }
             with_tab(browser, *tab, |t| t.favicon = Some(favicon.clone()));
             Vec::new()
         }
@@ -382,7 +410,33 @@ pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
             });
             Vec::new()
         }
-        EngineEvent::NavigationBlocked { .. } => Vec::new(),
+        // The engine refused a navigation to a blocked site before any
+        // request: the tab shows the block page for the address it was
+        // going to, over a blank page pushed behind it so Back returns to
+        // the page it was on.
+        EngineEvent::NavigationBlocked { tab, url } => {
+            if browser.tab(*tab).is_none() {
+                return Vec::new();
+            }
+            let Some(site) = browser.blocked.blocks(url).map(str::to_owned) else {
+                // The engine's list is behind the model's (the site was
+                // just unblocked): the page is wanted after all.
+                return vec![EngineAction::Navigate {
+                    tab: *tab,
+                    url: url.clone(),
+                }];
+            };
+            with_tab(browser, *tab, |t| {
+                t.url = url.clone();
+                t.block(BlockedPage::new(site, line_seed()));
+                t.load = LoadState::Loading;
+                t.crashed = None;
+            });
+            vec![EngineAction::Navigate {
+                tab: *tab,
+                url: about_blank(),
+            }]
+        }
         EngineEvent::FrameReady(_) => Vec::new(),
         EngineEvent::CursorChanged { .. } => Vec::new(),
         EngineEvent::EngineError(message) => {
@@ -942,5 +996,172 @@ mod tests {
             },
         );
         assert_eq!(b.windows, before);
+    }
+
+    /// The engine refused a navigation to a blocked site before any
+    /// request: the tab shows the block page for the address it was going
+    /// to, over a blank page pushed behind it.
+    #[test]
+    fn a_navigation_the_engine_blocked_puts_the_tab_on_the_block_page() {
+        let (mut b, _, tab) = one_window();
+        b.blocked.add("b.example");
+        let actions = apply(
+            &mut b,
+            &EngineEvent::NavigationBlocked {
+                tab,
+                url: url("https://b.example/p"),
+            },
+        );
+        assert_eq!(
+            actions,
+            vec![EngineAction::Navigate {
+                tab,
+                url: url("about:blank"),
+            }]
+        );
+        let t = b.tab(tab).unwrap();
+        assert_eq!(t.url.as_str(), "https://b.example/p");
+        assert_eq!(t.blocked.as_ref().unwrap().site, "b.example");
+        assert_eq!(t.load, LoadState::Loading);
+    }
+
+    #[test]
+    fn a_navigation_blocked_for_an_unknown_tab_does_nothing() {
+        let (mut b, _, _) = one_window();
+        b.blocked.add("b.example");
+        let other = TabId(9_999);
+        let actions = apply(
+            &mut b,
+            &EngineEvent::NavigationBlocked {
+                tab: other,
+                url: url("https://b.example/p"),
+            },
+        );
+        assert!(actions.is_empty());
+    }
+
+    /// The engine's list can be behind the model's: a site unblocked
+    /// meanwhile is loaded after all.
+    #[test]
+    fn a_navigation_blocked_for_a_site_no_longer_blocked_is_loaded_after_all() {
+        let (mut b, _, tab) = one_window();
+        let actions = apply(
+            &mut b,
+            &EngineEvent::NavigationBlocked {
+                tab,
+                url: url("https://b.example/"),
+            },
+        );
+        assert_eq!(
+            actions,
+            vec![EngineAction::Navigate {
+                tab,
+                url: url("https://b.example/"),
+            }]
+        );
+        assert!(b.tab(tab).unwrap().blocked.is_none());
+    }
+
+    /// Blocks `b.example` and navigates the tab there: the block page is
+    /// up, the blank page behind it is loading.
+    fn on_block_page(b: &mut Browser, tab: TabId) {
+        b.blocked.add("b.example");
+        dispatch(
+            b,
+            &Command::Navigate {
+                tab,
+                url: url("https://b.example/"),
+            },
+        );
+        assert!(b.tab(tab).unwrap().blocked.is_some());
+    }
+
+    #[test]
+    fn the_blank_page_behind_a_block_page_leaves_the_tab_alone() {
+        let (mut b, _, tab) = one_window();
+        b.tab_mut(tab).unwrap().title = "Before".to_string();
+        on_block_page(&mut b, tab);
+
+        let actions = apply(
+            &mut b,
+            &EngineEvent::UrlChanged {
+                tab,
+                url: url("about:blank"),
+            },
+        );
+        assert!(actions.is_empty());
+        let t = b.tab(tab).unwrap();
+        assert_eq!(t.url.as_str(), "https://b.example/");
+        assert!(t.blocked.is_some());
+
+        let actions = apply(
+            &mut b,
+            &EngineEvent::TitleChanged {
+                tab,
+                title: "about:blank".to_string(),
+            },
+        );
+        assert!(actions.is_empty());
+        assert!(b.tab(tab).unwrap().title.is_empty());
+
+        let favicon = Favicon {
+            width: 1,
+            height: 1,
+            rgba: Arc::from(vec![0, 0, 0, 255]),
+        };
+        let actions = apply(&mut b, &EngineEvent::FaviconChanged { tab, favicon });
+        assert!(actions.is_empty());
+        assert!(b.tab(tab).unwrap().favicon.is_none());
+
+        let actions = apply(
+            &mut b,
+            &EngineEvent::LoadStateChanged {
+                tab,
+                state: LoadState::Complete,
+            },
+        );
+        assert!(actions.is_empty());
+        assert!(
+            b.history
+                .entries()
+                .iter()
+                .all(|e| e.url.host_str() != Some("b.example"))
+        );
+    }
+
+    #[test]
+    fn going_back_from_a_block_page_clears_it() {
+        let (mut b, _, tab) = one_window();
+        on_block_page(&mut b, tab);
+        let actions = apply(
+            &mut b,
+            &EngineEvent::UrlChanged {
+                tab,
+                url: url("https://a.example/"),
+            },
+        );
+        assert!(actions.is_empty());
+        let t = b.tab(tab).unwrap();
+        assert_eq!(t.url.as_str(), "https://a.example/");
+        assert!(t.blocked.is_none());
+    }
+
+    /// A redirect onto a blocked site that the engine's hook let through
+    /// is blocked by the model, and its entry replaced.
+    #[test]
+    fn a_url_change_onto_a_blocked_site_is_blocked_again() {
+        let (mut b, _, tab) = one_window();
+        b.blocked.add("b.example");
+        let actions = apply(
+            &mut b,
+            &EngineEvent::UrlChanged {
+                tab,
+                url: url("https://m.b.example/r"),
+            },
+        );
+        assert_eq!(actions, vec![EngineAction::ReplaceWithBlank(tab)]);
+        let t = b.tab(tab).unwrap();
+        assert_eq!(t.blocked.as_ref().unwrap().site, "b.example");
+        assert_eq!(t.url.as_str(), "https://m.b.example/r");
     }
 }
