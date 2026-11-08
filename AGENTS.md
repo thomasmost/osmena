@@ -5,7 +5,11 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-11-08 (blocked sites: a per-profile list keyed by
+_Last updated: 2026-11-08 (the chrome refresh: a per-profile accent
+installed on the egui context by `theme::tint`, painted round toolbar
+buttons, the filled address pill, softer popups, and the Launch Panel's
+surface, entrance, magnifier field, per-row tile heights and shelf of
+shortcut discs; earlier that day blocked sites: a per-profile list keyed by
 registrable domain, the guard in `dispatch`, the engine hook contract,
 the block page, the settings section; before that restored tabs warmed
 one by one for their titles and favicons, tab titles centred by their
@@ -66,9 +70,23 @@ No engine is needed; the workspace builds in under a minute.
   under `assets/fonts` with its licence), the text sizes, the widget
   rounding (`CORNER`, which the tabs share), the input padding
   (`INPUT_MARGIN`) and the pill fields (`pill_fields`) are set there
-  once per egui context (`install`, called by both windows). A new
-  field takes `INPUT_MARGIN`; a new colour goes through `Palette`, which
-  picks dark or light text by the swatch's luminance. A new swatch
+  once per egui context (`install`, called by both windows), and the
+  profile's colour is laid over them by `theme::tint`, which both
+  windows call every frame (it costs a lookup until the colour
+  changes): the accent (`Palette::accent`, the swatch family's deep
+  shade in light mode and its pastel in dark) becomes the selection
+  stroke, so every focused field rings in it, the selection fill, the
+  link colour, and the popup surface and hairline, for both the light
+  and the dark style. A new
+  field takes `INPUT_MARGIN` (the address bar its own `ADDRESS_MARGIN`)
+  and, when it is a pill the user types into, `background_color(
+  palette.field_at(focused))`, so it is filled at rest and lit with the
+  ring while focused; a new colour goes through `Palette`, which
+  picks dark or light text by the swatch's luminance and derives the
+  surface, card, field and hover shades (a contrast test holds every
+  swatch in both modes at AA). A toolbar button is a painted glyph in
+  a disc that fills only under the pointer (`icon_button_rect`,
+  `nav_button`), never a text glyph in a button frame. A new swatch
   joins a hue of `ChromeColor::FAMILIES` (pastel, middle, deep; a test
   checks they darken in that order). Avatar glyphs come from
   `theme::AVATARS` only, a cut of Noto Emoji: a new avatar needs its
@@ -259,7 +277,14 @@ No engine is needed; the workspace builds in under a minute.
   are `osmena_core::launch`: `WidgetKind` names them, `Settings::launch`
   (`LaunchSettings`) holds the order and what they need, and
   `Browser::launch` (`LaunchData`) holds what the shell fetched, as
-  `Fetched<T>` (`Empty`, `Loading`, `Ready { at }`, `Failed`). Nothing
+  `Fetched<T>` (`Empty`, `Loading`, `Ready { at }`, `Failed`). The
+  mosaic's `layout` is a pure function: each kind has a span
+  (`WidgetKind::columns`, the shelf of most visited sites the whole
+  width) and a height (`tile_height`), a row is as tall as its tallest
+  tile, and `drop_index` places a dragged tile by the slots' own
+  rects. The panel's parts take a `Scene` (the window, the context,
+  the `Palette`) rather than the pieces, which keeps them under
+  clippy's argument cap. Nothing
   is fetched while the panel is closed: `dispatch` adds the fetch
   actions to `ShowLauncher` (and to `RefreshLaunch`, the place and
   units commands) only for a tile that is shown, never while a fetch
@@ -461,6 +486,55 @@ No engine is needed; the workspace builds in under a minute.
 - Commit to `main` unless asked for a branch. Conventional Commits.
 - The browsers' own docs (`README.md`, `CLAUDE.md`) describe what each one
   adds; the shared behaviour is documented here only.
+
+## Status and handoff (2026-11-08, evening)
+
+The chrome refresh, after Thorium with Zen's softness (the brief is
+`docs/prd/08-chrome-refresh.md` in the parent workspace; the theme and
+Launch Panel bullets under Conventions say how it hangs together).
+`Palette` gained `accent`, `selection`, `surface`, `card`, `hairline`,
+`field`, `field_focus`, `hover` and `ink`; `theme::tint` lays the
+accent and the popup surface over both egui styles, called every frame
+by both windows and acting only when the colour changes. The toolbar's
+Back, Forward, Reload and Stop are `nav_button`s (painted glyphs in a
+disc that fills under the pointer, faded when inert); `icon_button_rect`
+is a disc; the strip's "+" is `plus_button`; the address bar is a filled
+pill with `ADDRESS_MARGIN` and `background_color(palette.field_at(
+focused))`. The Launch Panel draws on its own surface with a fade and
+rise (`ENTRANCE_SECS`, keyed off the frame the field takes focus), a
+magnifier in the field, cards with no hairline, `layout` with per-kind
+heights and per-row maxima, `drop_index` by the slots' rects, the
+question tiles' caption at the card's foot, and Most visited as a shelf
+of shortcut discs (`WidgetKind::TopSites` spans three columns).
+
+Verified: `cargo test` (the tint sets both styles once per colour, the
+grid's spans and per-row heights, a row as tall as its tallest tile,
+the drop index, and a WCAG test holding the ink on the surface, card,
+field, focused field and selection at 4.5:1 and the accent on the
+surface and focused field at 3:1 for every swatch in both modes),
+clippy with `-D warnings` on Windows and for osmena-chrome on the
+macOS target, `cargo fmt --check`. By eye, in a debug Nautilus built
+against this checkout on Windows (Shell swatch, light system theme,
+captured with `PrintWindow` after scripted Ctrl+T and a click on the
+gear): the toolbar's round painted buttons and filled address pill;
+the panel on its cream surface with the Walnut ring on the lit field,
+the magnifier, Weather | Ask Claude | Ask ChatGPT on one row with the
+captions at the cards' feet, the shelf with one disc (the probe
+profile's only site, drawn as its initial) and no hole; the matches
+dropping down on the tinted surface; the Launch Settings with Google
+and Fahrenheit lit in the tinted selection and the field unlit. The
+settings window tints too but was not opened. A run that seemed to
+exit on its own turned out to be the window closed by hand while the
+machine was in use: `--exit-after 12` ran clean.
+
+Not verified: a dark system theme by eye (the shades are reasoned and
+contrast-tested only); hover states (the discs, the shortcut's close
+control, the faded nav buttons' absence of a hover fill) since no
+pointer was moved; a shelf of five sites with real favicons; the
+entrance animation (a still capture); Paladin (not built: no trait or
+shell interface changed, both browsers only bump their pins); macOS.
+Observed and left alone: a tooltip of a toolbar button under a parked
+pointer still shows over the open panel.
 
 ## Status and handoff (2026-11-08)
 

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use egui::{
     Align, Align2, Color32, CornerRadius, FontId, Id, Key, Layout, Margin, Pos2, Rect, RichText,
-    Sense, Shape, Stroke, StrokeKind, TextStyle, Ui, UiBuilder, Vec2,
+    Sense, Shape, Stroke, TextStyle, Ui, UiBuilder, Vec2,
 };
 use osmena_core::launch::{
     DriveKind, DriveState, Fetched, TOP_SITES, TopSite, Units, WeatherCode, WidgetKind, top_sites,
@@ -20,25 +20,60 @@ use osmena_core::launch::{
 use osmena_core::{Command, UrlTemplate, Window, suggestions};
 
 use crate::chrome::{
-    ChromeContext, ChromeState, LAUNCHER_FONT_SIZE, blend, caret_to_end, site_icon_texture,
-    step_pick, suggestion_row, truncate,
+    ChromeContext, ChromeState, LAUNCHER_FONT_SIZE, Palette, blend, caret_to_end,
+    site_icon_texture, step_pick, suggestion_row, truncate,
 };
 use crate::favicon;
 use crate::theme;
 
 /// The panel's widest; narrower windows get what is left of 48 px.
 const PANEL_WIDTH: f32 = 960.0;
-/// The space between tiles and the tiles' height.
-const TILE_GAP: f32 = 10.0;
-const TILE_HEIGHT: f32 = 190.0;
+/// The panel's padding, inside its edge.
+const PANEL_PADDING: f32 = 20.0;
+/// How long the panel takes to fade and rise in, and how far it rises.
+const ENTRANCE_SECS: f32 = 0.14;
+const ENTRANCE_RISE: f32 = 12.0;
+/// The space between tiles.
+const TILE_GAP: f32 = 12.0;
 const TILE_PADDING: f32 = 12.0;
 /// How long a tile takes to slide to a new place.
 const TILE_SLIDE_SECS: f32 = 0.12;
-/// A row on the Drive and Most visited tiles.
+/// A row on the Drive tile.
 const ROW_HEIGHT: f32 = 26.0;
-const ROW_ICON: f32 = 16.0;
 const NAME_MAX_CHARS: usize = 40;
 const GEAR_SIZE: f32 = 28.0;
+/// The field's padding, with room at the left for the magnifier.
+const FIELD_MARGIN: Margin = Margin {
+    left: 46,
+    right: 18,
+    top: 10,
+    bottom: 10,
+};
+/// A shortcut on the Most visited shelf: the disc, the icon in it, the
+/// widest a cell is given, and the shelf's height under the heading.
+const SHORTCUT_DISC: f32 = 44.0;
+const SHORTCUT_ICON: f32 = 22.0;
+const SHORTCUT_CELL_MAX: f32 = 92.0;
+const SHORTCUT_SHELF: f32 = 64.0;
+
+/// How tall a tile of `kind` wants to be; a row of the mosaic is as tall
+/// as the tallest tile on it ([`layout`]).
+fn tile_height(kind: WidgetKind) -> f32 {
+    match kind {
+        WidgetKind::DriveRecent => 184.0,
+        WidgetKind::Weather => 172.0,
+        WidgetKind::AskClaude | WidgetKind::AskChatGpt => 108.0,
+        WidgetKind::TopSites => TILE_PADDING * 2.0 + 24.0 + SHORTCUT_SHELF,
+    }
+}
+
+/// What every part of the panel draws from: the window it is over, the
+/// chrome's context, and the shades of the profile's colour.
+struct Scene<'a> {
+    window: &'a Window,
+    context: &'a ChromeContext<'a>,
+    palette: Palette,
+}
 
 /// The panel's view: the tiles, or the settings over them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -127,6 +162,22 @@ pub(crate) fn draw_launch_panel(
     let content = ctx.content_rect();
     let mut commands = Vec::new();
     let mut close = false;
+    let scene = Scene {
+        window,
+        context,
+        palette: Palette::new(context.color, ui.visuals().dark_mode),
+    };
+
+    // The panel fades and rises in over its first frames: the entrance
+    // starts from nothing on the frame the panel opens (the frame the
+    // field takes focus) and eases out to its place.
+    let area_id = Id::new(("launcher", window.id));
+    let entrance = area_id.with("entrance");
+    if launcher.focus {
+        ctx.animate_value_with_time(entrance, 0.0, 0.0);
+    }
+    let t = ctx.animate_value_with_time(entrance, 1.0, ENTRANCE_SECS);
+    let t = 1.0 - (1.0 - t).powi(3);
 
     // The backdrop is painted into the panel's own layer, before the
     // panel, so it dims the page (which the shell paints in a
@@ -134,37 +185,48 @@ pub(crate) fn draw_launch_panel(
     // stays under the panel whatever sequence egui keeps areas in. A
     // press anywhere outside the panel cancels; the page sees no pointer
     // events while the panel is open (`popup_open`).
-    let area_id = Id::new(("launcher", window.id));
     ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, area_id))
-        .rect_filled(content, 0.0, Color32::from_black_alpha(96));
+        .rect_filled(
+            content,
+            0.0,
+            Color32::from_black_alpha((96.0 * t).round() as u8),
+        );
 
     let width = (content.width() - 48.0).clamp(280.0, PANEL_WIDTH);
     let top = content.top() + content.height() * 0.08;
-    let top_left = Pos2::new(content.center().x - width / 2.0, top);
+    let top_left = Pos2::new(
+        content.center().x - width / 2.0,
+        top + ENTRANCE_RISE * (1.0 - t),
+    );
     let max_height = (content.bottom() - top - 24.0).max(120.0);
+    let inner = width - 2.0 * PANEL_PADDING;
     let escape = ctx.input(|i| i.key_pressed(Key::Escape));
     let shown = egui::Area::new(area_id)
         .order(egui::Order::Foreground)
         .fixed_pos(top_left)
         .show(&ctx, |ui| {
-            egui::Frame::popup(ui.style())
-                .corner_radius(14)
-                .inner_margin(Margin::same(18))
+            ui.set_opacity(t);
+            egui::Frame::new()
+                .fill(scene.palette.surface)
+                .stroke(Stroke::new(1.0_f32, scene.palette.hairline))
+                .corner_radius(theme::PANEL)
+                .shadow(theme::PANEL_SHADOW)
+                .inner_margin(Margin::same(PANEL_PADDING as i8))
                 .show(ui, |ui| {
-                    ui.set_width(width - 36.0);
+                    ui.set_width(inner);
                     // The scroll box gets an explicit height: an area sizes
                     // its ui by its own last frame, and a scroll area that
                     // shrank to that could never grow back.
-                    let box_size = Vec2::new(width - 36.0, max_height - 36.0);
+                    let box_size = Vec2::new(inner, max_height - 2.0 * PANEL_PADDING);
                     ui.allocate_ui_with_layout(box_size, Layout::top_down(Align::Min), |ui| {
                         egui::ScrollArea::vertical()
                             .max_height(box_size.y)
                             .auto_shrink([false, true])
                             .show(ui, |ui| {
-                                let field = address_field(ui, window, context, &mut launcher);
+                                let field = address_field(ui, &scene, &mut launcher);
                                 commands.extend(field.commands);
                                 close |= field.close;
-                                ui.add_space(14.0);
+                                ui.add_space(16.0);
                                 let edit = launcher.view == View::Settings;
                                 if edit {
                                     settings_view(
@@ -175,15 +237,9 @@ pub(crate) fn draw_launch_panel(
                                         &mut commands,
                                     );
                                 }
-                                if let Some(c) = mosaic(
-                                    ui,
-                                    window,
-                                    context,
-                                    state,
-                                    &mut launcher,
-                                    edit,
-                                    &mut commands,
-                                ) {
+                                if let Some(c) =
+                                    mosaic(ui, &scene, state, &mut launcher, edit, &mut commands)
+                                {
                                     close |= c;
                                 }
                                 ui.add_space(10.0);
@@ -223,23 +279,28 @@ struct FieldOutcome {
 
 /// The address-or-search field at the panel's top, with the history and
 /// bookmark matches dropping down over the tiles.
-fn address_field(
-    ui: &mut Ui,
-    window: &Window,
-    context: &ChromeContext<'_>,
-    launcher: &mut Launcher,
-) -> FieldOutcome {
+fn address_field(ui: &mut Ui, scene: &Scene<'_>, launcher: &mut Launcher) -> FieldOutcome {
+    let Scene {
+        window,
+        context,
+        palette,
+    } = scene;
     let mut commands = Vec::new();
     let mut close = false;
     let matches = suggestions(context.history, context.bookmarks, &launcher.typed);
     let id = Id::new(("launcher-field", window.id));
+    // The pill is filled at rest and the page's colour with the accent
+    // ring once it has the keyboard, like the address bar; on the
+    // first frame it is about to take focus, so it opens lit.
+    let focused = launcher.focus || ui.memory(|m| m.has_focus(id));
     let field = ui
         .scope(|ui| {
             theme::pill_fields(ui);
             ui.add(
                 egui::TextEdit::singleline(&mut launcher.text)
                     .id(id)
-                    .margin(Margin::symmetric(16, 9))
+                    .margin(FIELD_MARGIN)
+                    .background_color(palette.field_at(focused))
                     .font(FontId::proportional(LAUNCHER_FONT_SIZE))
                     // The hint takes the field's font: egui lays it out
                     // in the body size at the top-left otherwise.
@@ -251,6 +312,11 @@ fn address_field(
             )
         })
         .inner;
+    magnifier(
+        ui.painter(),
+        Pos2::new(field.rect.left() + 24.0, field.rect.center().y),
+        ui.visuals().weak_text_color(),
+    );
     if launcher.focus {
         launcher.focus = false;
         field.request_focus();
@@ -361,6 +427,23 @@ fn bottom_row(ui: &mut Ui, launcher: &mut Launcher, commands: &mut Vec<Command>)
             }
         });
     });
+}
+
+/// A magnifier at `c`: a ring with a handle running down and right.
+fn magnifier(painter: &egui::Painter, c: Pos2, ink: Color32) {
+    let stroke = Stroke::new(1.8_f32, ink);
+    let r = 6.5;
+    let lens = Pos2::new(c.x - 1.5, c.y - 1.5);
+    painter.circle_stroke(lens, r, stroke);
+    let along = std::f32::consts::FRAC_PI_4;
+    let (sin, cos) = along.sin_cos();
+    painter.line_segment(
+        [
+            Pos2::new(lens.x + cos * (r + 0.5), lens.y + sin * (r + 0.5)),
+            Pos2::new(lens.x + cos * (r + 6.0), lens.y + sin * (r + 6.0)),
+        ],
+        Stroke::new(2.2_f32, ink),
+    );
 }
 
 /// A gear drawn with the painter, so it never depends on a font having
@@ -506,27 +589,45 @@ struct Slot {
 
 /// Lay the tiles out on `cols` columns from `origin`, each `kind` taking
 /// its span (clamped to the grid), wrapping when a span does not fit.
+/// A row is as tall as the tallest tile on it ([`tile_height`]), and
+/// every tile on the row takes that height, so the cards line up.
 fn layout(kinds: &[WidgetKind], cols: usize, tile_w: f32, origin: Pos2) -> Vec<Slot> {
-    let mut slots = Vec::with_capacity(kinds.len());
-    let (mut col, mut row) = (0usize, 0usize);
+    let mut slots: Vec<Slot> = Vec::with_capacity(kinds.len());
+    // The row being filled: where it starts in `slots`, its top, and
+    // the columns taken so far.
+    let (mut row_start, mut row_top, mut col) = (0usize, origin.y, 0usize);
+    let close_row = |slots: &mut Vec<Slot>, row_start: usize, row_top: &mut f32| {
+        let height = slots[row_start..]
+            .iter()
+            .map(|s| tile_height(s.kind))
+            .fold(0.0, f32::max);
+        for slot in &mut slots[row_start..] {
+            slot.rect.set_height(height);
+        }
+        *row_top += height + TILE_GAP;
+    };
     for &kind in kinds {
         let span = kind.columns().clamp(1, cols);
         if col + span > cols {
+            close_row(&mut slots, row_start, &mut row_top);
+            row_start = slots.len();
             col = 0;
-            row += 1;
         }
         let x = origin.x + col as f32 * (tile_w + TILE_GAP);
-        let y = origin.y + row as f32 * (TILE_HEIGHT + TILE_GAP);
         let w = span as f32 * tile_w + (span - 1) as f32 * TILE_GAP;
         slots.push(Slot {
             kind,
-            rect: Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, TILE_HEIGHT)),
+            rect: Rect::from_min_size(Pos2::new(x, row_top), Vec2::new(w, tile_height(kind))),
         });
         col += span;
         if col >= cols {
+            close_row(&mut slots, row_start, &mut row_top);
+            row_start = slots.len();
             col = 0;
-            row += 1;
         }
+    }
+    if row_start < slots.len() {
+        close_row(&mut slots, row_start, &mut row_top);
     }
     slots
 }
@@ -543,15 +644,15 @@ fn columns_for(width: f32) -> usize {
 }
 
 /// The index among the other tiles a tile dragged to `pointer` would
-/// take: after every tile whose row is above the pointer, and every
-/// tile on the pointer's row whose centre is left of it.
+/// take: after every tile whose bottom is above the pointer, and every
+/// tile the pointer is level with whose centre is left of it.
 fn drop_index(others: &[Slot], pointer: Pos2) -> usize {
     others
         .iter()
         .filter(|s| {
-            let c = s.rect.center();
-            c.y + TILE_HEIGHT / 2.0 < pointer.y
-                || ((c.y - pointer.y).abs() <= TILE_HEIGHT / 2.0 && c.x < pointer.x)
+            let r = s.rect;
+            r.bottom() < pointer.y
+                || (r.top() <= pointer.y && pointer.y <= r.bottom() && r.center().x < pointer.x)
         })
         .count()
 }
@@ -562,13 +663,17 @@ fn drop_index(others: &[Slot], pointer: Pos2) -> usize {
 /// closes the panel (a question sent, a site opened).
 fn mosaic(
     ui: &mut Ui,
-    window: &Window,
-    context: &ChromeContext<'_>,
+    scene: &Scene<'_>,
     state: &mut ChromeState,
     launcher: &mut Launcher,
     edit: bool,
     commands: &mut Vec<Command>,
 ) -> Option<bool> {
+    let Scene {
+        window,
+        context,
+        palette,
+    } = scene;
     let drive_available = context.brand.google_client_id.is_some();
     let kinds = context.launch_settings.visible_widgets(drive_available);
     if kinds.is_empty() {
@@ -636,7 +741,7 @@ fn mosaic(
         } else {
             ui.interact(rect, tile_id, Sense::hover())
         };
-        paint_tile_frame(ui, rect, edit && Some(slot.kind) == dragged_kind);
+        paint_tile_frame(ui, palette, rect, edit && Some(slot.kind) == dragged_kind);
         let inner = rect.shrink(TILE_PADDING);
         // A salt per tile: the tiles are drawn in a different order while
         // one is dragged, and auto ids would move between frames.
@@ -653,7 +758,7 @@ fn mosaic(
         if edit {
             child.disable();
         }
-        let outcome = tile_body(&mut child, window, context, state, launcher, slot.kind);
+        let outcome = tile_body(&mut child, scene, state, launcher, slot.kind);
         commands.extend(outcome.commands);
         close |= outcome.close;
 
@@ -707,29 +812,24 @@ fn mosaic(
     Some(close)
 }
 
-/// A tile's card: a faint fill and hairline, lifted while dragged.
-fn paint_tile_frame(ui: &Ui, rect: Rect, lifted: bool) {
-    let visuals = ui.visuals();
-    let fill = if lifted {
-        blend(visuals.faint_bg_color, visuals.text_color(), 0.06)
-    } else {
-        visuals.faint_bg_color
-    };
+/// A tile's card: the surface a shade towards the swatch, no line;
+/// lifted on a shadow while dragged.
+fn paint_tile_frame(ui: &Ui, palette: &Palette, rect: Rect, lifted: bool) {
     let painter = ui.painter();
     if lifted {
-        painter.rect_filled(
-            rect.translate(Vec2::new(0.0, 3.0)),
-            CornerRadius::same(theme::CORNER + 2),
-            Color32::from_black_alpha(40),
-        );
+        painter.add(theme::POPUP_SHADOW.as_shape(rect, CornerRadius::same(theme::CARD)));
     }
-    painter.rect(
-        rect,
-        CornerRadius::same(theme::CORNER + 2),
-        fill,
-        visuals.widgets.noninteractive.bg_stroke,
-        StrokeKind::Inside,
-    );
+    let fill = if lifted {
+        blend(palette.card, palette.field_focus, 0.5)
+    } else {
+        palette.card
+    };
+    painter.rect_filled(rect, CornerRadius::same(theme::CARD), fill);
+}
+
+/// The fill of a row or a disc on a card under the pointer.
+fn card_hover(palette: &Palette) -> Color32 {
+    blend(palette.card, palette.ink, 0.08)
 }
 
 /// The tile's heading; in edit mode a handle at its left and a close
@@ -803,19 +903,16 @@ struct TileOutcome {
 
 fn tile_body(
     ui: &mut Ui,
-    window: &Window,
-    context: &ChromeContext<'_>,
+    scene: &Scene<'_>,
     state: &mut ChromeState,
     launcher: &mut Launcher,
     kind: WidgetKind,
 ) -> TileOutcome {
     match kind {
-        WidgetKind::DriveRecent => drive_tile(ui, window, context),
-        WidgetKind::Weather => weather_tile(ui, context, launcher),
-        WidgetKind::AskClaude | WidgetKind::AskChatGpt => {
-            ask_tile(ui, window, context, launcher, kind)
-        }
-        WidgetKind::TopSites => top_sites_tile(ui, window, context, state, launcher),
+        WidgetKind::DriveRecent => drive_tile(ui, scene),
+        WidgetKind::Weather => weather_tile(ui, scene.context, launcher),
+        WidgetKind::AskClaude | WidgetKind::AskChatGpt => ask_tile(ui, scene, launcher, kind),
+        WidgetKind::TopSites => top_sites_tile(ui, scene, state, launcher),
     }
 }
 
@@ -823,30 +920,46 @@ fn tile_body(
 /// new tab and closes the panel.
 fn ask_tile(
     ui: &mut Ui,
-    window: &Window,
-    context: &ChromeContext<'_>,
+    scene: &Scene<'_>,
     launcher: &mut Launcher,
     kind: WidgetKind,
 ) -> TileOutcome {
+    let Scene {
+        window,
+        context,
+        palette,
+    } = scene;
     let mut outcome = TileOutcome::default();
     let Some(template) = context.launch_settings.ask_template(kind) else {
         return outcome;
     };
-    ui.weak(format!("Opens {} in a new tab.", template.name));
-    ui.add_space(6.0);
+    ui.add_space(4.0);
     let text = launcher.ask.entry(kind).or_default();
+    let id = Id::new(("ask", kind, window.id));
+    let focused = ui.memory(|m| m.has_focus(id));
     let field = ui
         .scope(|ui| {
             theme::pill_fields(ui);
             ui.add(
                 egui::TextEdit::singleline(text)
-                    .id(Id::new(("ask", kind, window.id)))
+                    .id(id)
                     .margin(Margin::symmetric(12, 7))
+                    .background_color(palette.field_at(focused))
                     .hint_text(format!("Ask {}\u{2026}", template.name))
                     .desired_width(f32::INFINITY),
             )
         })
         .inner;
+    // The caption sits at the card's foot, so a tall card (on a row
+    // with the weather) is not a field over a blank, and a short card
+    // (on a row of its own) keeps it close under the field.
+    let footer = ui.text_style_height(&TextStyle::Small);
+    ui.add_space((ui.available_height() - footer).max(6.0));
+    ui.label(
+        RichText::new(format!("Opens {} in a new tab.", template.name))
+            .small()
+            .weak(),
+    );
     let enter = ui.input(|i| i.key_pressed(Key::Enter));
     if field.lost_focus() && enter && !text.trim().is_empty() {
         outcome.commands.push(Command::AskInNewTab {
@@ -859,16 +972,22 @@ fn ask_tile(
     outcome
 }
 
-/// The most visited sites: favicon and host, a click opens the site's
-/// most visited page; a close control on hover keeps the host off the
-/// tile.
+/// The most visited sites as a shelf of shortcuts, the shape of
+/// Chromium's new tab page: a disc holding the site's favicon (or its
+/// initial) with the host under it. A click opens the site's most
+/// visited page; a close control at the disc's corner, shown while the
+/// shortcut is hovered, keeps the host off the shelf.
 fn top_sites_tile(
     ui: &mut Ui,
-    window: &Window,
-    context: &ChromeContext<'_>,
+    scene: &Scene<'_>,
     state: &mut ChromeState,
     launcher: &mut Launcher,
 ) -> TileOutcome {
+    let Scene {
+        window,
+        context,
+        palette,
+    } = scene;
     let mut outcome = TileOutcome::default();
     let sites = launcher.top.get_or_insert_with(|| {
         top_sites(
@@ -881,21 +1000,30 @@ fn top_sites_tile(
         ui.weak("The sites you visit most will appear here.");
         return outcome;
     }
+    ui.add_space(4.0);
+    let avail = ui.available_width();
+    let (shelf, _) = ui.allocate_exact_size(Vec2::new(avail, SHORTCUT_SHELF), Sense::hover());
+    let cell_w = (avail / sites.len() as f32).min(SHORTCUT_CELL_MAX);
+    let ppp = ui.painter().pixels_per_point();
+    let px = favicon::icon_px(SHORTCUT_ICON, ppp);
+    let small = TextStyle::Small.resolve(ui.style());
     let mut hidden = None;
-    for site in sites.iter() {
-        let width = ui.available_width();
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, ROW_HEIGHT), Sense::click());
-        let hovered = response.hovered();
-        if hovered {
-            ui.painter()
-                .rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill);
-        }
-        let ppp = ui.painter().pixels_per_point();
-        let px = favicon::icon_px(ROW_ICON, ppp);
-        let icon_rect = Rect::from_center_size(
-            Pos2::new(rect.left() + 4.0 + ROW_ICON / 2.0, rect.center().y),
-            Vec2::splat(ROW_ICON),
+    for (i, site) in sites.iter().enumerate() {
+        let cell = Rect::from_min_size(
+            Pos2::new(shelf.left() + i as f32 * cell_w, shelf.top()),
+            Vec2::new(cell_w, SHORTCUT_SHELF),
         );
+        let response = ui.interact(cell, Id::new(("shortcut", &site.host)), Sense::click());
+        let hovered = response.hovered();
+        let disc = Pos2::new(cell.center().x, cell.top() + SHORTCUT_DISC / 2.0);
+        let disc_fill = if hovered {
+            card_hover(palette)
+        } else {
+            blend(palette.card, palette.ink, 0.045)
+        };
+        ui.painter()
+            .circle_filled(disc, SHORTCUT_DISC / 2.0, disc_fill);
+        let icon_rect = Rect::from_center_size(disc, Vec2::splat(SHORTCUT_ICON));
         let texture = context
             .site_icons
             .get(&site.host)
@@ -909,52 +1037,52 @@ fn top_sites_tile(
                     Color32::WHITE,
                 );
             }
-            None => initial_disc(ui, icon_rect, &site.host),
+            None => initial(ui, palette, disc, &site.host),
         }
-        let text_right = if hovered {
-            rect.right() - 24.0
-        } else {
-            rect.right() - 4.0
-        };
         let label = site.host.strip_prefix("www.").unwrap_or(&site.host);
-        let galley = ui.painter().layout(
-            label.to_string(),
-            TextStyle::Body.resolve(ui.style()),
-            ui.visuals().text_color(),
-            (text_right - icon_rect.right() - 8.0).max(10.0),
-        );
+        let mut job =
+            egui::text::LayoutJob::simple_singleline(label.to_string(), small.clone(), palette.ink);
+        job.wrap = egui::text::TextWrapping::truncate_at_width(cell_w - 6.0);
+        let galley = ui.painter().layout_job(job);
         ui.painter().galley(
             Pos2::new(
-                icon_rect.right() + 8.0,
-                rect.center().y - galley.size().y / 2.0,
+                cell.center().x - galley.size().x / 2.0,
+                disc.y + SHORTCUT_DISC / 2.0 + 5.0,
             ),
             galley,
-            ui.visuals().text_color(),
+            palette.ink,
         );
         if hovered {
             let x_rect = Rect::from_center_size(
-                Pos2::new(rect.right() - 12.0, rect.center().y),
+                Pos2::new(
+                    disc.x + SHORTCUT_DISC / 2.0 - 3.0,
+                    disc.y - SHORTCUT_DISC / 2.0 + 3.0,
+                ),
                 Vec2::splat(16.0),
             );
             let x = ui.interact(x_rect, Id::new(("hide-site", &site.host)), Sense::click());
-            let ink = if x.hovered() {
-                ui.visuals().text_color()
-            } else {
-                ui.visuals().weak_text_color()
-            };
+            ui.painter().circle_filled(
+                x_rect.center(),
+                8.0,
+                if x.hovered() {
+                    blend(palette.card, palette.ink, 0.2)
+                } else {
+                    palette.field_focus
+                },
+            );
             let c = x_rect.center();
-            let stroke = Stroke::new(1.4_f32, ink);
+            let stroke = Stroke::new(1.4_f32, palette.ink);
             ui.painter().line_segment(
                 [
-                    Pos2::new(c.x - 3.5, c.y - 3.5),
-                    Pos2::new(c.x + 3.5, c.y + 3.5),
+                    Pos2::new(c.x - 3.0, c.y - 3.0),
+                    Pos2::new(c.x + 3.0, c.y + 3.0),
                 ],
                 stroke,
             );
             ui.painter().line_segment(
                 [
-                    Pos2::new(c.x - 3.5, c.y + 3.5),
-                    Pos2::new(c.x + 3.5, c.y - 3.5),
+                    Pos2::new(c.x - 3.0, c.y + 3.0),
+                    Pos2::new(c.x + 3.0, c.y - 3.0),
                 ],
                 stroke,
             );
@@ -984,8 +1112,9 @@ fn top_sites_tile(
     outcome
 }
 
-/// A disc with the host's first letter, for a site with no favicon.
-fn initial_disc(ui: &Ui, rect: Rect, host: &str) {
+/// The host's first letter at `center`, in the accent, for a site with
+/// no favicon.
+fn initial(ui: &Ui, palette: &Palette, center: Pos2, host: &str) {
     let letter = host
         .strip_prefix("www.")
         .unwrap_or(host)
@@ -993,15 +1122,12 @@ fn initial_disc(ui: &Ui, rect: Rect, host: &str) {
         .next()
         .map(|c| c.to_ascii_uppercase().to_string())
         .unwrap_or_default();
-    let fill = blend(ui.visuals().faint_bg_color, ui.visuals().text_color(), 0.25);
-    ui.painter()
-        .circle_filled(rect.center(), rect.width() / 2.0, fill);
     ui.painter().text(
-        rect.center(),
+        center,
         Align2::CENTER_CENTER,
         letter,
-        FontId::proportional(10.0),
-        ui.visuals().extreme_bg_color,
+        FontId::new(17.0, egui::FontFamily::Name(theme::MEDIUM.into())),
+        palette.accent,
     );
 }
 
@@ -1245,7 +1371,12 @@ fn paint_weather(
 }
 
 /// The recent Drive files, or the way to connect an account.
-fn drive_tile(ui: &mut Ui, window: &Window, context: &ChromeContext<'_>) -> TileOutcome {
+fn drive_tile(ui: &mut Ui, scene: &Scene<'_>) -> TileOutcome {
+    let Scene {
+        window,
+        context,
+        palette,
+    } = scene;
     let mut outcome = TileOutcome::default();
     match &context.launch.drive {
         DriveState::Unavailable => {
@@ -1287,7 +1418,7 @@ fn drive_tile(ui: &mut Ui, window: &Window, context: &ChromeContext<'_>) -> Tile
             Fetched::Ready { value, .. } => {
                 let now = osmena_core::history::unix_now();
                 for file in value.iter().take(5) {
-                    if drive_row(ui, file, now).clicked() {
+                    if drive_row(ui, palette, file, now).clicked() {
                         outcome.commands.push(Command::NewTab {
                             window: window.id,
                             url: Some(file.url.clone()),
@@ -1303,7 +1434,12 @@ fn drive_tile(ui: &mut Ui, window: &Window, context: &ChromeContext<'_>) -> Tile
 
 /// One Drive file: a glyph in its kind's colour, the name, and when it
 /// was opened, right-aligned and weak.
-fn drive_row(ui: &mut Ui, file: &osmena_core::DriveFile, now: u64) -> egui::Response {
+fn drive_row(
+    ui: &mut Ui,
+    palette: &Palette,
+    file: &osmena_core::DriveFile,
+    now: u64,
+) -> egui::Response {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, ROW_HEIGHT), Sense::click());
     if !ui.is_rect_visible(rect) {
@@ -1311,7 +1447,7 @@ fn drive_row(ui: &mut Ui, file: &osmena_core::DriveFile, now: u64) -> egui::Resp
     }
     if response.hovered() {
         ui.painter()
-            .rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill);
+            .rect_filled(rect, theme::CORNER, card_hover(palette));
     }
     let glyph = Rect::from_center_size(
         Pos2::new(rect.left() + 4.0 + 9.0, rect.center().y),
@@ -1629,42 +1765,70 @@ mod tests {
 
     #[test]
     fn the_grid_wraps_spans_and_clamps_them() {
+        use WidgetKind::*;
         let origin = Pos2::new(0.0, 0.0);
+        let g = TILE_GAP;
         // Three columns of 100: Drive takes two, Weather the third, the
-        // next three the second row.
+        // two questions the second row, and the shelf a row of its own
+        // across all three.
         let three = layout(&WidgetKind::ALL, 3, 100.0, origin);
+        let row2 = tile_height(DriveRecent).max(tile_height(Weather)) + g;
+        let row3 = row2 + tile_height(AskClaude) + g;
         assert_eq!(
             kinds(&three),
             vec![
-                (WidgetKind::DriveRecent, 0.0, 0.0, 210.0),
-                (WidgetKind::Weather, 220.0, 0.0, 100.0),
-                (WidgetKind::AskClaude, 0.0, 200.0, 100.0),
-                (WidgetKind::AskChatGpt, 110.0, 200.0, 100.0),
-                (WidgetKind::TopSites, 220.0, 200.0, 100.0),
+                (DriveRecent, 0.0, 0.0, 200.0 + g),
+                (Weather, 200.0 + 2.0 * g, 0.0, 100.0),
+                (AskClaude, 0.0, row2, 100.0),
+                (AskChatGpt, 100.0 + g, row2, 100.0),
+                (TopSites, 0.0, row3, 300.0 + 2.0 * g),
             ]
         );
-        // Two columns: Drive alone on its row's two columns.
+        // Two columns: Drive alone on its row's two columns, the shelf
+        // clamped to two.
         let two = layout(&WidgetKind::ALL, 2, 100.0, origin);
-        assert_eq!(two[1].rect.min, Pos2::new(0.0, 200.0));
-        assert_eq!(two[2].rect.min, Pos2::new(110.0, 200.0));
-        // One column: every tile one wide, one per row.
+        assert_eq!(
+            two[1].rect.min,
+            Pos2::new(0.0, tile_height(DriveRecent) + g)
+        );
+        assert_eq!(
+            two[2].rect.min,
+            Pos2::new(100.0 + g, tile_height(DriveRecent) + g)
+        );
+        assert_eq!(two[4].rect.width(), 200.0 + g);
+        // One column: every tile one wide, one per row, each its own
+        // height.
         let one = layout(&WidgetKind::ALL, 1, 100.0, origin);
         assert!(one.iter().all(|s| s.rect.width() == 100.0));
-        assert_eq!(one[4].rect.top(), 800.0);
+        let stacked: f32 = WidgetKind::ALL[..4]
+            .iter()
+            .map(|k| tile_height(*k) + g)
+            .sum();
+        assert_eq!(one[4].rect.top(), stacked);
+        assert_eq!(one[2].rect.height(), tile_height(AskClaude));
         // A span that does not fit wraps: Weather, then Drive on its own
         // row.
-        let wrapped = layout(
-            &[
-                WidgetKind::Weather,
-                WidgetKind::DriveRecent,
-                WidgetKind::TopSites,
-            ],
-            3,
-            100.0,
-            origin,
+        let wrapped = layout(&[Weather, DriveRecent, TopSites], 3, 100.0, origin);
+        assert_eq!(wrapped[1].rect.min, Pos2::new(100.0 + g, 0.0));
+        assert_eq!(
+            wrapped[2].rect.min,
+            Pos2::new(0.0, tile_height(DriveRecent) + g)
         );
-        assert_eq!(wrapped[1].rect.min, Pos2::new(110.0, 0.0));
-        assert_eq!(wrapped[2].rect.min, Pos2::new(0.0, 200.0));
+    }
+
+    #[test]
+    fn a_row_is_as_tall_as_its_tallest_tile() {
+        use WidgetKind::*;
+        let row = layout(&[Weather, AskClaude, AskChatGpt], 3, 100.0, Pos2::ZERO);
+        assert!(tile_height(AskClaude) < tile_height(Weather));
+        assert!(row.iter().all(|s| s.rect.height() == tile_height(Weather)));
+        // Questions on a row of their own keep their own height.
+        let short = layout(&[AskClaude, AskChatGpt], 3, 100.0, Pos2::ZERO);
+        assert!(
+            short
+                .iter()
+                .all(|s| s.rect.height() == tile_height(AskClaude))
+        );
     }
 
     #[test]
@@ -1689,12 +1853,13 @@ mod tests {
             100.0,
             origin,
         );
+        let row2 = others[3].rect.center().y;
         // Over the first tile's left half: first.
         assert_eq!(drop_index(&others, Pos2::new(20.0, 50.0)), 0);
         // Right of the second tile's centre, same row: after two.
         assert_eq!(drop_index(&others, Pos2::new(180.0, 50.0)), 2);
         // On the second row, left: after the whole first row.
-        assert_eq!(drop_index(&others, Pos2::new(10.0, 250.0)), 3);
+        assert_eq!(drop_index(&others, Pos2::new(10.0, row2)), 3);
         // Below everything: last.
         assert_eq!(drop_index(&others, Pos2::new(500.0, 900.0)), 4);
     }

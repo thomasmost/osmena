@@ -14,9 +14,12 @@
 use std::sync::Arc;
 
 use egui::{
-    Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Margin, Style, TextStyle,
-    Vec2,
+    Color32, Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Id, Margin,
+    Stroke, Style, TextStyle, Theme, Vec2, epaint::Shadow,
 };
+use osmena_core::ChromeColor;
+
+use crate::chrome::Palette;
 
 /// The padding inside every text field of the chrome.
 pub const INPUT_MARGIN: Margin = Margin::symmetric(10, 5);
@@ -27,6 +30,32 @@ pub const CORNER: u8 = 8;
 /// The rounding of a field that is a pill (the address bar, the
 /// launcher's field): more than half of any field's height.
 pub const PILL: u8 = 20;
+
+/// The rounding of a card (a tile of the Launch Panel).
+pub const CARD: u8 = 14;
+
+/// The rounding of a sheet over the page (the Launch Panel).
+pub const PANEL: u8 = 18;
+
+/// The rounding of a popup (a suggestions list, a popover, a prompt).
+pub const POPUP: u8 = 12;
+
+/// The shadow under a popup: wide and soft, cast straight down, so a
+/// list reads as lifted off the page rather than outlined.
+pub const POPUP_SHADOW: Shadow = Shadow {
+    offset: [0, 4],
+    blur: 18,
+    spread: 0,
+    color: Color32::from_black_alpha(36),
+};
+
+/// The shadow under a sheet (the Launch Panel): deeper than a popup's.
+pub const PANEL_SHADOW: Shadow = Shadow {
+    offset: [0, 10],
+    blur: 40,
+    spread: 0,
+    color: Color32::from_black_alpha(70),
+};
 
 /// The family of the medium weight, for headings.
 pub const MEDIUM: &str = "Inter-Medium";
@@ -119,7 +148,43 @@ fn style(style: &mut Style) {
         widget.corner_radius = CornerRadius::same(CORNER);
     }
     visuals.window_corner_radius = CornerRadius::same(12);
-    visuals.menu_corner_radius = CornerRadius::same(10);
+    visuals.menu_corner_radius = CornerRadius::same(POPUP);
+    visuals.popup_shadow = POPUP_SHADOW;
+    visuals.window_shadow = PANEL_SHADOW;
+    // Buttons show no outline on hover or press: the fill changes.
+    visuals.widgets.hovered.bg_stroke = Stroke::NONE;
+    visuals.widgets.active.bg_stroke = Stroke::NONE;
+    visuals.widgets.inactive.bg_stroke = Stroke::NONE;
+}
+
+/// Tint the context's styles with the profile's colour: the accent
+/// (the focus ring of every field, the text selection, the picked
+/// row, a lit chip, a link) and the surface every popup is drawn on.
+/// Both the light and the dark style are set, each from its own
+/// [`Palette`], so a system theme change needs no new call. The colour
+/// last applied is kept in the context's memory, so a call per frame
+/// costs a lookup until the colour changes.
+pub fn tint(ctx: &Context, color: ChromeColor) {
+    let key = Id::new("osmena-tint");
+    if ctx.data(|d| d.get_temp::<ChromeColor>(key)) == Some(color) {
+        return;
+    }
+    ctx.data_mut(|d| d.insert_temp(key, color));
+    for (theme, dark) in [(Theme::Light, false), (Theme::Dark, true)] {
+        let palette = Palette::new(color, dark);
+        ctx.style_mut_of(theme, |style| tint_style(style, &palette));
+    }
+}
+
+fn tint_style(style: &mut Style, palette: &Palette) {
+    let visuals = &mut style.visuals;
+    visuals.selection.stroke = Stroke::new(1.5_f32, palette.accent);
+    visuals.selection.bg_fill = palette.selection;
+    visuals.hyperlink_color = palette.accent;
+    visuals.window_fill = palette.surface;
+    visuals.panel_fill = palette.surface;
+    visuals.window_stroke = Stroke::new(1.0_f32, palette.hairline);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, palette.hairline);
 }
 
 /// Round the fields drawn inside `ui` as pills.
@@ -186,6 +251,39 @@ mod tests {
         assert_eq!(
             s.text_styles[&TextStyle::Heading].family,
             FontFamily::Name(MEDIUM.into())
+        );
+        assert_eq!(s.visuals.widgets.hovered.bg_stroke, Stroke::NONE);
+    }
+
+    #[test]
+    fn the_tint_sets_both_styles_once_per_colour() {
+        let ctx = Context::default();
+        install(&ctx);
+        tint(&ctx, ChromeColor::Shell);
+        let light = ctx.style_of(Theme::Light);
+        let dark = ctx.style_of(Theme::Dark);
+        assert_eq!(
+            light.visuals.selection.stroke.color,
+            Palette::new(ChromeColor::Shell, false).accent
+        );
+        assert_eq!(
+            dark.visuals.selection.stroke.color,
+            Palette::new(ChromeColor::Shell, true).accent
+        );
+        assert_ne!(
+            light.visuals.selection.stroke.color,
+            dark.visuals.selection.stroke.color
+        );
+        // The same colour again changes nothing; another colour does.
+        tint(&ctx, ChromeColor::Shell);
+        assert_eq!(
+            ctx.style_of(Theme::Light).visuals.selection.stroke.color,
+            light.visuals.selection.stroke.color
+        );
+        tint(&ctx, ChromeColor::Ocean);
+        assert_eq!(
+            ctx.style_of(Theme::Light).visuals.selection.stroke.color,
+            Palette::new(ChromeColor::Ocean, false).accent
         );
     }
 }

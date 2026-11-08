@@ -364,6 +364,7 @@ impl<S: Surface> SettingsWindow<S> {
             input: block_input,
             notice: block_notice,
         };
+        theme::tint(&egui.egui_ctx, settings.chrome_color);
         egui.run(window, |ui| {
             activity = draw_settings(
                 ui,

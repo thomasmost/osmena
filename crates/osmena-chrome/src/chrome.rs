@@ -69,8 +69,14 @@ const CONTROL_WIDTH: f32 = 40.0;
 /// Room for macOS's traffic lights at the left of a frameless strip.
 const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
 /// A toolbar button for an extension's action, and the icon inside it.
-const ACTION_SIZE: f32 = 26.0;
+const ACTION_SIZE: f32 = 28.0;
 const ACTION_ICON: f32 = 16.0;
+/// The padding inside the address bar: a notch taller than a settings
+/// field, so the pill is as tall as the buttons beside it.
+const ADDRESS_MARGIN: Margin = Margin::symmetric(12, 7);
+/// The stroke of the painted toolbar glyphs (the arrows, the reload
+/// arc, the cross).
+const NAV_STROKE: f32 = 1.6;
 /// The widest a folder's name is drawn in the strip.
 const FOLDER_NAME_MAX_CHARS: usize = 18;
 /// How long a tab or chip takes to slide to a new place in the strip.
@@ -144,6 +150,32 @@ pub struct Palette {
     pub tab_hover: Color32,
     pub tab_selected: Color32,
     pub tab_outline: Color32,
+    /// The profile's accent: the deep shade of the swatch's family in
+    /// light mode, its pastel in dark mode. The focus ring of every
+    /// field, the lit chips, the links.
+    pub accent: Color32,
+    /// Selected text, and the picked row of a list: the page's colour
+    /// moved part of the way to the accent, opaque so text stays
+    /// legible over it.
+    pub selection: Color32,
+    /// What a popup or a sheet over the page is drawn on: the page's
+    /// colour tinted a little by the swatch.
+    pub surface: Color32,
+    /// A card on the surface (a tile of the Launch Panel): the surface
+    /// a shade further towards the swatch.
+    pub card: Color32,
+    /// The faint line around a popup.
+    pub hairline: Color32,
+    /// The address bar and the Launch Panel's field at rest: the
+    /// toolbar's fill a shade darker, so the pill shows without a line.
+    pub field: Color32,
+    /// The same field while it has the keyboard: the page's colour,
+    /// with the accent ring around it.
+    pub field_focus: Color32,
+    /// The fill behind a toolbar icon button under the pointer.
+    pub hover: Color32,
+    /// The text colour on the surface and the cards.
+    pub ink: Color32,
 }
 
 impl Palette {
@@ -162,13 +194,51 @@ impl Palette {
             Color32::WHITE
         };
         let veil_alpha = |a: u8| Color32::from_rgba_unmultiplied(veil.r(), veil.g(), veil.b(), a);
+        let toolbar = blend(strip, page, 0.84);
+        let accent = accent_for(color, dark_mode);
+        let (surface, card, hairline, field, field_focus, hover, selection) = if dark_mode {
+            let surface = blend(Color32::from_gray(38), strip, 0.12);
+            (
+                surface,
+                blend(surface, Color32::WHITE, 0.05),
+                Color32::from_white_alpha(24),
+                blend(toolbar, Color32::WHITE, 0.08),
+                blend(toolbar, Color32::WHITE, 0.14),
+                blend(toolbar, Color32::WHITE, 0.12),
+                blend(page, accent, 0.30),
+            )
+        } else {
+            let surface = blend(page, strip, 0.06);
+            (
+                surface,
+                blend(surface, strip, 0.10),
+                Color32::from_black_alpha(22),
+                blend(toolbar, Color32::BLACK, 0.06),
+                page,
+                blend(toolbar, Color32::BLACK, 0.10),
+                blend(page, accent, 0.26),
+            )
+        };
         Palette {
             strip,
-            toolbar: blend(strip, page, 0.84),
+            toolbar,
             text_on_strip: if light_strip {
                 Color32::from_gray(24)
             } else {
                 Color32::WHITE
+            },
+            accent,
+            selection,
+            surface,
+            card,
+            hairline,
+            field,
+            field_focus,
+            hover,
+            ink: if dark_mode {
+                Color32::from_gray(222)
+            } else {
+                Color32::from_gray(40)
             },
             // The edge sits where the strip has faded to the toolbar's
             // fill, so it contrasts with that, not with the swatch.
@@ -193,6 +263,15 @@ impl Palette {
             Color32::from_gray(24)
         } else {
             Color32::from_gray(230)
+        }
+    }
+
+    /// A field's fill: at rest, or while it has the keyboard.
+    pub fn field_at(&self, focused: bool) -> Color32 {
+        if focused {
+            self.field_focus
+        } else {
+            self.field
         }
     }
 
@@ -402,6 +481,20 @@ fn active_tab_body(rect: Rect, palette: &Palette, px: f32) -> Vec<egui::Shape> {
         egui::Shape::mesh(flares),
         egui::Shape::line(outline, Stroke::new(px, palette.strip_edge)),
     ]
+}
+
+/// The accent of a swatch: the deepest shade of its family in light
+/// mode, where it has to stand on white, and the pastel in dark mode,
+/// where it has to stand on near-black. A swatch outside every family
+/// is its own accent.
+fn accent_for(color: ChromeColor, dark_mode: bool) -> Color32 {
+    let shade = ChromeColor::FAMILIES
+        .iter()
+        .find(|family| family.contains(&color))
+        .map(|family| if dark_mode { family[0] } else { family[2] })
+        .unwrap_or(color);
+    let [r, g, b] = shade.rgb();
+    Color32::from_rgb(r, g, b)
 }
 
 /// `a` moved `t` of the way to `b`, per channel.
@@ -779,6 +872,7 @@ pub fn draw(
         .extension_icons
         .retain(|id, _| pinned.iter().any(|e| e.id == *id));
     state.action_anchors.clear();
+    theme::tint(ui.ctx(), color);
     let palette = Palette::new(color, ui.visuals().dark_mode);
 
     // Full screen shows the page alone; every shortcut still works.
@@ -810,11 +904,6 @@ pub fn draw(
                 // The system's traffic lights sit over the strip's left end.
                 ui.add_space(TRAFFIC_LIGHTS_INSET);
             }
-            let on_strip = |text: &str, size: f32| {
-                Button::new(RichText::new(text).color(palette.text_on_strip).size(size))
-                    .frame(false)
-                    .min_size(Vec2::new(MENU_WIDTH, TAB_HEIGHT))
-            };
             // The strip's right end holds, on a frameless window (except
             // on macOS, where the system keeps its own), the window
             // controls. The tabs scroll within what is left of them, and
@@ -858,8 +947,7 @@ pub fn draw(
                         ui.spacing_mut().item_spacing.x = tab_spacing;
                         strip_row(ui, window, &items, &strip_tabs, state, &mut commands);
                         ui.add_space(4.0);
-                        if ui
-                            .add(on_strip("+", 20.0))
+                        if plus_button(ui, &palette, window)
                             .on_hover_text(hint(keymap, CommandKind::NewTab, "New tab"))
                             .clicked()
                         {
@@ -940,24 +1028,28 @@ pub fn draw(
         .frame(toolbar_frame)
         .show_inside(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(active.can_go_back, Button::new("◀"))
+                ui.spacing_mut().item_spacing.x = 4.0;
+                if nav_button(ui, &palette, window, NavGlyph::Back, active.can_go_back)
                     .on_hover_text(hint(keymap, CommandKind::Back, "Back"))
                     .clicked()
                 {
                     commands.push(Command::Back(active.id));
                 }
-                if ui
-                    .add_enabled(active.can_go_forward, Button::new("▶"))
-                    .on_hover_text(hint(keymap, CommandKind::Forward, "Forward"))
-                    .clicked()
+                if nav_button(
+                    ui,
+                    &palette,
+                    window,
+                    NavGlyph::Forward,
+                    active.can_go_forward,
+                )
+                .on_hover_text(hint(keymap, CommandKind::Forward, "Forward"))
+                .clicked()
                 {
                     commands.push(Command::Forward(active.id));
                 }
                 // Reload is always available (a hung load must be recoverable);
                 // Stop appears beside it while loading.
-                if ui
-                    .button("⟳")
+                if nav_button(ui, &palette, window, NavGlyph::Reload, true)
                     .on_hover_text(hint(keymap, CommandKind::Reload, "Reload"))
                     .clicked()
                 {
@@ -966,8 +1058,7 @@ pub fn draw(
                 }
                 if active.load == LoadState::Loading {
                     if engine.supports_stop {
-                        if ui
-                            .button("✕")
+                        if nav_button(ui, &palette, window, NavGlyph::Stop, true)
                             .on_hover_text(hint(keymap, CommandKind::Stop, "Stop"))
                             .clicked()
                         {
@@ -976,7 +1067,7 @@ pub fn draw(
                     } else {
                         // The button shows the state but stays disabled so
                         // the UI does not promise what the engine lacks.
-                        ui.add_enabled(false, Button::new("✕"))
+                        nav_button(ui, &palette, window, NavGlyph::Stop, false)
                             .on_disabled_hover_text(format!(
                                 "{} (not supported by {} {})",
                                 hint(keymap, CommandKind::Stop, "Stop"),
@@ -1097,11 +1188,16 @@ pub fn draw(
                     }
                     let address_id = Id::new(("address", window.id));
                     theme::pill_fields(ui);
+                    // A filled pill at rest; the page's colour with the
+                    // accent ring (the selection stroke) while it has the
+                    // keyboard, like Chromium's omnibox.
+                    let focused = ui.memory(|m| m.has_focus(address_id));
                     let field = ui.add_sized(
                         ui.available_size(),
                         egui::TextEdit::singleline(&mut state.address_text)
                             .id(address_id)
-                            .margin(theme::INPUT_MARGIN)
+                            .margin(ADDRESS_MARGIN)
+                            .background_color(palette.field_at(focused))
                             .hint_text("Enter address"),
                     );
                     if field.changed() {
@@ -4285,21 +4381,145 @@ fn control_button(ui: &mut Ui, palette: &Palette, glyph: ControlGlyph) -> egui::
     response
 }
 
-/// The flat square behind a toolbar icon button, filled on hover. The
-/// id is explicit: the toolbar's widget count changes with the Stop
-/// button, which would otherwise move the auto ids between frames.
+/// The disc behind a toolbar icon button, filled only under the
+/// pointer, as Chromium's toolbar buttons are. The id is explicit: the
+/// toolbar's widget count changes with the Stop button, which would
+/// otherwise move the auto ids between frames. Returns the fill the
+/// button sits on, for a glyph that bites into it.
 fn icon_button_rect(ui: &mut Ui, palette: &Palette, id: Id) -> (Rect, egui::Response, Color32) {
     let (_, rect) = ui.allocate_space(Vec2::splat(ACTION_SIZE));
     let response = ui.interact(rect, id, Sense::click());
-    let fill = if response.hovered() || response.is_pointer_button_down_on() {
-        blend(palette.toolbar, ui.visuals().text_color(), 0.12)
+    let hovered = response.hovered() || response.is_pointer_button_down_on();
+    let fill = if hovered {
+        palette.hover
     } else {
         palette.toolbar
     };
-    if ui.is_rect_visible(rect) {
-        ui.painter().rect_filled(rect, 4.0, fill);
+    if hovered && ui.is_rect_visible(rect) {
+        ui.painter()
+            .circle_filled(rect.center(), ACTION_SIZE / 2.0, fill);
     }
     (rect, response, fill)
+}
+
+/// The glyph of a navigation button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum NavGlyph {
+    Back,
+    Forward,
+    Reload,
+    Stop,
+}
+
+/// Back, Forward, Reload and Stop: a painted glyph in a disc that
+/// fills under the pointer; faded and inert when `enabled` is false.
+fn nav_button(
+    ui: &mut Ui,
+    palette: &Palette,
+    window: &Window,
+    glyph: NavGlyph,
+    enabled: bool,
+) -> egui::Response {
+    let id = Id::new(("nav", glyph, window.id));
+    let (rect, response, _) = if enabled {
+        icon_button_rect(ui, palette, id)
+    } else {
+        let (_, rect) = ui.allocate_space(Vec2::splat(ACTION_SIZE));
+        (rect, ui.interact(rect, id, Sense::hover()), palette.toolbar)
+    };
+    if ui.is_rect_visible(rect) {
+        let ink = if enabled {
+            ui.visuals().text_color()
+        } else {
+            faded(ui.visuals().text_color(), 72)
+        };
+        for shape in nav_glyph(rect.center(), glyph, ink) {
+            ui.painter().add(shape);
+        }
+    }
+    response
+}
+
+/// A navigation glyph as shapes about `c`: an arrow with a shaft, an
+/// arc open at the top right with an arrowhead on its leading end, or
+/// a cross, all in [`NAV_STROKE`].
+fn nav_glyph(c: Pos2, glyph: NavGlyph, ink: Color32) -> Vec<egui::Shape> {
+    let stroke = Stroke::new(NAV_STROKE, ink);
+    let line = |points: Vec<Pos2>| egui::Shape::line(points, stroke);
+    match glyph {
+        NavGlyph::Back | NavGlyph::Forward => {
+            // The shaft, and the head as one open polyline so the two
+            // strokes of the head meet without a notch at the tip.
+            let dir = if glyph == NavGlyph::Back { -1.0 } else { 1.0 };
+            let tip = Pos2::new(c.x + dir * 6.0, c.y);
+            vec![
+                egui::Shape::line_segment([Pos2::new(c.x - dir * 6.0, c.y), tip], stroke),
+                line(vec![
+                    Pos2::new(tip.x - dir * 5.0, c.y - 5.0),
+                    tip,
+                    Pos2::new(tip.x - dir * 5.0, c.y + 5.0),
+                ]),
+            ]
+        }
+        NavGlyph::Reload => {
+            use std::f32::consts::TAU;
+            // Three quarters of a turn, clockwise from the top right
+            // around through the left, ending at the right where the
+            // head points up along the arc's tangent.
+            let r = 6.0;
+            let start = -TAU * 0.12;
+            let end = start + TAU * 0.80;
+            let mut points = Vec::with_capacity(20);
+            for i in 0..=18 {
+                let a = start + (end - start) * i as f32 / 18.0;
+                points.push(Pos2::new(c.x + r * a.cos(), c.y + r * a.sin()));
+            }
+            let head = Pos2::new(c.x + r * start.cos(), c.y + r * start.sin());
+            vec![
+                line(points),
+                line(vec![
+                    Pos2::new(head.x - 4.5, head.y - 0.5),
+                    head,
+                    Pos2::new(head.x + 0.5, head.y + 4.5),
+                ]),
+            ]
+        }
+        NavGlyph::Stop => {
+            let h = 5.0;
+            vec![
+                egui::Shape::line_segment(
+                    [Pos2::new(c.x - h, c.y - h), Pos2::new(c.x + h, c.y + h)],
+                    stroke,
+                ),
+                egui::Shape::line_segment(
+                    [Pos2::new(c.x - h, c.y + h), Pos2::new(c.x + h, c.y - h)],
+                    stroke,
+                ),
+            ]
+        }
+    }
+}
+
+/// The strip's "+": a painted plus in a disc that fills under the
+/// pointer, in the strip's text colour.
+fn plus_button(ui: &mut Ui, palette: &Palette, window: &Window) -> egui::Response {
+    let id = Id::new(("new-tab", window.id));
+    let (_, rect) = ui.allocate_space(Vec2::new(MENU_WIDTH, TAB_HEIGHT));
+    let response = ui.interact(rect, id, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let c = rect.center();
+        if response.hovered() || response.is_pointer_button_down_on() {
+            ui.painter()
+                .circle_filled(c, ACTION_SIZE / 2.0, palette.tab_hover);
+        }
+        let stroke = Stroke::new(NAV_STROKE, palette.text_on_strip);
+        let h = 5.5;
+        ui.painter()
+            .line_segment([Pos2::new(c.x - h, c.y), Pos2::new(c.x + h, c.y)], stroke);
+        ui.painter()
+            .line_segment([Pos2::new(c.x, c.y - h), Pos2::new(c.x, c.y + h)], stroke);
+    }
+    response
 }
 
 /// The "Restart to update" pill at the toolbar's right end, shown while
@@ -5204,6 +5424,41 @@ mod tests {
             state.takes_every_key(),
             "the downloads popover takes every key"
         );
+    }
+
+    #[test]
+    fn the_surfaces_keep_their_ink_legible_on_every_swatch() {
+        // Text on the surface, the cards and both states of a field at
+        // AA (4.5:1); the accent ring against the surface and the field
+        // it rings at the non-text floor (3:1).
+        for dark_mode in [false, true] {
+            for color in ChromeColor::ALL {
+                let p = Palette::new(color, dark_mode);
+                for (name, fill) in [
+                    ("surface", p.surface),
+                    ("card", p.card),
+                    ("field", p.field),
+                    ("field_focus", p.field_focus),
+                    ("selection", p.selection),
+                ] {
+                    let ratio = wcag_contrast(p.ink, fill);
+                    assert!(
+                        ratio >= 4.5,
+                        "ink on {name} of {color:?} (dark: {dark_mode}): {ratio:.2}"
+                    );
+                }
+                for (name, fill) in [("surface", p.surface), ("field_focus", p.field_focus)] {
+                    let ratio = wcag_contrast(p.accent, fill);
+                    assert!(
+                        ratio >= 3.0,
+                        "accent on {name} of {color:?} (dark: {dark_mode}): {ratio:.2}"
+                    );
+                }
+                // The text of the toolbar's glyphs, on a hovered disc.
+                let ratio = wcag_contrast(p.ink, p.hover);
+                assert!(ratio >= 4.5, "ink on hover of {color:?}: {ratio:.2}");
+            }
+        }
     }
 
     /// WCAG 2.x contrast ratio of two opaque colours, by the standard's own

@@ -128,6 +128,19 @@ The engine contract, in `osmena-engine`:
 
 ## What the user gets
 
+- **A look of its own: the theme.** Inter for every label, pills for
+  the address bar and the Launch Panel's field, widgets and tabs
+  rounded at 8 px, cards at 14 and popups at 12 on a wide soft shadow.
+  Each profile's colour gives the chrome an accent, the deep shade of
+  the swatch's family (or its pastel in a dark system theme): the ring
+  around a focused field, the text selection, the picked suggestion,
+  the lit chips and the links. The toolbar's Back, Forward, Reload and
+  Stop are painted glyphs in round buttons that fill only under the
+  pointer, faded while they cannot act, like every other toolbar
+  button; the address bar is a filled pill a shade darker than the
+  toolbar, the page's colour with the accent ring while it has the
+  keyboard. Every popup sits on a surface tinted a little by the
+  swatch.
 - **A frameless window.** Browser windows open without the system title
   bar: the tab strip is the title bar (drag its empty space to move the
   window, double-click it to maximize, right-click it on Windows for the
@@ -153,9 +166,14 @@ The engine contract, in `osmena-engine`:
   without asking the system anything. A report stands fifteen
   minutes and a location an hour),
   **Ask Claude** and **Ask ChatGPT** (a question typed there opens the
-  service with it in a new tab), and **Most visited** (the five hosts
-  with the most visits, with their favicons; a close control on a row
-  hides that host). The gear at the bottom right opens the Launch
+  service with it in a new tab), and **Most visited** (a shelf across
+  the panel of the five hosts with the most visits, each a disc with
+  its favicon, or its initial, and the host under it; a close control
+  at the disc's corner, under the pointer, hides that host). The panel
+  fades and rises in, on a surface tinted by the profile's colour; a
+  row of tiles is as tall as its tallest tile, and the field, a
+  filled pill with a magnifier, turns the page's colour with the
+  profile's accent around it while it has the keyboard. The gear at the bottom right opens the Launch
   Settings in the panel: the search engine as presets or a custom
   template (the same setting the address bar uses), the two question
   templates, the weather location and whether temperatures read in

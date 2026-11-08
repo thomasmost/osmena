@@ -4,6 +4,38 @@ All notable changes to the osmena crates. The crates version together.
 
 ## Unreleased
 
+### Changed
+
+- The chrome's look, after Thorium with Zen's softness: the toolbar's
+  Back, Forward, Reload and Stop are painted glyphs (an arrow, an arc
+  with an arrowhead, a cross) in round 28-pt buttons that fill only
+  under the pointer and fade when they cannot act, where they were
+  text glyphs in egui's grey button frames; every other toolbar
+  button's hover is a disc too, and the strip's "+" is a painted plus
+  in one. The address bar is a filled pill a shade darker than the
+  toolbar with no ring at rest, and the page's colour with the
+  profile's accent ring while it has the keyboard; it is a notch
+  taller. Each profile's colour now gives an accent (the deep shade of
+  the swatch's family in a light system theme, the pastel in a dark
+  one; `Palette::accent`, installed on the egui context by
+  `theme::tint` whenever the colour changes): the focus ring of every
+  field, the text selection, the picked suggestion, the lit chips in
+  the Launch Settings, the links. Popups (the suggestions, the
+  popovers, the prompts, the status) sit on a surface tinted by the
+  swatch with a faint hairline and a wide soft shadow, radius 12.
+- The Launch Panel: a surface of its own (the tinted surface, radius
+  18, a deep soft shadow, no hard line) that fades and rises in over
+  140 ms; the field a filled pill with a magnifier, lit like the
+  address bar; the tiles cards (the surface a shade towards the
+  swatch, radius 14, no hairline; lifted on a shadow while dragged)
+  on rows as tall as their tallest tile, so a question tile alone on
+  a row is short; and **Most visited** is a shelf across the panel's
+  width (`WidgetKind::TopSites` spans three columns) of shortcut discs
+  holding the site's favicon, or its initial in the accent, with the
+  host under it and the close control at the disc's corner, so the
+  mosaic without the Drive tile has no hole. Ask fields are filled
+  pills too.
+
 ### Added
 
 - Blocked sites. A profile keeps a list of websites the browser refuses

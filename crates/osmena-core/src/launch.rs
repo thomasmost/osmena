@@ -51,10 +51,13 @@ impl WidgetKind {
         }
     }
 
-    /// How many columns of the mosaic the tile spans.
+    /// How many columns of the mosaic the tile spans: the Drive list
+    /// two, the row of most visited sites the whole width (a shelf of
+    /// shortcut discs), the rest one.
     pub fn columns(self) -> usize {
         match self {
             WidgetKind::DriveRecent => 2,
+            WidgetKind::TopSites => 3,
             _ => 1,
         }
     }
