@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use url::Url;
 
+use crate::blocked::{BlockedPage, BlockedSites, line_seed};
 use crate::bookmarks::{Bookmark, Bookmarks};
 use crate::bookmarks_html;
 use crate::default_browser::DefaultBrowser;
@@ -16,7 +17,8 @@ use crate::launch::{
     WidgetKind,
 };
 use crate::model::{
-    Browser, FindState, Folder, FolderId, LoadState, Tab, TabId, Window, WindowId, site_key,
+    Browser, FindState, Folder, FolderId, LoadState, Tab, TabId, Window, WindowId, about_blank,
+    site_key,
 };
 use crate::profile::{Avatar, DEFAULT_PROFILE_NAME, ProfileEntry};
 use crate::session::{Session, WindowGeometry};
@@ -391,6 +393,19 @@ pub enum Command {
     DisconnectGoogle,
     /// Fetch the tiles' data again now (a tile's Retry).
     RefreshLaunch,
+    /// Ask the user to confirm blocking the sites of these tabs on this
+    /// profile (the tab menu's "Block on this profile"); sites already
+    /// blocked are left out of the question.
+    PromptBlockSites {
+        window: WindowId,
+        tabs: Vec<TabId>,
+    },
+    /// Block these sites (registrable domains) on this profile: every
+    /// open tab on one shows the block page from now on.
+    BlockSites(Vec<String>),
+    /// Unblock `site`; the tabs blocked on it return to their pages.
+    /// Only the settings window issues it.
+    UnblockSite(String),
     Quit,
 }
 
@@ -545,6 +560,10 @@ pub enum Prompt {
     QuitWithDownloads {
         count: usize,
     },
+    /// Confirm blocking these sites on this profile.
+    BlockSites {
+        sites: Vec<String>,
+    },
 }
 
 /// What the application must do after [`dispatch`] (or [`crate::apply`])
@@ -682,6 +701,14 @@ pub enum EngineAction {
     },
     /// The sites' zoom levels changed: persist them.
     SaveZoom,
+    /// The profile's blocked sites, for the engine's before-navigate hook:
+    /// at start and after every change.
+    ConfigureBlockedSites(BlockedSites),
+    /// Replace `tab`'s current history entry with `about:blank`: the page
+    /// it shows is blocked now, and Back should skip it.
+    ReplaceWithBlank(TabId),
+    /// The blocked sites changed: persist them.
+    SaveBlockedSites,
     /// Show or hide `window`'s downloads popover.
     ToggleDownloads(WindowId),
     /// To the engine, by its own id for the download.
@@ -1335,21 +1362,45 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             }
             None => Vec::new(),
         },
-        Command::Navigate { tab, url } => match browser.tab_mut(*tab) {
-            Some(t) => {
-                t.url = url.clone();
-                t.load = LoadState::Loading;
-                t.crashed = None;
-                vec![EngineAction::Navigate {
-                    tab: *tab,
-                    url: url.clone(),
-                }]
+        Command::Navigate { tab, url } => {
+            let page = block_for(browser, url);
+            match browser.tab_mut(*tab) {
+                Some(t) => {
+                    t.url = url.clone();
+                    t.load = LoadState::Loading;
+                    t.crashed = None;
+                    // A blocked destination: the engine loads the blank
+                    // page (a push, so Back returns to the page before),
+                    // and the chrome paints the block page over it.
+                    let load = match page {
+                        Some(page) => {
+                            t.block(page);
+                            about_blank()
+                        }
+                        None => {
+                            t.blocked = None;
+                            url.clone()
+                        }
+                    };
+                    vec![EngineAction::Navigate {
+                        tab: *tab,
+                        url: load,
+                    }]
+                }
+                None => Vec::new(),
             }
-            None => Vec::new(),
-        },
+        }
         Command::Back(tab) => history_step(browser, *tab, EngineAction::Back(*tab)),
         Command::Forward(tab) => history_step(browser, *tab, EngineAction::Forward(*tab)),
         Command::Reload(tab) => match browser.tab_mut(*tab) {
+            // A block page reloads into another of its lines; the engine
+            // is asked nothing.
+            Some(t) if t.blocked.is_some() => {
+                if let Some(page) = t.blocked.as_mut() {
+                    page.reroll(line_seed());
+                }
+                Vec::new()
+            }
             Some(t) => {
                 t.load = LoadState::Loading;
                 t.crashed = None;
@@ -1582,6 +1633,25 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
         Command::ContextMenuClosed(tab) => {
             pass_through(browser, *tab, EngineAction::ContextMenuClosed(*tab))
         }
+        Command::PromptBlockSites { window, tabs } => {
+            if browser.window(*window).is_none() {
+                return Vec::new();
+            }
+            let urls = tabs
+                .iter()
+                .filter_map(|id| browser.tab(*id))
+                .map(|t| &t.url);
+            let sites = browser.blocked.sites_to_block(urls);
+            if sites.is_empty() {
+                return Vec::new();
+            }
+            vec![EngineAction::ShowPrompt {
+                window: *window,
+                prompt: Prompt::BlockSites { sites },
+            }]
+        }
+        Command::BlockSites(sites) => block_sites(browser, sites),
+        Command::UnblockSite(site) => unblock_site(browser, site),
         Command::Quit => quit_guard(browser, None).unwrap_or_else(|| vec![EngineAction::Quit]),
     }
 }
@@ -1616,6 +1686,13 @@ pub fn restore_session(browser: &mut Browser, session: &Session) -> Vec<EngineAc
             .map(|f| (f.name.clone(), browser.allocate_folder_id()))
             .collect();
         let ids: Vec<TabId> = sw.tabs.iter().map(|_| browser.allocate_tab_id()).collect();
+        // Deferred tabs on a blocked site are marked now so the strip
+        // can say so; they are re-checked when shown.
+        let marks: Vec<Option<BlockedPage>> = sw
+            .tabs
+            .iter()
+            .map(|st| block_for(browser, &st.url))
+            .collect();
         let w = browser.window_mut(window).expect("just opened");
         for (f, (_, id)) in sw.folders.iter().zip(&folder_ids) {
             w.folders.push(Folder {
@@ -1632,9 +1709,15 @@ pub fn restore_session(browser: &mut Browser, session: &Session) -> Vec<EngineAc
             } else {
                 let mut t = Tab::new(ids[i], st.url.clone());
                 t.deferred = true;
+                if let Some(page) = marks[i].clone() {
+                    t.block(page);
+                }
                 t
             };
-            t.title = st.title.clone();
+            // A blocked tab shows its address, not the title it had.
+            if t.blocked.is_none() {
+                t.title = st.title.clone();
+            }
             t.folder = st.folder.as_ref().and_then(|name| {
                 folder_ids
                     .iter()
@@ -1647,7 +1730,12 @@ pub fn restore_session(browser: &mut Browser, session: &Session) -> Vec<EngineAc
         w.active = created.id;
         w.select_only(created.id);
         w.prune_folders();
-        warm.extend(w.tabs.iter().filter(|t| t.deferred).map(|t| t.id));
+        warm.extend(
+            w.tabs
+                .iter()
+                .filter(|t| t.deferred && t.blocked.is_none())
+                .map(|t| t.id),
+        );
     }
     for url in &session.closed_tabs {
         browser.remember_closed(url.clone());
@@ -1667,6 +1755,14 @@ fn warm_tab(browser: &mut Browser, tab: TabId) -> Vec<EngineAction> {
     let Some(window) = browser.window_of_tab(tab) else {
         return Vec::new();
     };
+    // A tab on a blocked site is not warmed: nothing is requested from
+    // the site, and the shell moves on to the next in line.
+    if browser
+        .tab(tab)
+        .is_some_and(|t| browser.blocked.blocks(&t.url).is_some())
+    {
+        return Vec::new();
+    }
     match browser.tab_mut(tab) {
         Some(t) if t.deferred && !t.warming => {
             t.warming = true;
@@ -1706,20 +1802,27 @@ pub(crate) fn end_warm(browser: &mut Browser, tab: TabId) -> bool {
 
 /// Show `tab` in `w`: a deferred tab is created in the engine now (it
 /// comes up visible), unless a warm has it there already, in which
-/// case it is shown like any other.
-fn show_tab(w: &mut Window, tab: TabId) -> EngineAction {
+/// case it is shown like any other. `mark` is the block page a deferred
+/// tab wakes on when its site is blocked (`wake_mark`): it is created at
+/// `about:blank` behind it.
+fn show_tab(w: &mut Window, tab: TabId, mark: Option<BlockedPage>) -> EngineAction {
     let window = w.id;
     match w.tab_mut(tab) {
         Some(t) if t.deferred => {
             t.deferred = false;
+            match mark {
+                Some(page) => t.block(page),
+                None => t.blocked = None,
+            }
             if std::mem::take(&mut t.warming) {
                 EngineAction::Show(tab)
             } else {
-                EngineAction::CreateTab {
-                    window,
-                    tab,
-                    url: t.url.clone(),
-                }
+                let url = if t.blocked.is_some() {
+                    about_blank()
+                } else {
+                    t.url.clone()
+                };
+                EngineAction::CreateTab { window, tab, url }
             }
         }
         _ => EngineAction::Show(tab),
@@ -1936,13 +2039,51 @@ fn bookmark_tabs(browser: &mut Browser, tabs: &[TabId], group: &str) -> Vec<Engi
 /// Add a window to the model whose first tab shows `url`. Used by
 /// `Command::NewWindow` and by `main` for the initial window, which opens
 /// the homepage or a URL given on the command line.
+/// The block page a navigation to `url` lands on, if its site is blocked
+/// on this profile.
+fn block_for(browser: &Browser, url: &Url) -> Option<BlockedPage> {
+    browser
+        .blocked
+        .blocks(url)
+        .map(|site| BlockedPage::new(site, line_seed()))
+}
+
+/// A new tab at `url`, and what the engine loads for it: the page, or
+/// `about:blank` behind the block page when the site is blocked. The
+/// tab keeps `url` either way, so the address bar says where the user
+/// meant to go.
+fn tab_at(browser: &Browser, id: TabId, url: Url) -> (Tab, Url) {
+    let mut tab = Tab::new(id, url);
+    let load = match block_for(browser, &tab.url) {
+        Some(page) => {
+            tab.block(page);
+            about_blank()
+        }
+        None => tab.url.clone(),
+    };
+    (tab, load)
+}
+
+/// The block page a deferred tab shows when it wakes, if its site is
+/// blocked now (the session file records no block, and a site may have
+/// been blocked or unblocked while the tab slept).
+fn wake_mark(browser: &Browser, tab: TabId) -> Option<BlockedPage> {
+    browser
+        .tab(tab)
+        .filter(|t| t.deferred)
+        .and_then(|t| block_for(browser, &t.url))
+}
+
 pub fn open_window(browser: &mut Browser, url: Url) -> Vec<EngineAction> {
     let window = browser.allocate_window_id();
     let tab = browser.allocate_tab_id();
-    browser
-        .windows
-        .push(Window::with_tab(window, Tab::new(tab, url.clone())));
-    vec![EngineAction::OpenWindow { window, tab, url }]
+    let (t, load) = tab_at(browser, tab, url);
+    browser.windows.push(Window::with_tab(window, t));
+    vec![EngineAction::OpenWindow {
+        window,
+        tab,
+        url: load,
+    }]
 }
 
 /// Remember the URLs of `tabs` (those that exist, in the given order) for
@@ -1976,6 +2117,68 @@ fn history_step(browser: &mut Browser, tab: TabId, action: EngineAction) -> Vec<
         }
         None => Vec::new(),
     }
+}
+
+/// Block `sites` on this profile. Every tab on one of them, in every
+/// window, shows the block page from now on: a live tab has its history
+/// entry replaced with `about:blank` (so Back returns to the page before
+/// it), a deferred tab is only marked and wakes on the block page, and a
+/// tab warming out of sight has its engine tab closed. Then the file is
+/// saved and the engine told. Nothing when no site is new.
+fn block_sites(browser: &mut Browser, sites: &[String]) -> Vec<EngineAction> {
+    let mut changed = false;
+    for site in sites {
+        changed |= browser.blocked.add(site);
+    }
+    if !changed {
+        return Vec::new();
+    }
+    let mut actions = Vec::new();
+    for t in browser.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()) {
+        if t.blocked.is_some() {
+            continue;
+        }
+        let Some(site) = browser.blocked.blocks(&t.url) else {
+            continue;
+        };
+        t.block(BlockedPage::new(site, line_seed()));
+        if t.deferred {
+            if std::mem::take(&mut t.warming) {
+                t.load = LoadState::Idle;
+                actions.push(EngineAction::CloseTab(t.id));
+            }
+        } else {
+            actions.push(EngineAction::ReplaceWithBlank(t.id));
+        }
+    }
+    actions.push(EngineAction::SaveBlockedSites);
+    actions.push(EngineAction::ConfigureBlockedSites(browser.blocked.clone()));
+    actions
+}
+
+/// Unblock `site`: every tab blocked on it goes back to its own page
+/// (a deferred one simply loses the mark), the file is saved and the
+/// engine told. Nothing for a site that was not blocked.
+fn unblock_site(browser: &mut Browser, site: &str) -> Vec<EngineAction> {
+    if !browser.blocked.remove(site) {
+        return Vec::new();
+    }
+    let mut actions = Vec::new();
+    for t in browser.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()) {
+        if t.blocked.as_ref().is_some_and(|p| p.site == site) {
+            t.blocked = None;
+            if !t.deferred {
+                t.load = LoadState::Loading;
+                actions.push(EngineAction::Navigate {
+                    tab: t.id,
+                    url: t.url.clone(),
+                });
+            }
+        }
+    }
+    actions.push(EngineAction::SaveBlockedSites);
+    actions.push(EngineAction::ConfigureBlockedSites(browser.blocked.clone()));
+    actions
 }
 
 /// Zoom `tab`'s page a step in or out.
@@ -2093,16 +2296,21 @@ fn new_tab(browser: &mut Browser, window: WindowId, url: Url) -> Vec<EngineActio
         return Vec::new();
     }
     let tab = browser.allocate_tab_id();
+    let (t, load) = tab_at(browser, tab, url);
     let w = browser
         .window_mut(window)
         .expect("window existence checked above");
     let previous = w.active;
-    w.tabs.push(Tab::new(tab, url.clone()));
+    w.tabs.push(t);
     w.active = tab;
     w.select_only(tab);
     let mut actions = vec![
         EngineAction::Hide(previous),
-        EngineAction::CreateTab { window, tab, url },
+        EngineAction::CreateTab {
+            window,
+            tab,
+            url: load,
+        },
     ];
     actions.extend(find_follows_switch(w, Some(previous)));
     actions
@@ -2115,14 +2323,15 @@ fn new_background_tab(browser: &mut Browser, opener: TabId, url: &Url) -> Vec<En
         return Vec::new();
     };
     let tab = browser.allocate_tab_id();
+    let (t, load) = tab_at(browser, tab, url.clone());
     let w = browser
         .window_mut(window)
         .expect("window_of_tab returned an existing window");
-    w.insert_tab_after(opener, Tab::new(tab, url.clone()));
+    w.insert_tab_after(opener, t);
     vec![EngineAction::CreateHiddenTab {
         window,
         tab,
-        url: url.clone(),
+        url: load,
     }]
 }
 
@@ -2170,10 +2379,11 @@ pub(crate) fn close_tab(browser: &mut Browser, tab: TabId) -> Vec<EngineAction> 
     };
     match new_active {
         Some(next) => {
+            let mark = wake_mark(browser, next);
             let w = browser
                 .window_mut(window_id)
                 .expect("window_of_tab returned an existing window");
-            actions.push(show_tab(w, next));
+            actions.push(show_tab(w, next, mark));
         }
         None => {
             browser.windows.retain(|w| w.id != window_id);
@@ -2190,6 +2400,7 @@ fn activate_tab(browser: &mut Browser, tab: TabId) -> Vec<EngineAction> {
     let Some(window_id) = browser.window_of_tab(tab) else {
         return Vec::new();
     };
+    let mark = wake_mark(browser, tab);
     let w = browser
         .window_mut(window_id)
         .expect("window_of_tab returned an existing window");
@@ -2200,7 +2411,7 @@ fn activate_tab(browser: &mut Browser, tab: TabId) -> Vec<EngineAction> {
     let previous = w.active;
     w.active = tab;
     w.select_only(tab);
-    let mut actions = vec![EngineAction::Hide(previous), show_tab(w, tab)];
+    let mut actions = vec![EngineAction::Hide(previous), show_tab(w, tab, mark)];
     actions.extend(find_follows_switch(w, Some(previous)));
     actions
 }
@@ -5424,5 +5635,495 @@ mod tests {
         );
         assert_eq!(b.launch.drive, DriveState::Disconnected);
         assert!(dispatch(&mut b, &Command::DisconnectGoogle).is_empty());
+    }
+
+    /// A session of three tabs on a, b and c, the `active` one first shown.
+    fn three_sites_session(active: usize) -> Session {
+        let mut s = saved_session();
+        s.windows.truncate(1);
+        let w = &mut s.windows[0];
+        w.active = active;
+        w.folders.clear();
+        w.tabs.truncate(3);
+        for t in &mut w.tabs {
+            t.folder = None;
+        }
+        w.tabs[0].title = "A".to_string();
+        w.tabs[1].title = "B".to_string();
+        w.tabs[2].title = "C".to_string();
+        s
+    }
+
+    #[test]
+    fn a_typed_address_on_a_blocked_site_shows_the_block_page_over_blank() {
+        // AC3.1
+        let (mut b, _window, tab) = one_window();
+        b.tab_mut(tab).unwrap().title = "Before".to_string();
+        b.blocked.add("b.example");
+        let actions = dispatch(
+            &mut b,
+            &Command::Navigate {
+                tab,
+                url: url("https://www.b.example/x"),
+            },
+        );
+        assert_eq!(
+            actions,
+            vec![EngineAction::Navigate {
+                tab,
+                url: url("about:blank"),
+            }]
+        );
+        let t = b.tab(tab).unwrap();
+        assert_eq!(t.url.as_str(), "https://www.b.example/x");
+        assert_eq!(t.blocked.as_ref().unwrap().site, "b.example");
+        assert_eq!(t.load, LoadState::Loading);
+        assert!(t.title.is_empty());
+        assert!(t.favicon.is_none());
+
+        // Another site is loaded as it is, and the block page clears.
+        let actions = dispatch(
+            &mut b,
+            &Command::Navigate {
+                tab,
+                url: url("https://c.example/"),
+            },
+        );
+        assert_eq!(
+            actions,
+            vec![EngineAction::Navigate {
+                tab,
+                url: url("https://c.example/"),
+            }]
+        );
+        assert!(b.tab(tab).unwrap().blocked.is_none());
+    }
+
+    #[test]
+    fn a_new_tab_a_search_and_a_question_on_a_blocked_site_are_blocked() {
+        // AC3.2
+        let (mut b, window, tab) = one_window();
+        b.blocked.add("b.example");
+
+        let actions = dispatch(
+            &mut b,
+            &Command::NewTab {
+                window,
+                url: Some(url("https://b.example/")),
+            },
+        );
+        assert!(matches!(
+            actions.as_slice(),
+            [EngineAction::Hide(_), EngineAction::CreateTab { url, .. }]
+                if *url == url_of("about:blank")
+        ));
+        let w = b.window(window).unwrap();
+        let new_tab = w.active;
+        let nt = b.tab(new_tab).unwrap();
+        assert_eq!(nt.url.as_str(), "https://b.example/");
+        assert_eq!(nt.blocked.as_ref().unwrap().site, "b.example");
+
+        b.settings.search =
+            crate::settings::UrlTemplate::new("Test", "https://b.example/?q={query}");
+        let actions = dispatch(
+            &mut b,
+            &Command::Search {
+                tab,
+                query: "q".to_string(),
+            },
+        );
+        assert_eq!(
+            actions,
+            vec![EngineAction::Navigate {
+                tab,
+                url: url("about:blank"),
+            }]
+        );
+        assert_eq!(b.tab(tab).unwrap().url.as_str(), "https://b.example/?q=q");
+        assert!(b.tab(tab).unwrap().blocked.is_some());
+
+        let actions = dispatch(
+            &mut b,
+            &Command::SearchInNewTab {
+                window,
+                query: "q".to_string(),
+            },
+        );
+        assert!(actions.iter().any(
+            |a| matches!(a, EngineAction::CreateTab { url, .. } if *url == url_of("about:blank"))
+        ));
+        let active = b.window(window).unwrap().active;
+        assert!(b.tab(active).unwrap().blocked.is_some());
+
+        b.settings.launch.ask_claude =
+            crate::settings::UrlTemplate::new("Ask", "https://b.example/ask?q={query}");
+        let actions = dispatch(
+            &mut b,
+            &Command::AskInNewTab {
+                window,
+                kind: WidgetKind::AskClaude,
+                query: "q".to_string(),
+            },
+        );
+        assert!(actions.iter().any(
+            |a| matches!(a, EngineAction::CreateTab { url, .. } if *url == url_of("about:blank"))
+        ));
+        let active = b.window(window).unwrap().active;
+        assert!(b.tab(active).unwrap().blocked.is_some());
+
+        let actions = dispatch(
+            &mut b,
+            &Command::NewBackgroundTab {
+                opener: tab,
+                url: url("https://b.example/bg"),
+            },
+        );
+        assert!(matches!(
+            actions.as_slice(),
+            [EngineAction::CreateHiddenTab { url, .. }] if *url == url_of("about:blank")
+        ));
+        let bg = b
+            .window(window)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.url.as_str() == "https://b.example/bg")
+            .unwrap();
+        assert!(bg.blocked.is_some());
+
+        let actions = dispatch(
+            &mut b,
+            &Command::OpenInNewWindow(url("https://b.example/w")),
+        );
+        assert!(actions.iter().any(
+            |a| matches!(a, EngineAction::OpenWindow { url, .. } if *url == url_of("about:blank"))
+        ));
+        let new_window = b.windows.last().unwrap();
+        assert!(new_window.tabs[0].blocked.is_some());
+    }
+
+    #[test]
+    fn a_restored_tab_on_a_blocked_site_wakes_on_the_block_page_and_is_not_warmed() {
+        // AC3.3, AC2.6
+        let mut b = browser();
+        b.blocked.add("b.example");
+        let actions = restore_session(&mut b, &three_sites_session(0));
+        let w = &b.windows[0];
+        let (a, bb, c) = (w.tabs[0].id, w.tabs[1].id, w.tabs[2].id);
+        // Only the c tab is warmed: a is active, b is blocked.
+        assert!(actions.contains(&EngineAction::WarmTabs(vec![c])));
+        let t = b.tab(bb).unwrap();
+        assert!(t.deferred);
+        assert!(t.blocked.is_some());
+        assert!(t.title.is_empty());
+        assert_eq!(b.tab(a).unwrap().title, "A");
+        assert_eq!(b.tab(c).unwrap().title, "C");
+
+        // Warming the blocked tab does nothing.
+        assert!(dispatch(&mut b, &Command::WarmTab(bb)).is_empty());
+
+        // Showing it creates the tab on the block page, over blank.
+        let actions = dispatch(&mut b, &Command::ActivateTab(bb));
+        assert!(matches!(
+            actions.as_slice(),
+            [EngineAction::Hide(_), EngineAction::CreateTab { url, .. }]
+                if *url == url_of("about:blank")
+        ));
+        let t = b.tab(bb).unwrap();
+        assert!(!t.deferred);
+        assert!(t.blocked.is_some());
+        assert_eq!(t.url.as_str(), "https://b.example/");
+
+        // A blocked-then-unblocked site wakes on its own page.
+        let mut b = browser();
+        b.blocked.add("b.example");
+        restore_session(&mut b, &three_sites_session(0));
+        let bb = b.windows[0].tabs[1].id;
+        b.blocked.remove("b.example");
+        let actions = dispatch(&mut b, &Command::ActivateTab(bb));
+        assert!(matches!(
+            actions.as_slice(),
+            [EngineAction::Hide(_), EngineAction::CreateTab { url, .. }]
+                if *url == url_of("https://b.example/")
+        ));
+        assert!(b.tab(bb).unwrap().blocked.is_none());
+    }
+
+    #[test]
+    fn a_restored_active_tab_on_a_blocked_site_opens_on_the_block_page() {
+        // AC3.3
+        let mut b = browser();
+        b.blocked.add("b.example");
+        restore_session(&mut b, &three_sites_session(1));
+        let w = &b.windows[0];
+        let active = w.tabs[w.index_of(w.active).unwrap()].clone();
+        assert!(active.blocked.is_some());
+        assert!(active.title.is_empty());
+    }
+
+    #[test]
+    fn reload_on_a_block_page_rerolls_the_line_and_asks_the_engine_nothing() {
+        // AC3.7
+        let (mut b, _window, tab) = one_window();
+        b.blocked.add("b.example");
+        dispatch(
+            &mut b,
+            &Command::Navigate {
+                tab,
+                url: url("https://b.example/"),
+            },
+        );
+        let first = b.tab(tab).unwrap().blocked.as_ref().unwrap().line;
+        assert!(dispatch(&mut b, &Command::Reload(tab)).is_empty());
+        let second = b.tab(tab).unwrap().blocked.as_ref().unwrap().line;
+        assert_ne!(first, second);
+        assert!(dispatch(&mut b, &Command::Reload(tab)).is_empty());
+        let third = b.tab(tab).unwrap().blocked.as_ref().unwrap().line;
+        assert_ne!(second, third);
+
+        // An unblocked tab still reloads in the engine.
+        let (mut plain, _w, ptab) = one_window();
+        assert_eq!(
+            dispatch(&mut plain, &Command::Reload(ptab)),
+            vec![EngineAction::Reload(ptab)]
+        );
+    }
+
+    fn url_of(s: &str) -> Url {
+        url(s)
+    }
+
+    /// A browser with one window per list of URLs (the first opened by
+    /// `open_window`, the rest as new tabs of it). Returns the tabs in
+    /// strip order.
+    fn window_with(urls: &[&str]) -> (Browser, WindowId, Vec<TabId>) {
+        let mut b = browser();
+        let actions = open_window(&mut b, url(urls[0]));
+        let EngineAction::OpenWindow { window, tab, .. } = actions[0].clone() else {
+            panic!("open_window returns OpenWindow");
+        };
+        let mut tabs = vec![tab];
+        for u in &urls[1..] {
+            dispatch(
+                &mut b,
+                &Command::NewTab {
+                    window,
+                    url: Some(url(u)),
+                },
+            );
+            tabs.push(b.window(window).unwrap().active);
+        }
+        (b, window, tabs)
+    }
+
+    #[test]
+    fn the_block_prompt_names_the_distinct_unblocked_sites_or_nothing() {
+        // AC2.2
+        let (mut b, window, tabs) = window_with(&[
+            "https://www.a.example/",
+            "https://m.a.example/",
+            "https://b.example/",
+        ]);
+        let actions = dispatch(
+            &mut b,
+            &Command::PromptBlockSites {
+                window,
+                tabs: tabs.clone(),
+            },
+        );
+        assert!(matches!(
+            actions.as_slice(),
+            [EngineAction::ShowPrompt { window: w, prompt: Prompt::BlockSites { sites } }]
+                if *w == window && sites == &vec!["a.example".to_string(), "b.example".to_string()]
+        ));
+
+        b.blocked.add("a.example");
+        let actions = dispatch(
+            &mut b,
+            &Command::PromptBlockSites {
+                window,
+                tabs: tabs.clone(),
+            },
+        );
+        assert!(matches!(
+            actions.as_slice(),
+            [EngineAction::ShowPrompt { prompt: Prompt::BlockSites { sites }, .. }]
+                if sites == &vec!["b.example".to_string()]
+        ));
+
+        b.blocked.add("b.example");
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::PromptBlockSites {
+                    window,
+                    tabs: tabs.clone(),
+                },
+            )
+            .is_empty()
+        );
+
+        // Only an about:blank tab: nothing to ask.
+        let (mut blank, bw, btabs) = window_with(&["about:blank"]);
+        assert!(
+            dispatch(
+                &mut blank,
+                &Command::PromptBlockSites {
+                    window: bw,
+                    tabs: btabs,
+                },
+            )
+            .is_empty()
+        );
+
+        // An unknown window: nothing.
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::PromptBlockSites {
+                    window: WindowId(999),
+                    tabs,
+                },
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn blocking_replaces_every_live_tab_on_the_site_in_every_window() {
+        // AC2.4, AC2.5, AC4.5
+        let mut b = browser();
+        let first = open_window(&mut b, url("https://a.example/"));
+        let EngineAction::OpenWindow {
+            window: _w1,
+            tab: t1,
+            ..
+        } = first[0].clone()
+        else {
+            panic!("open_window returns OpenWindow");
+        };
+        let second = open_window(&mut b, url("https://m.a.example/x"));
+        let EngineAction::OpenWindow {
+            window: w2,
+            tab: t2,
+            ..
+        } = second[0].clone()
+        else {
+            panic!("open_window returns OpenWindow");
+        };
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window: w2,
+                url: Some(url("https://b.example/")),
+            },
+        );
+        let t3 = b.window(w2).unwrap().active;
+
+        let actions = dispatch(&mut b, &Command::BlockSites(vec!["a.example".to_string()]));
+        assert_eq!(actions.len(), 4, "{actions:?}");
+        assert_eq!(actions[0], EngineAction::ReplaceWithBlank(t1));
+        assert_eq!(actions[1], EngineAction::ReplaceWithBlank(t2));
+        assert_eq!(actions[2], EngineAction::SaveBlockedSites);
+        let EngineAction::ConfigureBlockedSites(sites) = &actions[3] else {
+            panic!("the engine is told the list last");
+        };
+        assert_eq!(sites.sites.len(), 1);
+        assert!(sites.sites.contains("a.example"));
+
+        for tab in [t1, t2] {
+            let t = b.tab(tab).unwrap();
+            assert_eq!(t.blocked.as_ref().unwrap().site, "a.example");
+        }
+        assert_eq!(b.tab(t2).unwrap().url.as_str(), "https://m.a.example/x");
+        assert!(b.tab(t3).unwrap().blocked.is_none());
+        assert!(b.blocked.sites.contains("a.example"));
+    }
+
+    #[test]
+    fn blocking_a_deferred_tab_only_marks_it() {
+        // AC2.6
+        let mut b = browser();
+        restore_session(&mut b, &three_sites_session(0));
+        let bb = b.windows[0].tabs[1].id;
+        let actions = dispatch(&mut b, &Command::BlockSites(vec!["b.example".to_string()]));
+        assert_eq!(actions.len(), 2, "{actions:?}");
+        assert!(matches!(actions[0], EngineAction::SaveBlockedSites));
+        assert!(matches!(actions[1], EngineAction::ConfigureBlockedSites(_)));
+        let t = b.tab(bb).unwrap();
+        assert!(t.deferred);
+        assert!(t.blocked.is_some());
+
+        // A warming tab is closed and is no longer warming.
+        let mut b = browser();
+        restore_session(&mut b, &three_sites_session(0));
+        let bb = b.windows[0].tabs[1].id;
+        assert!(matches!(
+            dispatch(&mut b, &Command::WarmTab(bb)).as_slice(),
+            [EngineAction::CreateHiddenTab { .. }]
+        ));
+        let actions = dispatch(&mut b, &Command::BlockSites(vec!["b.example".to_string()]));
+        assert!(actions.contains(&EngineAction::CloseTab(bb)));
+        let t = b.tab(bb).unwrap();
+        assert!(!t.warming);
+        assert!(t.deferred);
+        assert!(t.blocked.is_some());
+    }
+
+    #[test]
+    fn blocking_a_site_already_blocked_changes_nothing() {
+        // AC4.6
+        let (mut b, _window, _tab) = one_window();
+        b.blocked.add("a.example");
+        assert!(dispatch(&mut b, &Command::BlockSites(vec!["a.example".to_string()])).is_empty());
+    }
+
+    #[test]
+    fn unblocking_sends_every_tab_blocked_on_the_site_back_to_its_page() {
+        // AC4.4
+        let (mut b, window, t1) = one_window();
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window,
+                url: Some(url("https://a.example/x")),
+            },
+        );
+        let t2 = b.window(window).unwrap().active;
+        let deferred_id = b.allocate_tab_id();
+        let mut deferred = Tab::new(deferred_id, url("https://a.example/d"));
+        deferred.deferred = true;
+        b.window_mut(window).unwrap().tabs.push(deferred);
+
+        dispatch(&mut b, &Command::BlockSites(vec!["a.example".to_string()]));
+        assert!(b.tab(deferred_id).unwrap().blocked.is_some());
+
+        let actions = dispatch(&mut b, &Command::UnblockSite("a.example".to_string()));
+        assert_eq!(actions.len(), 4, "{actions:?}");
+        assert_eq!(
+            actions[0],
+            EngineAction::Navigate {
+                tab: t1,
+                url: url("https://a.example/"),
+            }
+        );
+        assert_eq!(
+            actions[1],
+            EngineAction::Navigate {
+                tab: t2,
+                url: url("https://a.example/x"),
+            }
+        );
+        assert_eq!(actions[2], EngineAction::SaveBlockedSites);
+        let EngineAction::ConfigureBlockedSites(sites) = &actions[3] else {
+            panic!("the engine is told the list last");
+        };
+        assert!(sites.sites.is_empty());
+        for tab in [t1, t2, deferred_id] {
+            assert!(b.tab(tab).unwrap().blocked.is_none());
+        }
+        assert!(b.tab(deferred_id).unwrap().deferred);
+
+        assert!(dispatch(&mut b, &Command::UnblockSite("a.example".to_string())).is_empty());
     }
 }

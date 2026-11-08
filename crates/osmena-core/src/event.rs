@@ -187,6 +187,13 @@ pub enum EngineEvent {
         tab: TabId,
         reason: String,
     },
+    /// The engine's before-navigate hook cancelled `tab`'s navigation to
+    /// `url`, a blocked site, before any request went out. The tab is
+    /// still on its previous page.
+    NavigationBlocked {
+        tab: TabId,
+        url: Url,
+    },
     /// The engine painted a new frame for this tab; the window showing it
     /// should redraw.
     FrameReady(TabId),
@@ -375,6 +382,7 @@ pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
             });
             Vec::new()
         }
+        EngineEvent::NavigationBlocked { .. } => Vec::new(),
         EngineEvent::FrameReady(_) => Vec::new(),
         EngineEvent::CursorChanged { .. } => Vec::new(),
         EngineEvent::EngineError(message) => {
