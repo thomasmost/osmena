@@ -28,6 +28,7 @@ mod glutin;
 #[cfg(feature = "glutin")]
 pub use crate::glutin::GlutinSurface;
 
+pub use osmena_core::BlockedSites;
 /// Wakes the application's event loop from any thread. An engine calls
 /// this when it has work for the main thread; the shell then calls
 /// [`Engine::spin`].
@@ -193,6 +194,14 @@ pub trait TabHost {
     /// Download `url` from `tab`'s page (a retry of a failed download).
     /// Default: nothing.
     fn start_download(&self, _tab: TabId, _url: Url) {}
+    /// Replace the tab's current history entry with `about:blank`, so
+    /// Back from there goes to the page before it: the page it shows
+    /// has just been blocked, and the chrome paints the block page over
+    /// the blank one. The default navigates instead, which adds an
+    /// entry; an engine that can replace should.
+    fn replace_with_blank(&self, tab: TabId) {
+        self.navigate(tab, osmena_core::about_blank());
+    }
 }
 
 /// One engine instance, one per process. The shell builds it through a
@@ -245,4 +254,11 @@ pub trait Engine: 'static {
     fn cancel_download(&self, _id: u32) {}
     fn pause_download(&self, _id: u32) {}
     fn resume_download(&self, _id: u32) {}
+    /// The profile's blocked sites, at start and after every change. The
+    /// engine's before-navigate hook cancels any main-frame navigation
+    /// to one of them before a request goes out and reports it as
+    /// `EngineEvent::NavigationBlocked`; the model's own guard covers
+    /// what the user types, so an engine without a hook still blocks
+    /// typed addresses. Default: nothing.
+    fn configure_blocked_sites(&self, _sites: BlockedSites) {}
 }

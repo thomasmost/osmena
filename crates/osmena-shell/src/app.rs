@@ -1030,6 +1030,21 @@ impl<E: Engine> App<E> {
                     log::error!("cannot save the zoom levels to {}: {e}", path.display());
                 }
             }
+            EngineAction::SaveBlockedSites => {
+                let path = self.browser.profile.blocked_path();
+                if let Err(e) = self.browser.blocked.save(&path) {
+                    log::error!("cannot save the blocked sites to {}: {e}", path.display());
+                }
+            }
+            EngineAction::ConfigureBlockedSites(sites) => engine.configure_blocked_sites(sites),
+            EngineAction::ReplaceWithBlank(tab) => {
+                if let Some(w) = self.window_for_tab(tab) {
+                    w.host().replace_with_blank(tab);
+                    // The block page is the chrome's: paint it now rather
+                    // than when the engine next produces a frame.
+                    w.request_redraw();
+                }
+            }
             EngineAction::ToggleDownloads(window) => {
                 if let Some(w) = self.window_for_core_id(window) {
                     w.toggle_downloads();
@@ -1410,6 +1425,7 @@ impl<E: Engine> App<E> {
                 EngineEvent::UrlChanged { .. }
                     | EngineEvent::TitleChanged { .. }
                     | EngineEvent::TabClosed(_)
+                    | EngineEvent::NavigationBlocked { .. }
                     | EngineEvent::NewTabRequested { .. }
             ) {
                 self.session_changed();
@@ -1680,6 +1696,7 @@ fn tab_of(event: &EngineEvent) -> Option<TabId> {
         | EngineEvent::FaviconChanged { tab, .. }
         | EngineEvent::FindResult { tab, .. }
         | EngineEvent::TabCrashed { tab, .. }
+        | EngineEvent::NavigationBlocked { tab, .. }
         | EngineEvent::FrameReady(tab)
         | EngineEvent::TabClosed(tab) => Some(*tab),
         EngineEvent::NewTabRequested { opener, .. }

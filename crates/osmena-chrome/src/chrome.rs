@@ -518,7 +518,8 @@ impl ChromeState {
             | Prompt::DeleteProfile { .. }
             | Prompt::ManageProfiles { .. }
             | Prompt::DeleteBookmarkGroup { .. }
-            | Prompt::QuitWithDownloads { .. } => String::new(),
+            | Prompt::QuitWithDownloads { .. }
+            | Prompt::BlockSites { .. } => String::new(),
             Prompt::RenameFolder { name, .. } => name.clone(),
             Prompt::Profile { form, .. } => form.name.clone(),
             Prompt::Bookmark { title, .. } => title.clone(),
@@ -2044,7 +2045,8 @@ fn draw_prompt(
             | Prompt::ManageProfiles { .. }
             | Prompt::Bookmark { .. }
             | Prompt::DeleteBookmarkGroup { .. }
-            | Prompt::QuitWithDownloads { .. } => return Vec::new(),
+            | Prompt::QuitWithDownloads { .. }
+            | Prompt::BlockSites { .. } => return Vec::new(),
         };
     let mut answered = false;
     let mut cancelled = false;
@@ -2164,7 +2166,8 @@ fn draw_prompt(
         | Prompt::ManageProfiles { .. }
         | Prompt::Bookmark { .. }
         | Prompt::DeleteBookmarkGroup { .. }
-        | Prompt::QuitWithDownloads { .. } => Vec::new(),
+        | Prompt::QuitWithDownloads { .. }
+        | Prompt::BlockSites { .. } => Vec::new(),
     }
 }
 
