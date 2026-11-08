@@ -474,7 +474,7 @@ profile" in a tab's menu, with its prompt; and the settings window's
 of the contract is in place (`EngineEvent::NavigationBlocked`,
 `Engine::configure_blocked_sites`, both defaulted). The Nautilus and
 Paladin changes in this change set added the engine's before-navigate
-hook the same day (see the last paragraph). Without an engine hook, the
+hook the same day (see the browsers' adoption below). Without an engine hook, the
 model's own behaviour is this: a link, script or redirect onto a blocked
 site is caught only by the `UrlChanged` rule, which re-blocks the tab
 after the request has gone out, and Back on a tab blocked in place stays
@@ -555,6 +555,7 @@ before any request for it (Nautilus logs `blocked navigation to
 https://example.com/`, Paladin the same line), the tab menu's block
 replaced the page, Remove returned it, and Back went to the page
 before.
+
 Not verified in Paladin: a redirect onto a blocked site (it reaches the
 model's `UrlChanged` rule, S15), an `<iframe>` onto one by hand, DevTools
 on a blocked tab; macOS in either browser.
