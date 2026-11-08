@@ -29,11 +29,11 @@ mod glutin;
 pub use crate::glutin::GlutinSurface;
 
 pub use osmena_core::BlockedSites;
+pub use osmena_core::DownloadPolicy;
+
 /// Wakes the application's event loop from any thread. An engine calls
 /// this when it has work for the main thread; the shell then calls
 /// [`Engine::spin`].
-pub use osmena_core::DownloadPolicy;
-
 pub trait Waker: Send + Sync + 'static {
     fn wake(&self);
 }
@@ -198,7 +198,9 @@ pub trait TabHost {
     /// Back from there goes to the page before it: the page it shows
     /// has just been blocked, and the chrome paints the block page over
     /// the blank one. The default navigates instead, which adds an
-    /// entry; an engine that can replace should.
+    /// entry; an engine that can replace should. With the default, Back
+    /// from the pushed blank returns to the blocked entry, so Back from
+    /// a tab blocked in place stays on the block page.
     fn replace_with_blank(&self, tab: TabId) {
         self.navigate(tab, osmena_core::about_blank());
     }

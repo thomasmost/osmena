@@ -174,6 +174,14 @@ In the `TabHost` bullet, after the sentence ending "`EngineInfo::page_tools` say
   instead).
 ```
 
+Also add a known-limitations bullet, after the `TabHost` text above and before Step 2, for the README's blocked-sites notes:
+
+```
+- Known limitation: Forward after Back from a block page lands on the
+  bare `about:blank` the block page sat over; the model keeps no
+  per-entry state, so the page cannot be restored. Accepted.
+```
+
 **Step 2: CHANGELOG**
 
 At the top of the `### Added` list under `## Unreleased` insert:

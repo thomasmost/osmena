@@ -260,7 +260,9 @@ itself blocked, in which case the tab is re-blocked (the safety net
 for redirects and history traversal that reach the engine without a
 hook, which Servo's history traversal does). `Reload` on a blocked tab
 re-rolls the line and sends the engine nothing. `Back` and `Forward`
-go to the engine unchanged.
+go to the engine unchanged. Known limitation: Forward after Back from a
+block page lands on the bare `about:blank` the block page sat over, since
+the model keeps no per-entry state.
 
 **Unblocking.** Only `Command::UnblockSite` from the settings window
 removes a site. `dispatch` saves and reconfigures, and every tab

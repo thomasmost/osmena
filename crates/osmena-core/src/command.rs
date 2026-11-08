@@ -2163,7 +2163,12 @@ fn unblock_site(browser: &mut Browser, site: &str) -> Vec<EngineAction> {
     if !browser.blocked.remove(site) {
         return Vec::new();
     }
-    let mut actions = Vec::new();
+    // The engine learns the new list before any tab navigates, so its
+    // before-navigate hook does not cancel the navigations with the old one.
+    let mut actions = vec![
+        EngineAction::SaveBlockedSites,
+        EngineAction::ConfigureBlockedSites(browser.blocked.clone()),
+    ];
     for t in browser.windows.iter_mut().flat_map(|w| w.tabs.iter_mut()) {
         if t.blocked.as_ref().is_some_and(|p| p.site == site) {
             t.blocked = None;
@@ -2176,8 +2181,6 @@ fn unblock_site(browser: &mut Browser, site: &str) -> Vec<EngineAction> {
             }
         }
     }
-    actions.push(EngineAction::SaveBlockedSites);
-    actions.push(EngineAction::ConfigureBlockedSites(browser.blocked.clone()));
     actions
 }
 
@@ -5862,6 +5865,48 @@ mod tests {
     }
 
     #[test]
+    fn closing_the_active_tab_shows_a_deferred_blocked_tab_on_the_block_page() {
+        // AC3.3, AC2.6: the second wake re-check, in close_tab
+        let mut b = browser();
+        b.blocked.add("b.example");
+        restore_session(&mut b, &three_sites_session(0));
+        let w = &b.windows[0];
+        let (a, bb) = (w.tabs[0].id, w.tabs[1].id);
+
+        let actions = dispatch(&mut b, &Command::CloseTab(a));
+        assert!(matches!(
+            actions.as_slice(),
+            [EngineAction::CloseTab(closed), EngineAction::CreateTab { tab, url, .. }]
+                if *closed == a && *tab == bb && *url == url_of("about:blank")
+        ));
+        let t = b.tab(bb).unwrap();
+        assert!(!t.deferred);
+        assert!(t.blocked.is_some());
+        assert_eq!(t.url.as_str(), "https://b.example/");
+    }
+
+    #[test]
+    fn closing_the_active_tab_shows_an_unblocked_deferred_tab_at_its_own_url() {
+        // AC3.3: the wake re-check on close_tab finds the site unblocked
+        let mut b = browser();
+        b.blocked.add("b.example");
+        restore_session(&mut b, &three_sites_session(0));
+        let w = &b.windows[0];
+        let (a, bb) = (w.tabs[0].id, w.tabs[1].id);
+        b.blocked.remove("b.example");
+
+        let actions = dispatch(&mut b, &Command::CloseTab(a));
+        assert!(matches!(
+            actions.as_slice(),
+            [EngineAction::CloseTab(closed), EngineAction::CreateTab { tab, url, .. }]
+                if *closed == a && *tab == bb && *url == url_of("https://b.example/")
+        ));
+        let t = b.tab(bb).unwrap();
+        assert!(!t.deferred);
+        assert!(t.blocked.is_none());
+    }
+
+    #[test]
     fn reload_on_a_block_page_rerolls_the_line_and_asks_the_engine_nothing() {
         // AC3.7
         let (mut b, _window, tab) = one_window();
@@ -6100,25 +6145,25 @@ mod tests {
 
         let actions = dispatch(&mut b, &Command::UnblockSite("a.example".to_string()));
         assert_eq!(actions.len(), 4, "{actions:?}");
+        assert_eq!(actions[0], EngineAction::SaveBlockedSites);
+        let EngineAction::ConfigureBlockedSites(sites) = &actions[1] else {
+            panic!("the engine is told the list before any navigation");
+        };
+        assert!(sites.sites.is_empty());
         assert_eq!(
-            actions[0],
+            actions[2],
             EngineAction::Navigate {
                 tab: t1,
                 url: url("https://a.example/"),
             }
         );
         assert_eq!(
-            actions[1],
+            actions[3],
             EngineAction::Navigate {
                 tab: t2,
                 url: url("https://a.example/x"),
             }
         );
-        assert_eq!(actions[2], EngineAction::SaveBlockedSites);
-        let EngineAction::ConfigureBlockedSites(sites) = &actions[3] else {
-            panic!("the engine is told the list last");
-        };
-        assert!(sites.sites.is_empty());
         for tab in [t1, t2, deferred_id] {
             assert!(b.tab(tab).unwrap().blocked.is_none());
         }
