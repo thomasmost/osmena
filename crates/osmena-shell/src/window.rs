@@ -870,6 +870,7 @@ impl<E: Engine> BrowserWindow<E> {
         };
         let active = model.active;
         let crashed = model.active_tab().crashed.clone();
+        let blocked = model.active_tab().blocked.clone();
         let engine_error = browser.engine_error.as_deref();
         let chrome_color = browser.settings.chrome_color;
         let profile_name = browser.profile_name();
@@ -927,13 +928,19 @@ impl<E: Engine> BrowserWindow<E> {
             let (top, size) = content_pixels(rect, ui.pixels_per_point());
             content_top_px = top;
             host.resize_content(active, size);
-            match &crashed {
-                Some(reason) => {
+            match (&crashed, &blocked) {
+                (Some(reason), _) => {
                     if chrome::draw_crash_panel(ui, rect, reason) {
                         commands.push(Command::Reload(active));
                     }
                 }
-                None => {
+                // The site is blocked: the engine shows a blank page
+                // behind, the chrome says why. Nothing on it is a
+                // control.
+                (None, Some(page)) => {
+                    chrome::draw_blocked_page(ui, rect, chrome_color, page);
+                }
+                (None, None) => {
                     let ui: &egui::Ui = ui;
                     let mut painted = false;
                     host.paint_page(active, &mut |paint| match paint {
@@ -1009,7 +1016,7 @@ impl<E: Engine> BrowserWindow<E> {
             }
         });
         self.content_top_px = content_top_px;
-        self.content_is_egui = crashed.is_some();
+        self.content_is_egui = crashed.is_some() || blocked.is_some();
         self.update_content_origin();
 
         let mut registered = false;

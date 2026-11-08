@@ -9,16 +9,16 @@ use std::time::Duration;
 
 use egui::emath::GuiRounding;
 use egui::{
-    Align2, Button, Color32, CornerRadius, FontFamily, Frame, Id, Key, Margin, Panel, Pos2, Rect,
-    RichText, Sense, Stroke, StrokeKind, TextStyle, TextureHandle, TextureOptions, Ui, Vec2,
+    Align2, Button, Color32, CornerRadius, FontFamily, FontId, Frame, Id, Key, Margin, Panel, Pos2,
+    Rect, RichText, Sense, Stroke, StrokeKind, TextStyle, TextureHandle, TextureOptions, Ui, Vec2,
 };
 use keyboard_types::Code;
 use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
-    Avatar, Bookmark, Bookmarks, Brand, ChromeColor, Command, CommandKind, EngineInfo, Extension,
-    Favicon, Folder, FolderId, FolderTarget, History, KeyChord, Keymap, LaunchData, LaunchSettings,
-    LoadState, ProfileForm, Prompt, RgbaImage, StripItem, Suggestion, SuggestionSource, Tab, TabId,
-    UpdateStatus, UrlTemplate, Window, suggestions,
+    Avatar, BlockedPage, Bookmark, Bookmarks, Brand, ChromeColor, Command, CommandKind, EngineInfo,
+    Extension, Favicon, Folder, FolderId, FolderTarget, History, KeyChord, Keymap, LaunchData,
+    LaunchSettings, LoadState, ProfileForm, Prompt, RgbaImage, StripItem, Suggestion,
+    SuggestionSource, Tab, TabId, UpdateStatus, UrlTemplate, Window, suggestions,
 };
 use url::{ParseError, Url};
 
@@ -207,18 +207,14 @@ impl Palette {
     }
 }
 
-/// The strip's background: `rect` filled with [`Palette::strip_at`] from
-/// top to bottom, as a mesh of horizontal bands whose vertex colours
-/// egui interpolates (the bands keep the quadratic ease from flattening
-/// into one linear ramp), and the one-pixel edge along its bottom,
-/// which every tab but the active one stops short of, and whose
-/// outline that tab continues.
-fn strip_background(rect: Rect, palette: &Palette, pixels_per_point: f32) -> egui::Shape {
-    const BANDS: u32 = 8;
+/// `rect` filled with the strip's colour curve top to bottom: `bands`
+/// quads of vertex colours, which egui interpolates, so the quadratic
+/// ease keeps its shape instead of flattening into one ramp.
+fn gradient_mesh(rect: Rect, palette: &Palette, bands: u32) -> egui::Mesh {
     let mut mesh = egui::Mesh::default();
-    for band in 0..BANDS {
-        let t0 = band as f32 / BANDS as f32;
-        let t1 = (band + 1) as f32 / BANDS as f32;
+    for band in 0..bands {
+        let t0 = band as f32 / bands as f32;
+        let t1 = (band + 1) as f32 / bands as f32;
         let y0 = rect.top() + rect.height() * t0;
         let y1 = rect.top() + rect.height() * t1;
         let (c0, c1) = (palette.strip_at(t0), palette.strip_at(t1));
@@ -230,6 +226,17 @@ fn strip_background(rect: Rect, palette: &Palette, pixels_per_point: f32) -> egu
         mesh.add_triangle(base, base + 1, base + 2);
         mesh.add_triangle(base, base + 2, base + 3);
     }
+    mesh
+}
+
+/// The strip's background: `rect` filled with [`Palette::strip_at`] from
+/// top to bottom, as a mesh of horizontal bands whose vertex colours
+/// egui interpolates (the bands keep the quadratic ease from flattening
+/// into one linear ramp), and the one-pixel edge along its bottom,
+/// which every tab but the active one stops short of, and whose
+/// outline that tab continues.
+fn strip_background(rect: Rect, palette: &Palette, pixels_per_point: f32) -> egui::Shape {
+    let mesh = gradient_mesh(rect, palette, 8);
     // One pixel row, the strip's last; the tabs snap to the same grid.
     let edge = strip_edge_y(rect.bottom(), pixels_per_point);
     egui::Shape::Vec(vec![
@@ -4384,6 +4391,68 @@ pub fn draw_crash_panel(ui: &mut Ui, rect: Rect, reason: &str) -> bool {
     reload
 }
 
+/// The size a line drawn at `trial` points must shrink to so that its
+/// width, `width_at_trial`, fits `max_width`; never below 18 points,
+/// never larger than the trial.
+pub(crate) fn fit_size(trial: f32, width_at_trial: f32, max_width: f32) -> f32 {
+    if width_at_trial <= 0.0 || width_at_trial <= max_width {
+        trial
+    } else {
+        (trial * max_width / width_at_trial).max(18.0)
+    }
+}
+
+/// Replace the page area with the block page: the profile's colour
+/// easing into the toolbar's as the strip does, the tab's line large
+/// in the middle, and the site named beneath with where to unblock
+/// it. Nothing on it is a control; the page behind is `about:blank`.
+pub fn draw_blocked_page(ui: &mut Ui, rect: Rect, color: ChromeColor, page: &BlockedPage) {
+    let palette = Palette::new(color, ui.visuals().dark_mode);
+    let painter = ui.painter();
+    // The strip's curve, over the whole page: more bands than the
+    // strip's eight, since this is hundreds of pixels tall.
+    painter.add(egui::Shape::mesh(gradient_mesh(rect, &palette, 24)));
+    let ink = palette.ink_on(palette.strip_at(0.5));
+    let muted = ink.gamma_multiply(0.72);
+    let medium = FontFamily::Name(theme::MEDIUM.into());
+
+    // The line, as large as the width allows.
+    const TRIAL: f32 = 64.0;
+    let text = page.text().to_string();
+    let trial = painter.layout_no_wrap(text.clone(), FontId::new(TRIAL, medium.clone()), ink);
+    let size = fit_size(TRIAL, trial.size().x, (rect.width() - 48.0).max(80.0));
+    let line = painter.layout_no_wrap(text, FontId::new(size, medium), ink);
+    let line_size = line.size();
+    let line_pos = Pos2::new(
+        rect.center().x - line_size.x / 2.0,
+        rect.center().y - line_size.y / 2.0 - 20.0,
+    );
+    painter.galley(line_pos, line, ink);
+
+    // Beneath: the site, and where to undo this.
+    let site = painter.layout_no_wrap(
+        format!("{} is blocked on this profile", page.site),
+        FontId::new(15.0, FontFamily::Proportional),
+        muted,
+    );
+    let site_pos = Pos2::new(
+        rect.center().x - site.size().x / 2.0,
+        line_pos.y + line_size.y + 18.0,
+    );
+    let site_height = site.size().y;
+    painter.galley(site_pos, site, muted);
+    let hint = painter.layout_no_wrap(
+        "Unblock it under Settings \u{203a} Blocked sites".to_string(),
+        FontId::new(12.0, FontFamily::Proportional),
+        muted,
+    );
+    let hint_pos = Pos2::new(
+        rect.center().x - hint.size().x / 2.0,
+        site_pos.y + site_height + 6.0,
+    );
+    painter.galley(hint_pos, hint, muted);
+}
+
 /// Turn address-bar text into a URL. Bare domains get `https://`. `localhost`,
 /// bare IPv4 addresses, and `host:port` get `http://`. `javascript:` URLs
 /// are refused. Returns `None` for text that is not a URL (Phase 1 has no
@@ -5092,5 +5161,35 @@ mod tests {
             descender > baseline,
             "a descender does hang below the baseline in this font"
         );
+    }
+
+    #[test]
+    fn a_block_line_shrinks_to_its_width_and_no_further() {
+        assert_eq!(fit_size(64.0, 300.0, 400.0), 64.0);
+        assert_eq!(fit_size(64.0, 800.0, 400.0), 32.0);
+        assert_eq!(fit_size(64.0, 8000.0, 100.0), 18.0);
+        assert_eq!(fit_size(64.0, 0.0, 100.0), 64.0);
+    }
+
+    #[test]
+    fn the_block_page_draws_narrow_and_wide_without_changing_its_line() {
+        let ctx = with_fonts();
+        for rect in [
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 200.0)),
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 900.0)),
+        ] {
+            for line in 0..3u8 {
+                let page = BlockedPage {
+                    site: "youtube.com".to_string(),
+                    line,
+                };
+                for _ in 0..2 {
+                    let _ = ctx.run_ui(Default::default(), |ui| {
+                        draw_blocked_page(ui, rect, ChromeColor::default(), &page)
+                    });
+                }
+                assert_eq!(page.line, line);
+            }
+        }
     }
 }
