@@ -38,8 +38,8 @@ use osmena_chrome::fatal::report_fatal;
 use osmena_core::command::open_window;
 use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
-    Bookmarks, Brand, Browser, Command, Downloads, EngineInfo, History, Keymap, Platform, Profile,
-    Session, Settings, SiteZoom, dispatch,
+    BlockedSites, Bookmarks, Brand, Browser, Command, Downloads, EngineInfo, History, Keymap,
+    Platform, Profile, Session, Settings, SiteZoom, dispatch,
 };
 use osmena_engine::{Engine, EngineError, Waker};
 use url::Url;
@@ -207,10 +207,23 @@ pub fn run<E: Engine>(launch: Launch<E>) -> ExitCode {
             Downloads::default()
         }
     };
+    // And the blocked sites: a bad file is logged and the profile starts
+    // with none, like the zoom levels.
+    let blocked = match BlockedSites::load(&profile.blocked_path()) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!(
+                "{e} (in {}); starting with no blocked sites",
+                profile.blocked_path().display()
+            );
+            BlockedSites::default()
+        }
+    };
     browser.bookmarks = bookmarks;
     browser.history = history;
     browser.zoom = zoom;
     browser.downloads = downloads;
+    browser.blocked = blocked;
     // The last run's windows: opened again when the setting (or the
     // flag) says so, offered when the last run did not end cleanly (its
     // claim on the profile is still there and names no live process).

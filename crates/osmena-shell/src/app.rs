@@ -1723,6 +1723,10 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
                     if self.engine_info.downloads {
                         engine.configure_downloads(self.download_policy());
                     }
+                    // Every engine gets the list; one without a hook
+                    // ignores it (the method is defaulted) and still
+                    // blocks what the user types through the model.
+                    engine.configure_blocked_sites(self.browser.blocked.clone());
                     self.engine = Some(engine);
                 }
                 Err(e) => {
