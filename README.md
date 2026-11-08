@@ -91,7 +91,12 @@ The engine contract, in `osmena-engine`:
   context on a native window), `open_host` (the tabs of one window), and,
   for engines with extensions, `install_extension`,
   `set_extension_enabled`, and `uninstall_extension` (defaulted to
-  nothing).
+  nothing); `configure_downloads` and `configure_blocked_sites`, the
+  policies the shell hands down at start and on every change (both
+  defaulted: an engine's before-navigate hook is to cancel a main-frame
+  navigation to a blocked site before any request and report
+  `EngineEvent::NavigationBlocked`; the model blocks what the user
+  types whether or not the engine has a hook).
 - `TabHost`: create, adopt, close, navigate, history, show and hide, focus,
   resize, input (every pointer event carries the keyboard modifiers held
   at that moment, from the window's own state; an engine never infers
@@ -107,6 +112,13 @@ The engine contract, in `osmena-engine`:
   and what the user picks that only the engine can do (copy, paste,
   save, print, inspect, …) comes back as a `PageCommand`.
   `EngineInfo::page_tools` says which of those the engine offers.
+  `replace_with_blank` replaces the tab's current history entry with
+  `about:blank` when the page it shows has just been blocked, so Back
+  skips it (defaulted to a plain navigation, which adds an entry
+  instead).
+- Known limitation: Forward after Back from a block page lands on the
+  bare `about:blank` the block page sat over; the model keeps no
+  per-entry state, so the page cannot be restored. Accepted.
 - `Surface`: make current, resize, the glow handle, begin frame, present.
 
 ## What the user gets
