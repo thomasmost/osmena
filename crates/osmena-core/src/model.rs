@@ -82,6 +82,11 @@ pub fn site_key(url: &Url) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
+/// The empty page every engine shows without a request.
+pub fn about_blank() -> Url {
+    Url::parse("about:blank").expect("about:blank parses")
+}
+
 /// One page shown as a tab.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tab {
@@ -504,8 +509,7 @@ impl Browser {
     /// The URL new tabs open with, from settings, falling back to
     /// `about:blank` if the setting does not parse.
     pub fn new_tab_url(&self) -> Url {
-        Url::parse(&self.settings.new_tab_url)
-            .unwrap_or_else(|_| Url::parse("about:blank").expect("about:blank parses"))
+        Url::parse(&self.settings.new_tab_url).unwrap_or_else(|_| about_blank())
     }
 
     /// The homepage from settings, falling back to the new-tab URL.

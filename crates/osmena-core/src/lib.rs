@@ -55,7 +55,7 @@ pub use launch::{
 };
 pub use model::{
     Browser, Favicon, FindState, Folder, FolderId, LoadState, RgbaImage, StripItem, Tab, TabId,
-    Window, WindowId, site_key,
+    Window, WindowId, about_blank, site_key,
 };
 pub use profile::{Avatar, Profile, ProfileEntry, ProfileError};
 pub use session::{

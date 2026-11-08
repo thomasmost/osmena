@@ -332,10 +332,7 @@ pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
                 .window_mut(window)
                 .expect("window_of_tab returned an existing window");
             let previous = w.active;
-            w.insert_tab_after(
-                *opener,
-                Tab::new(tab, Url::parse("about:blank").expect("about:blank parses")),
-            );
+            w.insert_tab_after(*opener, Tab::new(tab, crate::model::about_blank()));
             if *background {
                 return vec![EngineAction::AdoptTab {
                     window,

@@ -10,6 +10,9 @@ description = "Engine-free browser model: windows, tabs, commands, events, input
 [dependencies]
 directories = "6.0.0"
 keyboard-types = { workspace = true }
+# The public suffix list, compiled in: what tells `bbc.co.uk` apart from
+# `co.uk` when a URL is reduced to the site it belongs to (`blocked.rs`).
+psl = "2"
 serde = { workspace = true }
 toml = "1.1"
 url = { workspace = true }
