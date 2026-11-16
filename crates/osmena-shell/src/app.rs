@@ -79,7 +79,8 @@ pub enum AppEvent {
     DefaultBrowserAnswered,
     /// Text the system typed with no key event of its own (on Windows,
     /// the character of an Alt code; `crate::alt_code`), for whatever
-    /// has the keyboard.
+    /// has the keyboard. Only Windows sends it.
+    #[cfg_attr(not(windows), allow(dead_code))]
     Typed(String),
 }
 
