@@ -5,7 +5,9 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-11-08 (night: the Launch Panel's field completes
+_Last updated: 2026-11-16 (Alt codes on Windows: the shell's message
+hook delivers the character winit drops; before that, 2026-11-08
+night: the Launch Panel's field completes
 an address ahead of the typist, with the dropdown's first row as what
 Enter opens; earlier the chrome refresh: a per-profile accent
 installed on the egui context by `theme::tint`, painted round toolbar
@@ -461,6 +463,18 @@ No engine is needed; the workspace builds in under a minute.
   a release nobody saw pressed. Pointer events carry the modifiers from
   the window's winit state for the same reason; an engine must not keep
   its own.
+- **Text with no key event of its own comes through the message
+  hook.** On Windows an Alt code (Alt+0151) arrives as one `WM_CHAR`
+  after Alt's release, and winit drops a `WM_CHAR` that follows no
+  key-down. `alt_code.rs` installs the event loop's message hook
+  (`with_msg_hook`), which picks that message out (`AltCodes`, pure and
+  tested: the `WM_CHAR` straight after `VK_MENU`'s key-up, nothing
+  else) and sends `AppEvent::Typed`; the app hands the text to
+  whatever has the keyboard: the settings window or a field of the
+  chrome as `egui::Event::Text` (not `Ime::Commit`, which egui's
+  `TextEdit` inserts only after an `Enabled` at the same caret), the
+  active page as `EngineInput::ImeCommit`, so an engine must accept a
+  commit with no composition open. The hook never swallows a message.
 - **egui's repaint requests go through `repaint::RepaintSchedule`.** A
   due request becomes `request_redraw`, a delayed one (caret blink,
   tooltip) the event loop's `WaitUntil`, set in `App::about_to_wait`.
@@ -500,6 +514,23 @@ No engine is needed; the workspace builds in under a minute.
 - Commit to `main` unless asked for a branch. Conventional Commits.
 - The browsers' own docs (`README.md`, `CLAUDE.md`) describe what each one
   adds; the shared behaviour is documented here only.
+
+## Status and handoff (2026-11-16)
+
+Alt codes on Windows (the convention bullet on text with no key event
+of its own, and the CHANGELOG's Fixed entry). Verified: `cargo test`
+(three new tests of `AltCodes`), clippy with `-D warnings`, fmt, and a
+debug Nautilus built against this checkout, driven with `keybd_event`
+(Alt held, the keypad's digits, Alt released): a page's textarea
+received `a`, U+2014, `b`, U+E9 for a, Alt+0151, b, Alt+0233, read off
+the title its `input` handler set; the address bar showed `x—y` in a
+capture. Not verified: the settings window's fields and a prompt's by
+hand (the same `Event::Text`), Paladin (not built; its `ImeCommit` is
+Servo's composition end, never tried without a composition), the
+macOS-target clippy pass (no stand-in C compiler for `ring` in this
+session; the module is plain Rust off Windows). Not done: the emoji
+panel (Win+.) and IME text for pages, which winit also drops or never
+sends while egui has IME off (open item 3).
 
 ## Status and handoff (2026-11-08, night)
 

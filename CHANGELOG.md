@@ -123,6 +123,15 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Fixed
 
+- Alt codes typed nothing on Windows: holding Alt and keying 0151 on
+  the numeric keypad gave no em dash, in a page or in a field of the
+  chrome. Windows posts the character as a `WM_CHAR` after Alt's
+  release, and winit drops a `WM_CHAR` that follows no key-down. The
+  shell's message hook (`alt_code.rs`) picks that message out and
+  delivers the character to whatever has the keyboard: a field of the
+  chrome or of the settings window as egui's text event, the active
+  page as `EngineInput::ImeCommit`, which an engine must therefore
+  accept with no composition open.
 - A fresh profile on Windows always measured in Celsius. The units
   follow the system's locale, which osmena read from `LC_ALL`,
   `LC_MESSAGES` and `LANG`: Windows sets none of them, so every new

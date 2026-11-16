@@ -205,6 +205,20 @@ impl<E: Engine> BrowserWindow<E> {
         self.window.request_redraw();
     }
 
+    /// Text typed with no key event of its own (an Alt code's character
+    /// on Windows), for whatever has the keyboard: a field of the chrome
+    /// as egui's text event, the active page otherwise as committed
+    /// text. Nothing while the chrome owns the content area.
+    pub fn typed_text(&mut self, browser: &Browser, text: String) {
+        if self.egui.egui_ctx.egui_wants_keyboard_input() || self.chrome.takes_every_key() {
+            self.inject_egui_events(vec![egui::Event::Text(text)]);
+        } else if !self.content_is_egui
+            && let Some(tab) = browser.window(self.id).map(|w| w.active)
+        {
+            self.host.input(tab, EngineInput::ImeCommit(text));
+        }
+    }
+
     /// Tell the engine `tab` has focus, if this window does.
     pub fn focus_tab(&self, tab: TabId) {
         if self.has_focus() {

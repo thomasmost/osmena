@@ -77,6 +77,10 @@ pub enum AppEvent {
     /// The system answered the request to make this the default browser;
     /// the status is read again.
     DefaultBrowserAnswered,
+    /// Text the system typed with no key event of its own (on Windows,
+    /// the character of an Alt code; `crate::alt_code`), for whatever
+    /// has the keyboard.
+    Typed(String),
 }
 
 struct WinitWaker(Mutex<EventLoopProxy<AppEvent>>);
@@ -1873,6 +1877,16 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
                 // An answer that left things as they were still needs the
                 // bar back in the settings window's terms.
                 self.redraw_all();
+            }
+            AppEvent::Typed(text) => {
+                if let Some(sw) = self.settings_window.as_mut()
+                    && sw.has_focus()
+                {
+                    sw.inject_egui_events(vec![egui::Event::Text(text)]);
+                } else if let Some(w) = self.windows.values_mut().find(|w| w.has_focus()) {
+                    w.typed_text(&self.browser, text);
+                }
+                self.pump(event_loop);
             }
             AppEvent::ExitAfter(delay) => {
                 // What a smoke test reads: did the pages load.

@@ -14,6 +14,9 @@
 //! 4. Windows that were touched redraw: the chrome, then the active tab
 //!    under it, however the engine delivers it.
 
+// The state machine is tested everywhere; only Windows installs it.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod alt_code;
 mod app;
 mod clipboard;
 mod default_browser;
@@ -288,6 +291,9 @@ pub fn run<E: Engine>(launch: Launch<E>) -> ExitCode {
         use winit::platform::macos::EventLoopBuilderExtMacOS;
         builder.with_default_menu(false);
     }
+    // Alt and a keypad code: the character winit drops (alt_code.rs).
+    #[cfg(windows)]
+    let alt_codes = alt_code::install(&mut builder);
     let event_loop = match builder.build() {
         Ok(l) => l,
         Err(e) => {
@@ -295,6 +301,8 @@ pub fn run<E: Engine>(launch: Launch<E>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    #[cfg(windows)]
+    let _ = alt_codes.set(event_loop.create_proxy());
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App::new(
         brand,
