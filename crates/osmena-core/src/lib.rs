@@ -22,6 +22,7 @@ pub mod history;
 pub mod input;
 pub mod keymap;
 pub mod launch;
+pub mod media;
 pub mod model;
 pub mod profile;
 pub mod session;
@@ -55,6 +56,7 @@ pub use launch::{
     LaunchUpdate, Place, TOP_SITES, TopSite, Units, WEATHER_LIFETIME, WeatherCode, WeatherReport,
     WeatherSettings, WidgetKind, top_sites,
 };
+pub use media::{MediaGrants, MediaRequest};
 pub use model::{
     Browser, Favicon, FindState, Folder, FolderId, LoadState, RgbaImage, StripItem, Tab, TabId,
     Window, WindowId, about_blank, site_key,

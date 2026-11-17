@@ -7,6 +7,7 @@ use crate::blocked::{BlockedPage, line_seed};
 use crate::command::{EngineAction, close_tab, open_window};
 use crate::download::DownloadReport;
 use crate::extension::Extension;
+use crate::media::MediaRequest;
 use crate::model::{Browser, Favicon, LoadState, RgbaImage, Tab, TabId, about_blank};
 
 /// Handle to an engine tab that page content created (`window.open`) and
@@ -194,6 +195,14 @@ pub enum EngineEvent {
     NavigationBlocked {
         tab: TabId,
         url: Url,
+    },
+    /// A page in `tab` asked for the microphone or the camera. The
+    /// engine holds the page's call open until
+    /// `TabHost::answer_media_access` answers `request.id`; a request
+    /// whose tab closes first needs no answer.
+    MediaAccessRequested {
+        tab: TabId,
+        request: MediaRequest,
     },
     /// The engine painted a new frame for this tab; the window showing it
     /// should redraw.
@@ -409,6 +418,36 @@ pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
                 t.load = LoadState::Idle;
             });
             Vec::new()
+        }
+        // A page wants the microphone or the camera: allowed at once
+        // where the user already allowed that origin in this run,
+        // refused for a page nobody is looking at (a restored tab being
+        // warmed), and otherwise asked in the tab's window.
+        EngineEvent::MediaAccessRequested { tab, request } => {
+            let Some(t) = browser.tab(*tab) else {
+                return Vec::new();
+            };
+            let answer = |allow| {
+                vec![EngineAction::AnswerMediaAccess {
+                    tab: *tab,
+                    request: request.id,
+                    allow,
+                }]
+            };
+            if t.warming || !(request.microphone || request.camera) {
+                return answer(false);
+            }
+            if browser.media_grants.covers(request) {
+                return answer(true);
+            }
+            match browser.window_of_tab(*tab) {
+                Some(window) => vec![EngineAction::AskMediaAccess {
+                    window,
+                    tab: *tab,
+                    request: request.clone(),
+                }],
+                None => answer(false),
+            }
         }
         // The engine refused a navigation to a blocked site before any
         // request: the tab shows the block page for the address it was
@@ -1023,6 +1062,175 @@ mod tests {
         assert_eq!(t.url.as_str(), "https://b.example/p");
         assert_eq!(t.blocked.as_ref().unwrap().site, "b.example");
         assert_eq!(t.load, LoadState::Loading);
+    }
+
+    fn media_request(id: u64, origin: &str) -> MediaRequest {
+        MediaRequest {
+            id,
+            origin: origin.to_string(),
+            microphone: true,
+            camera: false,
+        }
+    }
+
+    #[test]
+    fn a_page_asking_for_the_microphone_is_asked_about_in_its_window() {
+        let (mut b, window, tab) = one_window();
+        let request = media_request(7, "https://a.example");
+        let actions = apply(
+            &mut b,
+            &EngineEvent::MediaAccessRequested {
+                tab,
+                request: request.clone(),
+            },
+        );
+        assert_eq!(
+            actions,
+            vec![EngineAction::AskMediaAccess {
+                window,
+                tab,
+                request,
+            }]
+        );
+    }
+
+    #[test]
+    fn an_allowed_origin_is_answered_without_asking_and_a_refusal_asks_again() {
+        let (mut b, _, tab) = one_window();
+        let first = media_request(1, "https://a.example");
+        // Blocked: nothing is kept, so the next request asks again.
+        assert_eq!(
+            dispatch(
+                &mut b,
+                &Command::AnswerMediaAccess {
+                    tab,
+                    request: first.clone(),
+                    allow: false,
+                },
+            ),
+            vec![EngineAction::AnswerMediaAccess {
+                tab,
+                request: 1,
+                allow: false,
+            }]
+        );
+        let second = media_request(2, "https://a.example");
+        assert!(matches!(
+            apply(
+                &mut b,
+                &EngineEvent::MediaAccessRequested {
+                    tab,
+                    request: second.clone(),
+                },
+            )
+            .as_slice(),
+            [EngineAction::AskMediaAccess { .. }]
+        ));
+        // Allowed: the engine is told, and the origin is not asked again.
+        assert_eq!(
+            dispatch(
+                &mut b,
+                &Command::AnswerMediaAccess {
+                    tab,
+                    request: second,
+                    allow: true,
+                },
+            ),
+            vec![EngineAction::AnswerMediaAccess {
+                tab,
+                request: 2,
+                allow: true,
+            }]
+        );
+        assert_eq!(
+            apply(
+                &mut b,
+                &EngineEvent::MediaAccessRequested {
+                    tab,
+                    request: media_request(3, "https://a.example"),
+                },
+            ),
+            vec![EngineAction::AnswerMediaAccess {
+                tab,
+                request: 3,
+                allow: true,
+            }]
+        );
+        // Another origin, and the camera for the same one, still ask.
+        assert!(matches!(
+            apply(
+                &mut b,
+                &EngineEvent::MediaAccessRequested {
+                    tab,
+                    request: media_request(4, "https://b.example"),
+                },
+            )
+            .as_slice(),
+            [EngineAction::AskMediaAccess { .. }]
+        ));
+        let camera = MediaRequest {
+            camera: true,
+            ..media_request(5, "https://a.example")
+        };
+        assert!(matches!(
+            apply(
+                &mut b,
+                &EngineEvent::MediaAccessRequested {
+                    tab,
+                    request: camera
+                }
+            )
+            .as_slice(),
+            [EngineAction::AskMediaAccess { .. }]
+        ));
+    }
+
+    #[test]
+    fn a_media_request_nobody_can_answer_is_refused_or_dropped() {
+        let (mut b, _, tab) = one_window();
+        // A restored tab loading out of sight asks nobody.
+        with_tab(&mut b, tab, |t| t.warming = true);
+        assert_eq!(
+            apply(
+                &mut b,
+                &EngineEvent::MediaAccessRequested {
+                    tab,
+                    request: media_request(1, "https://a.example"),
+                },
+            ),
+            vec![EngineAction::AnswerMediaAccess {
+                tab,
+                request: 1,
+                allow: false,
+            }]
+        );
+        // A tab that is gone: the engine dropped the request with it.
+        let gone = TabId(9_999);
+        assert!(
+            apply(
+                &mut b,
+                &EngineEvent::MediaAccessRequested {
+                    tab: gone,
+                    request: media_request(2, "https://a.example"),
+                },
+            )
+            .is_empty()
+        );
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::AnswerMediaAccess {
+                    tab: gone,
+                    request: media_request(2, "https://a.example"),
+                    allow: true,
+                },
+            )
+            .is_empty()
+        );
+        assert!(
+            !b.media_grants
+                .covers(&media_request(2, "https://a.example"))
+        );
     }
 
     #[test]

@@ -16,6 +16,7 @@ use crate::launch::{
     DRIVE_LIFETIME, DriveState, Fetched, LOCATION_LIFETIME, Place, Units, WEATHER_LIFETIME,
     WidgetKind,
 };
+use crate::media::MediaRequest;
 use crate::model::{
     Browser, FindState, Folder, FolderId, LoadState, Tab, TabId, Window, WindowId, about_blank,
     site_key,
@@ -406,6 +407,14 @@ pub enum Command {
     /// Unblock `site`; the tabs blocked on it return to their pages.
     /// Only the settings window issues it.
     UnblockSite(String),
+    /// The user's answer to `EngineAction::AskMediaAccess`: `tab`'s page
+    /// may, or may not, have what `request` asks for. An allowed origin is not
+    /// asked again in this run.
+    AnswerMediaAccess {
+        tab: TabId,
+        request: MediaRequest,
+        allow: bool,
+    },
     Quit,
 }
 
@@ -774,6 +783,22 @@ pub enum EngineAction {
     },
     /// The context menu of `tab`'s page closed.
     ContextMenuClosed(TabId),
+    /// Ask the user, in a dialog of the system's over `window`, whether
+    /// `tab`'s page may have what `request` asks for; the answer is
+    /// `Command::AnswerMediaAccess`, and a dialog closed any other way
+    /// is a refusal. Comes from `apply`, not from a command.
+    AskMediaAccess {
+        window: WindowId,
+        tab: TabId,
+        request: MediaRequest,
+    },
+    /// Answer the media request the engine reported for `tab` as
+    /// `request` (`MediaRequest::id`).
+    AnswerMediaAccess {
+        tab: TabId,
+        request: u64,
+        allow: bool,
+    },
     /// Find places named this for the weather tile; answered with
     /// `LaunchUpdate::Places`.
     LookUpPlace(String),
@@ -1652,6 +1677,23 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
         }
         Command::BlockSites(sites) => block_sites(browser, sites),
         Command::UnblockSite(site) => unblock_site(browser, site),
+        Command::AnswerMediaAccess {
+            tab,
+            request,
+            allow,
+        } => {
+            if browser.tab(*tab).is_none() {
+                return Vec::new();
+            }
+            if *allow {
+                browser.media_grants.allow(request);
+            }
+            vec![EngineAction::AnswerMediaAccess {
+                tab: *tab,
+                request: request.id,
+                allow: *allow,
+            }]
+        }
         Command::Quit => quit_guard(browser, None).unwrap_or_else(|| vec![EngineAction::Quit]),
     }
 }

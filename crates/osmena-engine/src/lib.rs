@@ -178,6 +178,13 @@ pub trait TabHost {
     /// The context menu of `tab`'s page closed, after any command it
     /// produced: let go of what was held for it. Default: nothing.
     fn context_menu_closed(&self, _tab: TabId) {}
+    /// Answer the request for the microphone or the camera that the
+    /// engine reported as `EngineEvent::MediaAccessRequested` with this
+    /// `request` id: let `tab`'s page have all it asked for, or refuse.
+    /// An id the engine no longer holds (the tab navigated away) is
+    /// ignored. An engine that reports no such requests never receives
+    /// it. Default: nothing.
+    fn answer_media_access(&self, _tab: TabId, _request: u64, _allow: bool) {}
     /// Search `tab`'s page for `text`: afresh from the top, or on to the
     /// next match (`find_next`) `forward` or back, wrapping. The engine
     /// highlights the matches, scrolls the active one into view, and

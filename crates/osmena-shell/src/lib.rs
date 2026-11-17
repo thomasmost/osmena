@@ -23,6 +23,7 @@ mod default_browser;
 mod favicons;
 mod launch;
 mod locale;
+mod media_prompt;
 mod page;
 pub mod process;
 mod profiles;

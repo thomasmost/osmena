@@ -162,6 +162,11 @@ impl<E: Engine> BrowserWindow<E> {
         self.id
     }
 
+    /// The native window, as the parent of a dialog of the system's.
+    pub fn native(&self) -> &Window {
+        &self.window
+    }
+
     pub fn winit_id(&self) -> winit::window::WindowId {
         self.window.id()
     }

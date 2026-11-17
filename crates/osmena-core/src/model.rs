@@ -13,6 +13,7 @@ use crate::download::Downloads;
 use crate::extension::Extension;
 use crate::history::History;
 use crate::launch::LaunchData;
+use crate::media::MediaGrants;
 use crate::profile::{DEFAULT_PROFILE_NAME, Profile, ProfileEntry};
 use crate::session::Session;
 use crate::settings::Settings;
@@ -391,6 +392,8 @@ pub struct Browser {
     pub zoom: SiteZoom,
     /// The sites this profile refuses to show (`blocked.toml`).
     pub blocked: BlockedSites,
+    /// The origins allowed the microphone or the camera in this run.
+    pub media_grants: MediaGrants,
     /// What is being, and was, downloaded.
     pub downloads: Downloads,
     /// The user confirmed quitting with downloads still going.
@@ -429,6 +432,7 @@ impl Browser {
             update: UpdateStatus::Idle,
             zoom: SiteZoom::default(),
             blocked: BlockedSites::default(),
+            media_grants: MediaGrants::default(),
             downloads: Downloads::default(),
             quit_confirmed: false,
             crashed_session: None,

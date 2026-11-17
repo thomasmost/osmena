@@ -116,6 +116,11 @@ The engine contract, in `osmena-engine`:
   what the user picks that only the engine can do (copy, paste, save,
   print, inspect, …) comes back as a `PageCommand`.
   `EngineInfo::page_tools` says which of those the engine offers.
+  `answer_media_access` (defaulted to nothing) answers a page's request
+  for the microphone or the camera, which the engine reported as
+  `EngineEvent::MediaAccessRequested` and holds open meanwhile: the
+  shell asks the user in a dialog of the system's, and an origin
+  allowed once is answered without asking for the rest of the run.
   `replace_with_blank` replaces the tab's current history entry with
   `about:blank` when the page it shows has just been blocked, so Back
   skips it (defaulted to a plain navigation, which adds an entry instead,

@@ -6,6 +6,20 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- A page that asks for the microphone or the camera (`getUserMedia`)
+  is answered by the user. An engine reports the request as
+  `EngineEvent::MediaAccessRequested` (a `MediaRequest`: an id of the
+  engine's own, the origin, which devices) and holds the page's call
+  open; `apply` answers `EngineAction::AskMediaAccess`, the shell asks
+  in a dialog of the system's on the tab's window ("Allow a.example to
+  use your microphone?", Allow or Block; a sheet on macOS), and the
+  answer, `Command::AnswerMediaAccess`, reaches the engine through the
+  new `TabHost::answer_media_access` (defaulted to nothing). An origin
+  the user allowed is not asked again until the browser quits
+  (`Browser::media_grants`, in memory only); a refusal is not kept, a
+  restored tab loading out of sight is refused without a question. An
+  engine that reports no such requests needs nothing.
+
 - The Launch Panel's field completes an address ahead of the typist.
   Before the first space, the most visited page whose address starts
   with the typing stands in the field, the rest of its address after

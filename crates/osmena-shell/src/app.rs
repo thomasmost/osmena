@@ -26,6 +26,7 @@ use crate::clipboard;
 use crate::default_browser;
 use crate::favicons::FaviconCache;
 use crate::launch::LaunchFetcher;
+use crate::media_prompt;
 use crate::profiles;
 use crate::repaint;
 use crate::settings_window::{SettingsOutcome, SettingsWindow};
@@ -1285,6 +1286,39 @@ impl<E: Engine> App<E> {
                     w.host().context_menu_closed(tab);
                 }
             }
+            EngineAction::AskMediaAccess {
+                window,
+                tab,
+                request,
+            } => {
+                // The system's dialog, as a sheet on the tab's window.
+                // It is answered before this returns, so the request
+                // never waits across a change of focus.
+                let parent = self.window_for_core_id(window).map(|w| w.native());
+                let allow = media_prompt::ask(parent, &request);
+                self.run_commands(
+                    vec![Command::AnswerMediaAccess {
+                        tab,
+                        request,
+                        allow,
+                    }],
+                    event_loop,
+                );
+            }
+            EngineAction::AnswerMediaAccess {
+                tab,
+                request,
+                allow,
+            } => {
+                log::info!(
+                    "media request {request} of tab {}: {}",
+                    tab.0,
+                    if allow { "allowed" } else { "refused" }
+                );
+                if let Some(w) = self.window_for_tab(tab) {
+                    w.host().answer_media_access(tab, request, allow);
+                }
+            }
             EngineAction::OpenSettings => match &self.settings_window {
                 Some(sw) => sw.focus(),
                 None => match SettingsWindow::open(event_loop, engine, self.brand) {
@@ -1702,6 +1736,7 @@ fn tab_of(event: &EngineEvent) -> Option<TabId> {
         | EngineEvent::FindResult { tab, .. }
         | EngineEvent::TabCrashed { tab, .. }
         | EngineEvent::NavigationBlocked { tab, .. }
+        | EngineEvent::MediaAccessRequested { tab, .. }
         | EngineEvent::FrameReady(tab)
         | EngineEvent::TabClosed(tab) => Some(*tab),
         EngineEvent::NewTabRequested { opener, .. }

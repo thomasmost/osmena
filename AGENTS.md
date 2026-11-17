@@ -5,7 +5,9 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-11-16 (Alt codes on Windows: the shell's message
+_Last updated: 2026-11-17 (a page's request for the microphone or the
+camera is asked about in a dialog of the system's; before that
+2026-11-16, Alt codes on Windows: the shell's message
 hook delivers the character winit drops; before that, 2026-11-08
 night: the Launch Panel's field completes
 an address ahead of the typist, with the dropdown's first row as what
@@ -225,6 +227,27 @@ No engine is needed; the workspace builds in under a minute.
   to `ChromeState::open_prompt`, and the chrome draws it over the page;
   the answer is an ordinary `Command`. Nothing in the chrome decides what
   to ask.
+- **A page's request for a device is asked in the system's dialog.**
+  `getUserMedia` reaches the model as
+  `EngineEvent::MediaAccessRequested` with a `MediaRequest` (the
+  engine's id for it, the origin, microphone and camera); the engine
+  holds the page's call open. `apply` decides without a question where
+  it can (allowed already in `Browser::media_grants`, which lives for
+  the run and is never written; refused for a warming tab) and
+  otherwise answers `EngineAction::AskMediaAccess`, which the shell
+  turns into `media_prompt::ask`: `rfd`'s message dialog on the tab's
+  window (an `NSAlert` sheet with Allow and Block on macOS; Yes and No
+  elsewhere, since custom buttons on Windows need a manifest) and then
+  `Command::AnswerMediaAccess`, whose `dispatch` records an allowed
+  origin and emits `EngineAction::AnswerMediaAccess` for
+  `TabHost::answer_media_access`. This is the one question that is not
+  a `Prompt`, by the owner's choice (2026-11-17), and it has a second
+  reason: the dialog is modal, so the answer is given before the
+  window's change of focus reaches the engine, and Chromium drops a
+  request left pending across a loss of focus (Nautilus's C10). Like a
+  native menu it blocks the event loop while it is up. The words are
+  `MediaRequest::question`, tested in core; nothing in a test shows
+  the dialog.
 - **The strip's row is laid out by hand.** `strip_row` measures every
   tab and chip (`Slot`), places each at an animated offset
   (`Context::animate_value_with_time` keyed by the tab or folder id, so
@@ -514,6 +537,34 @@ No engine is needed; the workspace builds in under a minute.
 - Commit to `main` unless asked for a branch. Conventional Commits.
 - The browsers' own docs (`README.md`, `CLAUDE.md`) describe what each one
   adds; the shared behaviour is documented here only.
+
+## Status and handoff (2026-11-17)
+
+A page's request for the microphone or the camera (the convention
+bullet above and the CHANGELOG's Added entry), made for Nautilus,
+where a Twilio call failed with error 31401 because nothing answered
+the request. Made on the branch `fix/media-permission` in a worktree
+and merged to `main` the same day; Nautilus adopts it in the same
+change set.
+
+Verified: `cargo test` (the grants, the question's words, `apply` and
+`dispatch` for a request, an allowed origin, a refusal, a warming tab
+and a tab that is gone, the dialog's result mapping), clippy with
+`-D warnings`, fmt; and in Nautilus's bundle on the Mac with the real
+headset microphone: the sheet on the window with the brand's icon,
+Allow clicked by the owner giving the page a live track, a second
+request from the same origin granted with no dialog, and a refusal
+(scripted through a temporary hook, since removed) giving
+`NotAllowedError` and asking again at the next request.
+
+Not verified: Block by a real click, the camera, the dialog on
+Windows (Yes and No there; never shown), two requests from two tabs
+at once (the second dialog follows the first), a request from a tab
+that is not the active one, Paladin (not built: it reports no such
+requests, and the new `TabHost` method is defaulted). Not done: a
+place to see or revoke what was allowed (quit forgets it), allowing
+for longer than the run, the system's own permission (macOS asks for
+the microphone itself the first time, per app signature).
 
 ## Status and handoff (2026-11-16)
 
