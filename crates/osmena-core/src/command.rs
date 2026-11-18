@@ -1736,7 +1736,25 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             }]
         }
         Command::CloseSidePanel { window } => close_shown_panel(browser, *window),
-        Command::ExtensionCommand { .. } => Vec::new(),
+        Command::ExtensionCommand {
+            window,
+            extension,
+            name,
+        } => {
+            let declared = browser.window(*window).is_some()
+                && browser
+                    .extension(extension)
+                    .is_some_and(|e| e.has_command(name));
+            if declared {
+                vec![EngineAction::ExtensionCommand {
+                    window: *window,
+                    extension: extension.clone(),
+                    name: name.clone(),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
         Command::Quit => quit_guard(browser, None).unwrap_or_else(|| vec![EngineAction::Quit]),
     }
 }
@@ -4283,7 +4301,9 @@ mod tests {
         assert!(dispatch(&mut b, &Command::ToggleFullscreen(WindowId(99))).is_empty());
     }
 
-    fn installed(b: &mut Browser, id: &str, enabled: bool, popup: bool) {
+    /// Install an extension called `id`, with a toolbar action or
+    /// without one.
+    fn installed(b: &mut Browser, id: &str, enabled: bool, action: bool) {
         b.extensions.push(crate::extension::Extension {
             id: id.to_string(),
             name: id.to_uppercase(),
@@ -4291,18 +4311,23 @@ mod tests {
             description: String::new(),
             enabled,
             icon: None,
-            action_title: popup.then(|| "Act".to_string()),
+            action_title: action.then(|| "Act".to_string()),
             side_panel: false,
             commands: Vec::new(),
         });
     }
 
     #[test]
-    fn open_extension_action_needs_a_window_and_an_enabled_extension_with_a_popup() {
+    fn open_extension_action_needs_a_window_and_an_enabled_extension_with_an_action() {
         let (mut b, window, _) = one_window();
         installed(&mut b, "a", true, true);
         installed(&mut b, "off", false, true);
-        installed(&mut b, "nopopup", true, false);
+        installed(&mut b, "noaction", true, false);
+        // An action that opens a side panel instead of a popup is an
+        // action like any other: the model keeps no popup flag, and the
+        // engine decides what the click does.
+        installed(&mut b, "panel", true, true);
+        b.extensions.last_mut().unwrap().side_panel = true;
         let open = |b: &mut Browser, w, id: &str| {
             dispatch(
                 b,
@@ -4319,8 +4344,15 @@ mod tests {
                 extension: "a".to_string()
             }]
         );
+        assert_eq!(
+            open(&mut b, window, "panel"),
+            vec![EngineAction::OpenExtensionAction {
+                window,
+                extension: "panel".to_string()
+            }]
+        );
         assert!(open(&mut b, window, "off").is_empty());
-        assert!(open(&mut b, window, "nopopup").is_empty());
+        assert!(open(&mut b, window, "noaction").is_empty());
         assert!(open(&mut b, window, "missing").is_empty());
         assert!(open(&mut b, WindowId(99), "a").is_empty());
     }
@@ -7761,5 +7793,47 @@ mod tests {
                 assert_eq!(actions.len(), 1, "{request:?}: {actions:?}");
             }
         }
+    }
+
+    #[test]
+    fn an_extension_command_needs_a_window_and_an_enabled_extension_that_declares_it() {
+        // side-panel.AC2.2 at the model level
+        let (mut b, window, _) = one_window();
+        let declare =
+            |b: &mut Browser, id: &str, enabled| {
+                installed(b, id, enabled, false);
+                b.extensions.last_mut().unwrap().commands.push(
+                    crate::extension::ExtensionCommand {
+                        name: "toggle".to_string(),
+                        description: "Toggle the panel".to_string(),
+                        // The chord is the key router's business, not dispatch's.
+                        chord: None,
+                    },
+                );
+            };
+        declare(&mut b, "a", true);
+        declare(&mut b, "off", false);
+        let run = |b: &mut Browser, w, id: &str, name: &str| {
+            dispatch(
+                b,
+                &Command::ExtensionCommand {
+                    window: w,
+                    extension: id.to_string(),
+                    name: name.to_string(),
+                },
+            )
+        };
+        assert_eq!(
+            run(&mut b, window, "a", "toggle"),
+            vec![EngineAction::ExtensionCommand {
+                window,
+                extension: "a".to_string(),
+                name: "toggle".to_string(),
+            }]
+        );
+        assert!(run(&mut b, window, "a", "undeclared").is_empty());
+        assert!(run(&mut b, window, "off", "toggle").is_empty());
+        assert!(run(&mut b, window, "missing", "toggle").is_empty());
+        assert!(run(&mut b, WindowId(99), "a", "toggle").is_empty());
     }
 }
