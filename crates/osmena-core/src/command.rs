@@ -2815,6 +2815,16 @@ fn no_window(window: WindowId) -> String {
     format!("No window with id: {}.", window.0)
 }
 
+/// The first of `tabs` the model does not have, as a refusal. A request
+/// naming several tabs is refused whole when one is unknown, as the
+/// extension API refuses it.
+fn known_tabs(browser: &Browser, tabs: &[TabId]) -> Result<(), String> {
+    match tabs.iter().find(|tab| browser.tab(**tab).is_none()) {
+        Some(tab) => Err(no_tab(*tab)),
+        None => Ok(()),
+    }
+}
+
 /// A new tab at `url` at the end of `window`'s strip, outside any
 /// folder, that does not become active: the engine creates it hidden.
 /// The window must exist.
@@ -2881,6 +2891,20 @@ fn answer_request(
                 let (tab, action) = new_hidden_tab(browser, window, url.clone());
                 Ok((vec![action], ExtensionReply::Tab(tab)))
             }
+        }
+        ExtensionRequest::CloseTabs(tabs) => {
+            known_tabs(browser, tabs)?;
+            remember_closed(browser, tabs);
+            Ok((close_tabs(browser, tabs), ExtensionReply::Done))
+        }
+        ExtensionRequest::ActivateTab(tab) => {
+            known_tabs(browser, &[*tab])?;
+            Ok((activate_tab(browser, *tab), ExtensionReply::Done))
+        }
+        ExtensionRequest::MoveTab { tab, index } => {
+            known_tabs(browser, &[*tab])?;
+            move_tabs(browser, &[*tab], *index);
+            Ok((Vec::new(), ExtensionReply::Done))
         }
         ExtensionRequest::OpenWindow { url } => {
             let url = url.clone().unwrap_or_else(|| browser.new_tab_url());
@@ -7113,5 +7137,144 @@ mod tests {
         );
         assert!(opened.active_tab().blocked.is_some());
         assert_eq!(b.windows.len(), 3);
+    }
+
+    #[test]
+    fn an_extension_closes_tabs_or_none_of_them_when_one_is_unknown() {
+        let (mut b, window, t) = window_with_tabs(4);
+        let before = b.windows.clone();
+        // One unknown id among known ones: nothing closes.
+        assert_eq!(
+            ask(
+                &mut b,
+                1,
+                ExtensionRequest::CloseTabs(vec![t[0], TabId(99), t[1]])
+            ),
+            vec![refused(1, "No tab with id: 99.")]
+        );
+        assert_eq!(b.windows, before);
+        assert!(b.closed_tabs.is_empty());
+        // All known: each closes as the user's close would, and can be
+        // reopened. t[3] is active, so the tab on its left is shown.
+        assert_eq!(
+            ask(&mut b, 2, ExtensionRequest::CloseTabs(vec![t[0], t[3]])),
+            vec![
+                EngineAction::CloseTab(t[0]),
+                EngineAction::CloseTab(t[3]),
+                EngineAction::Show(t[2]),
+                reply(2, ExtensionReply::Done),
+            ]
+        );
+        assert_eq!(order(&b, window), vec![t[1], t[2]]);
+        assert_eq!(b.closed_tabs.len(), 2);
+        // No tabs at all is done.
+        assert_eq!(
+            ask(&mut b, 3, ExtensionRequest::CloseTabs(Vec::new())),
+            vec![reply(3, ExtensionReply::Done)]
+        );
+    }
+
+    #[test]
+    fn an_extension_activates_a_tab_and_a_deferred_one_wakes() {
+        let mut b = browser();
+        restore_session(&mut b, &three_sites_session(1));
+        let w = &b.windows[0];
+        let (window, a, bb, c) = (w.id, w.tabs[0].id, w.tabs[1].id, w.tabs[2].id);
+        assert!(b.tab(a).unwrap().deferred);
+        // A restored tab the engine does not have yet is created now, as
+        // a click on it would.
+        assert_eq!(
+            ask(&mut b, 1, ExtensionRequest::ActivateTab(a)),
+            vec![
+                EngineAction::Hide(bb),
+                EngineAction::CreateTab {
+                    window,
+                    tab: a,
+                    url: url("https://a.example/"),
+                },
+                reply(1, ExtensionReply::Done),
+            ]
+        );
+        assert!(!b.tab(a).unwrap().deferred);
+        assert_eq!(b.window(window).unwrap().active, a);
+        // A live tab is shown; the active one is done with nothing to do.
+        assert_eq!(
+            ask(&mut b, 2, ExtensionRequest::ActivateTab(bb)),
+            vec![
+                EngineAction::Hide(a),
+                EngineAction::Show(bb),
+                reply(2, ExtensionReply::Done),
+            ]
+        );
+        assert_eq!(
+            ask(&mut b, 3, ExtensionRequest::ActivateTab(bb)),
+            vec![reply(3, ExtensionReply::Done)]
+        );
+        // A deferred tab on a site blocked meanwhile wakes on the block
+        // page.
+        b.blocked.add("c.example");
+        assert_eq!(
+            ask(&mut b, 4, ExtensionRequest::ActivateTab(c)),
+            vec![
+                EngineAction::Hide(bb),
+                EngineAction::CreateTab {
+                    window,
+                    tab: c,
+                    url: url("about:blank"),
+                },
+                reply(4, ExtensionReply::Done),
+            ]
+        );
+        assert!(b.tab(c).unwrap().blocked.is_some());
+        assert_eq!(
+            ask(&mut b, 5, ExtensionRequest::ActivateTab(TabId(99))),
+            vec![refused(5, "No tab with id: 99.")]
+        );
+        assert_eq!(b.window(window).unwrap().active, c);
+    }
+
+    #[test]
+    fn an_extension_moves_a_tab_to_an_index_of_its_strip() {
+        let (mut b, window, t) = window_with_tabs(4);
+        let moved = |b: &mut Browser, token, tab, index| {
+            ask(b, token, ExtensionRequest::MoveTab { tab, index })
+        };
+        assert_eq!(
+            moved(&mut b, 1, t[3], 0),
+            vec![reply(1, ExtensionReply::Done)]
+        );
+        assert_eq!(order(&b, window), vec![t[3], t[0], t[1], t[2]]);
+        moved(&mut b, 2, t[3], 2);
+        assert_eq!(order(&b, window), vec![t[0], t[1], t[3], t[2]]);
+        // Past the end is the end.
+        moved(&mut b, 3, t[0], usize::MAX);
+        assert_eq!(order(&b, window), vec![t[1], t[3], t[2], t[0]]);
+        // The active tab and the engine are left alone.
+        assert_eq!(b.window(window).unwrap().active, t[3]);
+        assert_eq!(
+            moved(&mut b, 4, TabId(99), 0),
+            vec![refused(4, "No tab with id: 99.")]
+        );
+        assert_eq!(order(&b, window), vec![t[1], t[3], t[2], t[0]]);
+    }
+
+    /// What an engine's `windows.remove` relies on: closing every tab of
+    /// a window closes the window, as the user's close of its last tab
+    /// does. (The last tab of the last window goes through the quit
+    /// guard instead: it quits, or asks first while downloads are going
+    /// and then closes nothing; the reply is `Done` either way.)
+    #[test]
+    fn an_extension_closing_every_tab_of_a_window_closes_the_window() {
+        let (mut b, first, t) = window_with_tabs(2);
+        ask(&mut b, 1, ExtensionRequest::OpenWindow { url: None });
+        assert_eq!(b.windows.len(), 2);
+        let actions = ask(&mut b, 2, ExtensionRequest::CloseTabs(t.clone()));
+        assert!(b.window(first).is_none());
+        assert_eq!(b.windows.len(), 1);
+        assert!(
+            actions.contains(&EngineAction::CloseWindow(first)),
+            "{actions:?}"
+        );
+        assert_eq!(actions.last(), Some(&reply(2, ExtensionReply::Done)));
     }
 }

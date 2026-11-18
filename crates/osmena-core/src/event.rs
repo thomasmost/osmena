@@ -1508,20 +1508,14 @@ mod tests {
         }
         assert_eq!(b.windows, before);
         assert!(b.closed_tabs.is_empty());
-        // An extension naming it as a tab is told there is none. (The
-        // request is `OpenSidePanel` on the view as a tab: the requests
-        // about tabs are answered only from Task 8 on.)
+        // An extension naming it as a tab is told there is none.
         assert_eq!(
             apply(
                 &mut b,
                 &EngineEvent::ExtensionRequest {
                     token: 1,
                     extension: "ext".to_string(),
-                    request: ExtensionRequest::OpenSidePanel {
-                        window,
-                        tab: Some(view),
-                        page: "panel.html".to_string(),
-                    },
+                    request: ExtensionRequest::ActivateTab(view),
                 },
             ),
             vec![EngineAction::ExtensionReply {
