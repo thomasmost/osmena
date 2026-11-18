@@ -7220,8 +7220,8 @@ mod tests {
             vec![refused(3, "No window with id: 99.")]
         );
         assert_eq!(b.windows, before);
-        // With no window at all there is nothing to land in: Chromium's
-        // words, with no full stop (phase 5's list of error strings).
+        // With no window at all there is nothing to land in: the extension
+        // API's words, which end with no full stop.
         b.windows.clear();
         assert_eq!(
             ask(&mut b, 4, open(None)),
