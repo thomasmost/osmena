@@ -1735,7 +1735,8 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
                 allow: *allow,
             }]
         }
-        Command::CloseSidePanel { .. } | Command::ExtensionCommand { .. } => Vec::new(),
+        Command::CloseSidePanel { window } => close_shown_panel(browser, *window),
+        Command::ExtensionCommand { .. } => Vec::new(),
         Command::Quit => quit_guard(browser, None).unwrap_or_else(|| vec![EngineAction::Quit]),
     }
 }
@@ -2449,7 +2450,14 @@ pub(crate) fn close_tab(browser: &mut Browser, tab: TabId) -> Vec<EngineAction> 
             .window_mut(window_id)
             .expect("window_of_tab returned an existing window");
         let index = w.index_of(tab).expect("tab is in this window");
-        w.tabs.remove(index);
+        let removed = w.tabs.remove(index);
+        // The tab's own side panel goes with it.
+        if let Some(panel) = removed.panel {
+            actions.push(EngineAction::CloseView {
+                window: window_id,
+                view: panel.view,
+            });
+        }
         w.prune_folders();
         w.selected.retain(|t| *t != tab);
         if w.tabs.is_empty() {
@@ -2473,6 +2481,14 @@ pub(crate) fn close_tab(browser: &mut Browser, tab: TabId) -> Vec<EngineAction> 
             actions.push(show_tab(w, next, mark));
         }
         None => {
+            // The window's side panel goes with the window.
+            let panel = browser.window_mut(window_id).and_then(|w| w.panel.take());
+            if let Some(panel) = panel {
+                actions.push(EngineAction::CloseView {
+                    window: window_id,
+                    view: panel.view,
+                });
+            }
             browser.windows.retain(|w| w.id != window_id);
             actions.push(EngineAction::CloseWindow(window_id));
             if browser.windows.is_empty() {
@@ -2697,6 +2713,11 @@ fn close_window(browser: &mut Browser, window: WindowId) -> Vec<EngineAction> {
         .filter(|t| !t.deferred || t.warming)
         .map(|t| EngineAction::CloseTab(t.id))
         .collect();
+    // Its side panels go with it: the tabs' in strip order, then its own.
+    actions.extend(removed.panels().map(|panel| EngineAction::CloseView {
+        window,
+        view: panel.view,
+    }));
     actions.push(EngineAction::CloseWindow(window));
     if browser.windows.is_empty() {
         actions.push(EngineAction::Quit);
@@ -2832,6 +2853,26 @@ fn answer_request(
         // The requests about tabs, folders and windows are not answered
         // yet.
         _ => Err("Not supported.".to_string()),
+    }
+}
+
+/// Close the side panel `window` shows: the active tab's, else the
+/// window's own. With both open, the window's shows next.
+fn close_shown_panel(browser: &mut Browser, window: WindowId) -> Vec<EngineAction> {
+    let Some(w) = browser.window_mut(window) else {
+        return Vec::new();
+    };
+    let active = w.active;
+    let panel = match w.tab_mut(active).and_then(|t| t.panel.take()) {
+        Some(panel) => Some(panel),
+        None => w.panel.take(),
+    };
+    match panel {
+        Some(panel) => vec![EngineAction::CloseView {
+            window,
+            view: panel.view,
+        }],
+        None => Vec::new(),
     }
 }
 
@@ -6688,5 +6729,167 @@ mod tests {
             ]
         );
         assert_eq!(b.window(window).unwrap().shown_panel(), None);
+    }
+
+    #[test]
+    fn closing_a_tab_closes_its_panel() {
+        let (mut b, window, t) = window_with_tabs(3);
+        let on_first = open_panel(&mut b, window, Some(t[0]), "first.html");
+        let on_last = open_panel(&mut b, window, Some(t[2]), "last.html");
+        // An inactive tab: its engine tab, then its panel's view.
+        assert_eq!(
+            dispatch(&mut b, &Command::CloseTab(t[0])),
+            vec![
+                EngineAction::CloseTab(t[0]),
+                EngineAction::CloseView {
+                    window,
+                    view: on_first
+                },
+            ]
+        );
+        // The active tab: the same, then the tab that takes its place.
+        assert_eq!(
+            dispatch(&mut b, &Command::CloseTab(t[2])),
+            vec![
+                EngineAction::CloseTab(t[2]),
+                EngineAction::CloseView {
+                    window,
+                    view: on_last
+                },
+                EngineAction::Show(t[1]),
+            ]
+        );
+        let w = b.window(window).unwrap();
+        assert!(!w.has_panel_view(on_first) && !w.has_panel_view(on_last));
+        assert_eq!(w.shown_panel(), None);
+    }
+
+    #[test]
+    fn a_tab_the_page_closed_or_that_moved_away_takes_its_panel_too() {
+        let (mut b, window, t) = window_with_tabs(3);
+        let on_first = open_panel(&mut b, window, Some(t[0]), "first.html");
+        let on_second = open_panel(&mut b, window, Some(t[1]), "second.html");
+        // The page closed its own tab (`window.close()`).
+        assert_eq!(
+            crate::event::apply(&mut b, &crate::event::EngineEvent::TabClosed(t[0])),
+            vec![
+                EngineAction::CloseTab(t[0]),
+                EngineAction::CloseView {
+                    window,
+                    view: on_first
+                },
+            ]
+        );
+        // A tab moved to a new window is recreated there and closed
+        // here: its panel does not follow.
+        let actions = dispatch(&mut b, &Command::MoveTabsToNewWindow(vec![t[1]]));
+        assert!(
+            actions.contains(&EngineAction::CloseView {
+                window,
+                view: on_second
+            }),
+            "{actions:?}"
+        );
+        assert!(b.windows.iter().all(|w| w.panels().next().is_none()));
+    }
+
+    #[test]
+    fn closing_the_last_tab_closes_both_panels_before_the_window() {
+        let (mut b, window, tab) = one_window();
+        let for_window = open_panel(&mut b, window, None, "window.html");
+        let for_tab = open_panel(&mut b, window, Some(tab), "tab.html");
+        assert_eq!(
+            dispatch(&mut b, &Command::CloseTab(tab)),
+            vec![
+                EngineAction::CloseTab(tab),
+                EngineAction::CloseView {
+                    window,
+                    view: for_tab
+                },
+                EngineAction::CloseView {
+                    window,
+                    view: for_window
+                },
+                EngineAction::CloseWindow(window),
+                EngineAction::Quit,
+            ]
+        );
+        assert!(b.windows.is_empty());
+    }
+
+    #[test]
+    fn closing_a_window_closes_every_panel_in_it() {
+        let (mut b, window, t) = window_with_tabs(2);
+        let for_window = open_panel(&mut b, window, None, "window.html");
+        let on_second = open_panel(&mut b, window, Some(t[1]), "second.html");
+        let on_first = open_panel(&mut b, window, Some(t[0]), "first.html");
+        assert_eq!(
+            dispatch(&mut b, &Command::CloseWindow(window)),
+            vec![
+                EngineAction::CloseTab(t[0]),
+                EngineAction::CloseTab(t[1]),
+                // The tabs' panels in strip order, then the window's.
+                EngineAction::CloseView {
+                    window,
+                    view: on_first
+                },
+                EngineAction::CloseView {
+                    window,
+                    view: on_second
+                },
+                EngineAction::CloseView {
+                    window,
+                    view: for_window
+                },
+                EngineAction::CloseWindow(window),
+                EngineAction::Quit,
+            ]
+        );
+    }
+
+    #[test]
+    fn the_close_command_closes_the_shown_panel_the_tabs_before_the_windows() {
+        // side-panel.AC1.5
+        let (mut b, window, t) = window_with_tabs(2);
+        let for_window = open_panel(&mut b, window, None, "window.html");
+        let for_tab = open_panel(&mut b, window, Some(t[1]), "tab.html");
+        let close = Command::CloseSidePanel { window };
+        // t[1] is active: its own panel is the one shown, and goes.
+        assert_eq!(
+            dispatch(&mut b, &close),
+            vec![EngineAction::CloseView {
+                window,
+                view: for_tab
+            }]
+        );
+        assert!(b.tab(t[1]).unwrap().panel.is_none());
+        // The window's shows now, and goes next.
+        assert_eq!(
+            b.window(window).unwrap().shown_panel().map(|p| p.view),
+            Some(for_window)
+        );
+        assert_eq!(
+            dispatch(&mut b, &close),
+            vec![EngineAction::CloseView {
+                window,
+                view: for_window
+            }]
+        );
+        assert_eq!(b.window(window).unwrap().shown_panel(), None);
+        // Nothing shown, or no such window: nothing.
+        assert!(dispatch(&mut b, &close).is_empty());
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::CloseSidePanel {
+                    window: WindowId(99)
+                }
+            )
+            .is_empty()
+        );
+        // A panel of a tab that is not active is not the shown one.
+        let hidden = open_panel(&mut b, window, Some(t[0]), "hidden.html");
+        assert!(dispatch(&mut b, &close).is_empty());
+        assert!(b.window(window).unwrap().has_panel_view(hidden));
     }
 }
