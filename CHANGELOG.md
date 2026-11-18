@@ -6,6 +6,42 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- The model knows extension side panels, extension keyboard commands
+  and what an extension asks of the browser. Nothing is drawn or
+  forwarded yet: this is `osmena-core`, and the shell performs the new
+  actions as no-ops. For an engine crate: `Extension` gains
+  `side_panel: bool` and `commands: Vec<ExtensionCommand>` (a name, a
+  description and the `KeyChord` the extension suggests), and
+  `action_title` is now for any toolbar action, with or without a
+  popup; `ExtensionSupport` gains `side_panels: bool`. Both are struct
+  literals an engine writes, so an engine with extensions adds the
+  fields (`false` and an empty list keep today's behaviour). A side
+  panel is a `SidePanel` (the extension, its page, the engine view
+  that renders it) on `Window::panel` or `Tab::panel`;
+  `Window::shown_panel` is the active tab's, else the window's, and a
+  panel's view has an id of the tabs' kind that is in no strip
+  (`Window::has_panel_view`, `Browser::window_of_panel_view`). An
+  engine asks on an extension's behalf with
+  `EngineEvent::ExtensionRequest { token, extension, request }`, where
+  `ExtensionRequest` is `OpenTab`, `CloseTabs`, `ActivateTab`,
+  `MoveTab`, `GroupTabs`, `UngroupTabs`, `UpdateFolder`, `OpenWindow`,
+  `OpenSidePanel` or `CloseSidePanel`; `apply` answers each with the
+  ordinary actions and then exactly one `EngineAction::ExtensionReply`
+  carrying the token (`Done`, `Tab`, `Folder`, `Window`, or `Refused`
+  with the extension API's own sentence, such as "No tab with id: 7.",
+  when a tab, folder or window is not in the model, in which case
+  nothing changed). A new tab or window passes the blocked-sites guard.
+  A group made without a folder is a new folder, expanded, named
+  "<Extension name> Session", and an empty title puts that name back.
+  The model picks a panel view's id and asks for it with
+  `EngineAction::CreateView`; `EngineAction::CloseView` follows when
+  the panel is replaced or closed, or its tab or window closes, and a
+  `TabClosed` or `TabCrashed` naming the view removes the panel with
+  nothing asked. `Command::CloseSidePanel` closes the panel a window
+  shows; `Command::ExtensionCommand` becomes
+  `EngineAction::ExtensionCommand` for an enabled extension that
+  declares the command. `Browser::focused` is the window a request
+  that names none lands in.
 - A page that asks for the microphone or the camera (`getUserMedia`)
   is answered by the user. An engine reports the request as
   `EngineEvent::MediaAccessRequested` (a `MediaRequest`: an id of the
