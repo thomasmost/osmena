@@ -11,6 +11,7 @@ use osmena_chrome::chrome::{self, describe_chord, location_input_to_url};
 use osmena_chrome::input::{self, KeyRoute};
 use osmena_chrome::keyboard_types::{Code, Modifiers};
 use osmena_chrome::{icon, keyutils, theme};
+use osmena_core::extension::{ExtensionCommand, ShortcutVerdict, shortcut_verdict};
 use osmena_core::{
     BlockedSites, BookmarksFile, Brand, Command, CommandKind, DefaultBrowser, Extension,
     ExtensionSource, ExtensionSupport, KeyChord, Keymap, Platform, Settings, UpdateStatus,
@@ -597,7 +598,7 @@ fn draw_settings(
                     ui.add_space(20.0);
                     ui.heading("Extensions");
                     ui.add_space(8.0);
-                    draw_extensions(ui, settings, section, &mut activity);
+                    draw_extensions(ui, settings, section, keymap, &mut activity);
                 }
                 ui.add_space(20.0);
                 ui.heading("Keyboard shortcuts");
@@ -1013,10 +1014,16 @@ fn draw_updates(
 /// The installed extensions, each with its switches, and the ways to add
 /// one. Enabling, removing, and installing go to the engine as commands;
 /// pinning is a setting.
+/// The installed extensions, each with its switches and its shortcuts,
+/// and the ways to add one. Enabling, removing, and installing go to
+/// the engine as commands; pinning is a setting. A shortcut the keymap
+/// holds is marked with the action that has its keys (`shortcut_row`):
+/// the keymap wins, and the table below is where to free the keys.
 fn draw_extensions(
     ui: &mut egui::Ui,
     settings: &mut Settings,
     section: &mut ExtensionsSection<'_>,
+    keymap: &Keymap,
     activity: &mut FormActivity,
 ) {
     let extensions = section.extensions;
@@ -1046,6 +1053,19 @@ fn draw_extensions(
                     };
                     ui.add(egui::Label::new(egui::RichText::new(detail).small().weak()).truncate())
                         .on_hover_text(&extension.description);
+                    for command in &extension.commands {
+                        let (text, taken) = shortcut_row(keymap, command);
+                        ui.add(egui::Label::new(egui::RichText::new(&text).small()).truncate())
+                            .on_hover_text(&text);
+                        if let Some(taken) = taken {
+                            let color = ui.visuals().warn_fg_color;
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(&taken).small().color(color))
+                                    .truncate(),
+                            )
+                            .on_hover_text(&taken);
+                        }
+                    }
                 });
                 let mut enabled = extension.enabled;
                 if ui.checkbox(&mut enabled, "Enabled").changed() {
@@ -1122,6 +1142,39 @@ fn set_pinned(settings: &mut Settings, extension: &str, pinned: bool) {
         list.push(extension.to_string());
     } else if !pinned && was {
         list.retain(|p| p != extension);
+    }
+}
+
+/// One shortcut under an extension in the Extensions section: what it
+/// does with its keys, and, when the keymap holds those keys, the
+/// action that has them. A command without a description is named by
+/// what its reserved name means, or by its name.
+fn shortcut_row(keymap: &Keymap, command: &ExtensionCommand) -> (String, Option<String>) {
+    let described = command.description.trim();
+    let what = if !described.is_empty() {
+        described
+    } else {
+        match command.name.as_str() {
+            "_execute_action" | "_execute_browser_action" | "_execute_page_action" => {
+                "Activate the extension"
+            }
+            "_execute_side_panel" => "Open the side panel",
+            name => name,
+        }
+    };
+    match shortcut_verdict(keymap, command) {
+        ShortcutVerdict::Unassigned => (format!("{what}: no shortcut"), None),
+        ShortcutVerdict::Free(chord) => (format!("{what}: {}", describe_chord(chord)), None),
+        ShortcutVerdict::Overridden { chord, by } => {
+            let keys = describe_chord(chord);
+            (
+                format!("{what}: {keys}"),
+                Some(format!(
+                    "Not active: {keys} is the shortcut for {}",
+                    by.label()
+                )),
+            )
+        }
     }
 }
 
@@ -1587,5 +1640,73 @@ mod tests {
         let bare = KeyChord::new(Modifiers::empty(), Code::KeyA);
         let note = binding_notice(bare, None).unwrap();
         assert!(note.contains("no modifier"), "{note}");
+    }
+
+    fn extension_command(
+        name: &str,
+        description: &str,
+        chord: Option<KeyChord>,
+    ) -> ExtensionCommand {
+        ExtensionCommand {
+            name: name.to_string(),
+            description: description.to_string(),
+            chord,
+        }
+    }
+
+    #[test]
+    fn a_shortcut_row_names_the_keys_and_who_took_them() {
+        let keymap = Keymap::defaults(Platform::Windows);
+        let ctrl_e = KeyChord::new(Modifiers::CONTROL, Code::KeyE);
+        let ctrl_t = KeyChord::new(Modifiers::CONTROL, Code::KeyT);
+        // Free: the description and the keys, nothing to add.
+        assert_eq!(
+            shortcut_row(
+                &keymap,
+                &extension_command("toggle", "Toggle the panel", Some(ctrl_e))
+            ),
+            ("Toggle the panel: Ctrl+E".to_string(), None)
+        );
+        // Overridden: the same line, and the action that has the keys.
+        assert_eq!(
+            shortcut_row(
+                &keymap,
+                &extension_command("toggle", "Toggle the panel", Some(ctrl_t))
+            ),
+            (
+                "Toggle the panel: Ctrl+T".to_string(),
+                Some("Not active: Ctrl+T is the shortcut for New tab".to_string())
+            )
+        );
+        // No key suggested.
+        assert_eq!(
+            shortcut_row(
+                &keymap,
+                &extension_command("toggle", "Toggle the panel", None)
+            ),
+            ("Toggle the panel: no shortcut".to_string(), None)
+        );
+        // No description: the reserved names read as what they do, any
+        // other name stands for itself.
+        assert_eq!(
+            shortcut_row(
+                &keymap,
+                &extension_command("_execute_action", " ", Some(ctrl_e))
+            )
+            .0,
+            "Activate the extension: Ctrl+E"
+        );
+        assert_eq!(
+            shortcut_row(
+                &keymap,
+                &extension_command("_execute_side_panel", "", Some(ctrl_e))
+            )
+            .0,
+            "Open the side panel: Ctrl+E"
+        );
+        assert_eq!(
+            shortcut_row(&keymap, &extension_command("save-page", "", None)).0,
+            "save-page: no shortcut"
+        );
     }
 }
