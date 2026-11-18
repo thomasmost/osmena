@@ -4782,8 +4782,8 @@ pub fn draw_blocked_page(ui: &mut Ui, rect: Rect, color: ChromeColor, page: &Blo
 
 /// Turn address-bar text into a URL. Bare domains get `https://`. `localhost`,
 /// bare IPv4 addresses, and `host:port` get `http://`. `javascript:` URLs
-/// are refused. Returns `None` for text that is not a URL (Phase 1 has no
-/// search engine).
+/// are refused. Returns `None` for text that is not a URL (text that is not
+/// a URL is a search, which the caller resolves against the search engine).
 pub fn location_input_to_url(input: &str) -> Option<Url> {
     let text = input.trim();
     if text.is_empty() {

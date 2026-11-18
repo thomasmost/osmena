@@ -1407,11 +1407,34 @@ impl<E: Engine> App<E> {
                     self.perform_all(actions, event_loop);
                 }
             }
-            // The side panel's and the extensions' actions: forwarded to the
-            // engine in Phase 3 of the side panel plan; until then nothing.
-            EngineAction::ExtensionCommand { .. }
-            | EngineAction::ExtensionReply { .. }
-            | EngineAction::CreateView { .. } => {}
+            EngineAction::ExtensionCommand {
+                window,
+                extension,
+                name,
+            } => {
+                // An extension's shortcut is delivered with the window's
+                // active tab, like a click on its action.
+                let tab = self.browser.window(window).map(|w| w.active);
+                if let (Some(tab), Some(w)) = (tab, self.window_for_core_id(window)) {
+                    w.host_mut().extension_command(tab, &extension, &name);
+                }
+            }
+            EngineAction::ExtensionReply { token, reply } => {
+                engine.extension_reply(token, reply);
+            }
+            EngineAction::CreateView {
+                window,
+                view,
+                extension,
+                page,
+            } => {
+                // The view starts hidden; the window shows it in the
+                // first frame that draws its panel.
+                if let Some(w) = self.window_for_core_id(window) {
+                    w.host_mut().create_view(view, &extension, &page);
+                    w.request_redraw();
+                }
+            }
             EngineAction::Quit => {
                 self.save_session_for_exit(None);
                 self.exiting = true;
@@ -1467,6 +1490,9 @@ impl<E: Engine> App<E> {
                     }
                 }
                 EngineEvent::ClipboardImage(image) => clipboard::set_image(image),
+                // An extension changed the strip, a folder or a panel, in
+                // whichever window: all of them show it.
+                EngineEvent::ExtensionRequest { .. } => self.redraw_all(),
                 _ => {}
             }
             let actions = apply(&mut self.browser, &event);
@@ -1477,6 +1503,7 @@ impl<E: Engine> App<E> {
                     | EngineEvent::TabClosed(_)
                     | EngineEvent::NavigationBlocked { .. }
                     | EngineEvent::NewTabRequested { .. }
+                    | EngineEvent::ExtensionRequest { .. }
             ) {
                 self.session_changed();
             }
@@ -1754,12 +1781,13 @@ fn tab_of(event: &EngineEvent) -> Option<TabId> {
         | EngineEvent::NewWindowRequested { opener, .. } => Some(*opener),
         EngineEvent::ContextMenuRequested { tab, .. } => Some(*tab),
         // The cursor and the clipboard are handled directly; no redraw.
+        // An extension's request names no tab; `pump` redraws for it.
         EngineEvent::CursorChanged { .. }
         | EngineEvent::ClipboardImage(_)
         | EngineEvent::EngineError(_)
         | EngineEvent::ExtensionsChanged(_)
-        | EngineEvent::ExtensionRequest { .. }
-        | EngineEvent::DownloadUpdated { .. } => None,
+        | EngineEvent::DownloadUpdated { .. }
+        | EngineEvent::ExtensionRequest { .. } => None,
     }
 }
 

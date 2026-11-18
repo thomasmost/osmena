@@ -28,7 +28,7 @@ use crate::update::{AvailableUpdate, UpdateStatus};
 use crate::zoom::{ZOOM_MAX, ZOOM_MIN, next_step};
 
 /// Every user action in the browser is one of these. The chrome, the keymap,
-/// and (in Phase 2) remappable hotkeys all produce `Command`s; nothing else
+/// and remappable hotkeys all produce `Command`s; nothing else
 /// mutates the model from the UI side.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
