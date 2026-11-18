@@ -83,13 +83,19 @@ pub struct ExtensionSupport {
     /// The id of the extension a page of the store describes, when `url`
     /// is such a page, so the chrome can offer to install it.
     pub store_item_id: fn(&Url) -> Option<String>,
+    /// Whether the engine shows an extension's side panel: it answers
+    /// `EngineAction::CreateView` with a view the window paints beside
+    /// the page. The chrome draws no panel otherwise.
+    pub side_panels: bool,
 }
 
-/// Two supports are the same store; the function is not compared
-/// (function pointers compare unreliably).
+/// Two supports are the same store with the same abilities; the
+/// function is not compared (function pointers compare unreliably).
 impl PartialEq for ExtensionSupport {
     fn eq(&self, other: &ExtensionSupport) -> bool {
-        self.store_name == other.store_name && self.store_url == other.store_url
+        self.store_name == other.store_name
+            && self.store_url == other.store_url
+            && self.side_panels == other.side_panels
     }
 }
 
@@ -203,4 +209,37 @@ pub(crate) mod test_support {
         extensions: None,
         page_tools: PageTools::ALL,
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn no_item(_: &Url) -> Option<String> {
+        None
+    }
+
+    fn some_item(_: &Url) -> Option<String> {
+        Some("x".to_string())
+    }
+
+    #[test]
+    fn supports_differ_by_their_side_panels_and_not_by_the_function() {
+        let plain = ExtensionSupport {
+            store_name: "Test Store",
+            store_url: "https://store.example/",
+            store_item_id: no_item,
+            side_panels: false,
+        };
+        let other_function = ExtensionSupport {
+            store_item_id: some_item,
+            ..plain
+        };
+        let with_panels = ExtensionSupport {
+            side_panels: true,
+            ..plain
+        };
+        assert_eq!(plain, other_function);
+        assert_ne!(plain, with_panels);
+    }
 }

@@ -1370,6 +1370,7 @@ mod tests {
         store_name: "Test Store",
         store_url: "https://store.example/",
         store_item_id: store_id,
+        side_panels: false,
     };
 
     fn extension(id: &str, name: &str, enabled: bool, popup: bool) -> Extension {
@@ -1381,6 +1382,8 @@ mod tests {
             enabled,
             icon: None,
             action_title: popup.then(|| "Act".to_string()),
+            side_panel: false,
+            commands: Vec::new(),
         }
     }
 

@@ -969,6 +969,8 @@ mod tests {
             enabled: true,
             icon: None,
             action_title: None,
+            side_panel: false,
+            commands: Vec::new(),
         };
         assert!(apply(&mut b, &EngineEvent::ExtensionsChanged(vec![ext.clone()])).is_empty());
         assert_eq!(b.extensions, vec![ext]);

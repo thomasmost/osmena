@@ -3901,6 +3901,8 @@ mod tests {
             enabled,
             icon: None,
             action_title: popup.then(|| "Act".to_string()),
+            side_panel: false,
+            commands: Vec::new(),
         });
     }
 

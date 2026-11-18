@@ -10,8 +10,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use url::Url;
 
-use crate::model::Favicon;
+use crate::keymap::KeyChord;
+use crate::model::{Favicon, FolderId, TabId, WindowId};
 use crate::settings::write_atomically;
 
 /// One installed extension.
@@ -27,10 +29,14 @@ pub struct Extension {
     pub enabled: bool,
     /// Its icon, when it has one the engine could decode.
     pub icon: Option<Favicon>,
-    /// The title of its toolbar action, when it has one with a popup the
-    /// browser can open. An action without a popup cannot be triggered
-    /// from the toolbar, so it reads as `None`.
+    /// The title of its toolbar action. Set for any toolbar action, with
+    /// or without a popup: the engine opens the popup when there is one
+    /// and tells the extension of the click otherwise.
     pub action_title: Option<String>,
+    /// Whether it declares a side panel.
+    pub side_panel: bool,
+    /// The keyboard commands it declares, in its own order.
+    pub commands: Vec<ExtensionCommand>,
 }
 
 impl Extension {
@@ -38,6 +44,107 @@ impl Extension {
     pub fn has_action(&self) -> bool {
         self.enabled && self.action_title.is_some()
     }
+
+    /// Whether the extension is enabled and declares a command called
+    /// `name`.
+    pub fn has_command(&self, name: &str) -> bool {
+        self.enabled && self.commands.iter().any(|c| c.name == name)
+    }
+}
+
+/// A keyboard command an extension declares.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionCommand {
+    /// The extension's own name for it, which it is told when the
+    /// command runs.
+    pub name: String,
+    pub description: String,
+    /// The chord the extension suggests for this platform, if any. A
+    /// chord the keymap holds is the keymap's.
+    pub chord: Option<KeyChord>,
+}
+
+/// A side panel an extension opened: a page of the extension docked
+/// beside the tab's page. `view` is the engine view that renders it, an
+/// id of the tabs' kind that is in no strip.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidePanel {
+    /// The id of the extension it belongs to.
+    pub extension: String,
+    /// The engine's address for the page it shows.
+    pub page: String,
+    pub view: TabId,
+}
+
+/// Something an extension asks of the browser. It arrives as
+/// [`EngineEvent::ExtensionRequest`] and is answered with one
+/// [`ExtensionReply`].
+///
+/// [`EngineEvent::ExtensionRequest`]: crate::EngineEvent::ExtensionRequest
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtensionRequest {
+    /// Open `url` in a new tab at the end of `window`'s strip (`None`:
+    /// the focused window, else the first), `active` or behind the
+    /// active tab. Answered with `Tab`.
+    OpenTab {
+        window: Option<WindowId>,
+        url: Url,
+        active: bool,
+    },
+    CloseTabs(Vec<TabId>),
+    ActivateTab(TabId),
+    /// Put `tab` at `index` of its window's strip (past the end: last).
+    MoveTab {
+        tab: TabId,
+        index: usize,
+    },
+    /// Put the tabs in `folder`, or in a new one (`None`), which starts
+    /// expanded and named after the extension. Answered with `Folder`.
+    GroupTabs {
+        tabs: Vec<TabId>,
+        folder: Option<FolderId>,
+    },
+    /// Take the tabs out of their folders.
+    UngroupTabs(Vec<TabId>),
+    /// Rename `folder` (an empty name is the name a new one would get),
+    /// expand or collapse it, or both.
+    UpdateFolder {
+        folder: FolderId,
+        name: Option<String>,
+        expanded: Option<bool>,
+    },
+    /// Open a window on `url`, or on the new-window page. Answered with
+    /// `Window`.
+    OpenWindow {
+        url: Option<Url>,
+    },
+    /// Show the extension's `page` in a side panel: `tab`'s own, or
+    /// `window`'s when `tab` is `None`.
+    OpenSidePanel {
+        window: WindowId,
+        tab: Option<TabId>,
+        page: String,
+    },
+    /// Close the extension's side panel of `tab`, or of `window`.
+    CloseSidePanel {
+        window: WindowId,
+        tab: Option<TabId>,
+    },
+}
+
+/// The answer to an [`ExtensionRequest`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtensionReply {
+    Done,
+    /// The tab that was opened.
+    Tab(TabId),
+    /// The folder the tabs are in now.
+    Folder(FolderId),
+    /// The window that was opened.
+    Window(WindowId),
+    /// Nothing was changed, and why, in the words the extension's own
+    /// API uses for the case ("No tab with id: 7.").
+    Refused(String),
 }
 
 /// Where an extension to install comes from.
@@ -151,7 +258,30 @@ mod tests {
             enabled: true,
             icon: None,
             action_title: None,
+            side_panel: false,
+            commands: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_command_counts_only_while_its_extension_is_enabled_and_declares_it() {
+        let mut e = extension("aaaa", "Notes");
+        assert!(!e.has_command("open"));
+        e.commands.push(ExtensionCommand {
+            name: "open".to_string(),
+            description: "Open the notes".to_string(),
+            chord: "Ctrl+KeyE".parse().ok(),
+        });
+        assert!(e.commands[0].chord.is_some());
+        assert!(e.has_command("open"));
+        assert!(!e.has_command("close"));
+        e.enabled = false;
+        assert!(!e.has_command("open"));
+        // An action is one with or without a popup: the title is enough.
+        e.enabled = true;
+        assert!(!e.has_action());
+        e.action_title = Some("Notes".to_string());
+        assert!(e.has_action());
     }
 
     #[test]

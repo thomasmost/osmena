@@ -642,6 +642,8 @@ mod tests {
             enabled,
             icon: None,
             action_title: Some("Act".to_string()),
+            side_panel: false,
+            commands: Vec::new(),
         };
         b.extensions = vec![ext("a", true), ext("b", false), ext("c", true)];
         b.settings.pinned_extensions = vec!["c".into(), "zz".into(), "b".into(), "a".into()];

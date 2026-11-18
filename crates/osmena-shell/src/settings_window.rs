@@ -1509,6 +1509,7 @@ mod tests {
         store_name: "Test Store",
         store_url: "https://store.example/",
         store_item_id: store_id,
+        side_panels: false,
     };
 
     #[test]
