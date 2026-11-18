@@ -12,12 +12,10 @@ All notable changes to the osmena crates. The crates version together.
   actions as no-ops. For an engine crate: `Extension` gains
   `side_panel: bool` and `commands: Vec<ExtensionCommand>` (a name, a
   description and the `KeyChord` the extension suggests), and
-  `action_title` is now for any toolbar action, with or without a
-  popup; `ExtensionSupport` gains `side_panels: bool`. Both are struct
-  literals an engine writes, so an engine with extensions adds the
-  fields (`false` and an empty list keep today's behaviour). A side
-  panel is a `SidePanel` (the extension, its page, the engine view
-  that renders it) on `Window::panel` or `Tab::panel`;
+  `ExtensionSupport` gains `side_panels: bool` (`false` keeps today's
+  behaviour; the struct literals are under Changed). A side panel is a
+  `SidePanel` (the extension, its page, the engine view that renders
+  it) on `Window::panel` or `Tab::panel`;
   `Window::shown_panel` is the active tab's, else the window's, and a
   panel's view has an id of the tabs' kind that is in no strip
   (`Window::has_panel_view`, `Browser::window_of_panel_view`). An
@@ -40,8 +38,11 @@ All notable changes to the osmena crates. The crates version together.
   nothing asked. `Command::CloseSidePanel` closes the panel a window
   shows; `Command::ExtensionCommand` becomes
   `EngineAction::ExtensionCommand` for an enabled extension that
-  declares the command. `Browser::focused` is the window a request
-  that names none lands in.
+  declares the command (`Extension::has_command` says whether it does).
+  `Browser::focused_window` is the window a request that names none
+  lands in: `Browser::focused` while that window exists, else the first
+  window. Nothing sets `Browser::focused` yet, so until the shell does,
+  such a request lands in the first window.
 - A page that asks for the microphone or the camera (`getUserMedia`)
   is answered by the user. An engine reports the request as
   `EngineEvent::MediaAccessRequested` (a `MediaRequest`: an id of the
@@ -78,6 +79,12 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- `Extension`'s `action_title` is now set for any toolbar action, with
+  or without a popup; before, an action without a popup read as `None`.
+  `Extension` and `ExtensionSupport` have new fields (`side_panel` and
+  `commands`, and `side_panels`), so an engine's struct literals must
+  name them (`false` and an empty list keep today's behaviour).
+  `ExtensionSupport`'s `PartialEq` now compares `side_panels` too.
 - The chrome's look, after Thorium with Zen's softness: the toolbar's
   Back, Forward, Reload and Stop are painted glyphs (an arrow, an arc
   with an arrowhead, a cross) in round 28-pt buttons that fill only
