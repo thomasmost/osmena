@@ -14,7 +14,7 @@ use osmena_core::{
     Profile, Session, TabId, UpdateStatus, WindowGeometry, WindowId, apply, bookmarks_html,
     dispatch,
 };
-use osmena_engine::{Engine, TabHost, Waker};
+use osmena_engine::{Engine, StripSnapshot, TabHost, Waker};
 use url::Url;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
@@ -125,6 +125,10 @@ pub struct App<E: Engine> {
     /// The application's menu bar (macOS), rebuilt from the model after
     /// every event when its entries change.
     menu_bar: native_menu::MenuBar,
+    /// The strip as the engine was last told it (`Engine::strip_changed`):
+    /// the next is sent only when it differs. `None` until the first, and
+    /// always for an engine that runs no extensions.
+    last_strip: Option<StripSnapshot>,
     /// The user deleted the profile this browser runs: its directory
     /// goes once the engine has let go of it, on the way out.
     delete_on_exit: Option<Profile>,
@@ -249,6 +253,7 @@ impl<E: Engine> App<E> {
             window_failed: false,
             history_dirty: None,
             menu_bar: native_menu::MenuBar::default(),
+            last_strip: None,
             delete_on_exit,
             updater,
             update_check_due: None,
@@ -804,6 +809,37 @@ impl<E: Engine> App<E> {
             updates,
         });
         self.menu_bar.sync(entries);
+    }
+
+    /// Tell the engine the strip, if it differs from the one it has: the
+    /// tabs, folders, shown panel and focus of every window. Called once
+    /// the windows first open and then before every wait, by which time
+    /// the commands and engine events of this turn have been applied, so
+    /// a reply to an extension's request always precedes the strip that
+    /// shows its effect. Only an engine that runs extensions
+    /// (`EngineInfo::extensions` is `Some`) is told, whether or not it
+    /// has side panels: its extensions ask about tabs and windows either
+    /// way.
+    ///
+    /// Building the snapshot clones each tab's address and title, a few
+    /// microseconds for a hundred tabs, and no engine without extensions
+    /// pays it.
+    fn sync_strip(&mut self) {
+        if self.engine_info.extensions.is_none() {
+            return;
+        }
+        let Some(engine) = self.engine.as_ref() else {
+            return;
+        };
+        // The focused window is the model's (`Browser::focused`, set in
+        // `window_event`): the same one a request that names no window
+        // lands in.
+        let snapshot = StripSnapshot::of(&self.browser, self.browser.focused);
+        if self.last_strip.as_ref() == Some(&snapshot) {
+            return;
+        }
+        snapshot.lend(|windows| engine.strip_changed(windows));
+        self.last_strip = Some(snapshot);
     }
 
     /// Run the commands of the menu bar items picked since the last
@@ -1850,6 +1886,9 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
             if !urls.is_empty() {
                 self.open_urls(urls, event_loop);
             }
+            // The first windows are open: the engine learns the strip
+            // before any extension can ask about it.
+            self.sync_strip();
             self.schedule_update_check(update::FIRST_CHECK_DELAY);
         }
     }
@@ -1907,6 +1946,19 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
         } else if self.windows.contains_key(&window_id) {
             if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_)) {
                 self.session_changed();
+            }
+            if let WindowEvent::Focused(focused) = &event {
+                // The model's focused window: where an extension's
+                // request that names no window lands, and the window
+                // the strip flags. A window that loses the focus to
+                // something that is no browser window (the settings
+                // window, another application) leaves none focused.
+                let id = self.windows[&window_id].core_id();
+                if *focused {
+                    self.browser.focused = Some(id);
+                } else if self.browser.focused == Some(id) {
+                    self.browser.focused = None;
+                }
             }
             if matches!(event, WindowEvent::Focused(true)) {
                 // Another browser may have made or deleted a profile, or
@@ -1996,6 +2048,7 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
         if cfg!(target_os = "macos") {
             self.sync_menu_bar();
         }
+        self.sync_strip();
         let mut next = None;
         // The history is written a moment after it last changed.
         if let Some(since) = self.history_dirty {
