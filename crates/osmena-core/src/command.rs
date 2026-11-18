@@ -2860,6 +2860,26 @@ fn new_hidden_tab(browser: &mut Browser, window: WindowId, url: Url) -> (TabId, 
     (tab, action)
 }
 
+/// Take `tabs` out of their folders. A folder left empty goes, and one
+/// left in two parts is gathered where its first tab is.
+fn ungroup_tabs(browser: &mut Browser, tabs: &[TabId]) {
+    for w in &mut browser.windows {
+        let mut changed = false;
+        for tab in &mut w.tabs {
+            if tabs.contains(&tab.id) && tab.folder.take().is_some() {
+                changed = true;
+            }
+        }
+        if changed {
+            w.prune_folders();
+            let folders: Vec<FolderId> = w.folders.iter().map(|f| f.id).collect();
+            for folder in folders {
+                w.gather_folder(folder);
+            }
+        }
+    }
+}
+
 /// Answer an extension's request (`EngineEvent::ExtensionRequest`):
 /// what the request takes, then exactly one `ExtensionReply` carrying
 /// `token`. A request that names a tab, folder or window the model lacks
@@ -2956,6 +2976,32 @@ fn answer_request(
             }
             Ok((Vec::new(), ExtensionReply::Folder(folder)))
         }
+        ExtensionRequest::UngroupTabs(tabs) => {
+            known_tabs(browser, tabs)?;
+            ungroup_tabs(browser, tabs);
+            Ok((Vec::new(), ExtensionReply::Done))
+        }
+        ExtensionRequest::UpdateFolder {
+            folder,
+            name,
+            expanded,
+        } => {
+            if browser.window_of_folder(*folder).is_none() {
+                return Err(no_group(*folder));
+            }
+            let name = name.as_deref().map(|name| match name.trim() {
+                "" => session_folder_name(browser, extension),
+                name => name.to_string(),
+            });
+            let f = folder_mut(browser, *folder).expect("checked above");
+            if let Some(name) = name {
+                f.name = name;
+            }
+            if let Some(expanded) = expanded {
+                f.expanded = *expanded;
+            }
+            Ok((Vec::new(), ExtensionReply::Done))
+        }
         ExtensionRequest::OpenWindow { url } => {
             let url = url.clone().unwrap_or_else(|| browser.new_tab_url());
             let actions = open_window(browser, url);
@@ -2974,9 +3020,6 @@ fn answer_request(
             let actions = close_side_panel(browser, extension, *window, *tab)?;
             Ok((actions, ExtensionReply::Done))
         }
-        // The requests about tabs, folders and windows are not answered
-        // yet.
-        _ => Err("Not supported.".to_string()),
     }
 }
 
@@ -7457,5 +7500,266 @@ mod tests {
             vec![refused(5, "No tabs to group.")]
         );
         assert_eq!(b.windows, before, "a refused request changes nothing");
+    }
+
+    #[test]
+    fn ungrouping_takes_tabs_out_and_an_emptied_folder_goes() {
+        // side-panel.AC4.2, side-panel.AC4.4
+        let (mut b, window, t) = window_with_tabs(5);
+        ask(
+            &mut b,
+            0,
+            ExtensionRequest::GroupTabs {
+                tabs: vec![t[1], t[2], t[3]],
+                folder: None,
+            },
+        );
+        let folder = b.window(window).unwrap().folders[0].id;
+        // The middle tab leaves: the folder's tabs stay together, the
+        // tab that left after them.
+        assert_eq!(
+            ask(&mut b, 1, ExtensionRequest::UngroupTabs(vec![t[2]])),
+            vec![reply(1, ExtensionReply::Done)]
+        );
+        let w = b.window(window).unwrap();
+        assert_eq!(w.folder_tabs(folder), vec![t[1], t[3]]);
+        assert_eq!(w.tab(t[2]).unwrap().folder, None);
+        assert_eq!(order(&b, window), vec![t[0], t[1], t[3], t[2], t[4]]);
+        // A tab in no folder is done with nothing to do.
+        assert_eq!(
+            ask(&mut b, 2, ExtensionRequest::UngroupTabs(vec![t[0]])),
+            vec![reply(2, ExtensionReply::Done)]
+        );
+        // One unknown tab: nobody leaves.
+        assert_eq!(
+            ask(
+                &mut b,
+                3,
+                ExtensionRequest::UngroupTabs(vec![t[1], TabId(99)])
+            ),
+            vec![refused(3, "No tab with id: 99.")]
+        );
+        assert_eq!(
+            b.window(window).unwrap().folder_tabs(folder),
+            vec![t[1], t[3]]
+        );
+        // The last tabs leave: the folder is removed.
+        ask(&mut b, 4, ExtensionRequest::UngroupTabs(vec![t[3], t[1]]));
+        let w = b.window(window).unwrap();
+        assert!(w.folders.is_empty());
+        assert!(w.tabs.iter().all(|t| t.folder.is_none()));
+        assert_eq!(b.window_of_folder(folder), None);
+        // So is a folder whose last tab an extension closes.
+        ask(
+            &mut b,
+            5,
+            ExtensionRequest::GroupTabs {
+                tabs: vec![t[4]],
+                folder: None,
+            },
+        );
+        assert_eq!(b.window(window).unwrap().folders.len(), 1);
+        ask(&mut b, 6, ExtensionRequest::CloseTabs(vec![t[4]]));
+        assert!(b.window(window).unwrap().folders.is_empty());
+    }
+
+    #[test]
+    fn an_extension_renames_collapses_and_expands_a_folder() {
+        // side-panel.AC4.1 (the rename), side-panel.AC4.2 (collapsed)
+        let (mut b, window, t) = window_with_tabs(3);
+        installed(&mut b, "ext", true, true);
+        b.extensions[0].name = "Claude".to_string();
+        ask(
+            &mut b,
+            0,
+            ExtensionRequest::GroupTabs {
+                tabs: vec![t[1]],
+                folder: None,
+            },
+        );
+        let folder = b.window(window).unwrap().folders[0].id;
+        let update = |b: &mut Browser, token, name: Option<&str>, expanded| {
+            ask(
+                b,
+                token,
+                ExtensionRequest::UpdateFolder {
+                    folder,
+                    name: name.map(str::to_string),
+                    expanded,
+                },
+            )
+        };
+        let state = |b: &Browser| {
+            let f = b.window(window).unwrap().folder(folder).unwrap();
+            (f.name.clone(), f.expanded)
+        };
+        assert_eq!(
+            update(&mut b, 1, Some("  Trip planning "), None),
+            vec![reply(1, ExtensionReply::Done)]
+        );
+        assert_eq!(state(&b), ("Trip planning".to_string(), true));
+        // Later renames follow.
+        update(&mut b, 2, Some("Flights"), None);
+        assert_eq!(state(&b), ("Flights".to_string(), true));
+        // Collapsing and expanding leave the name.
+        update(&mut b, 3, None, Some(false));
+        assert_eq!(state(&b), ("Flights".to_string(), false));
+        update(&mut b, 4, None, Some(true));
+        assert_eq!(state(&b), ("Flights".to_string(), true));
+        // A title taken away is the name the folder started with.
+        update(&mut b, 5, Some("   "), Some(false));
+        assert_eq!(state(&b), ("Claude Session".to_string(), false));
+        // Neither given: done, nothing changed.
+        update(&mut b, 6, None, None);
+        assert_eq!(state(&b), ("Claude Session".to_string(), false));
+        assert_eq!(
+            ask(
+                &mut b,
+                7,
+                ExtensionRequest::UpdateFolder {
+                    folder: FolderId(99),
+                    name: Some("x".to_string()),
+                    expanded: Some(true),
+                }
+            ),
+            vec![refused(7, "No group with id: 99.")]
+        );
+    }
+
+    #[test]
+    fn every_request_is_answered_once_with_its_token_last() {
+        let (mut b, window, t) = window_with_tabs(4);
+        ask(
+            &mut b,
+            0,
+            ExtensionRequest::GroupTabs {
+                tabs: vec![t[0]],
+                folder: None,
+            },
+        );
+        let folder = b.window(window).unwrap().folders[0].id;
+        let page = || "panel.html".to_string();
+        // Each request, and whether it is refused.
+        let requests = vec![
+            (
+                ExtensionRequest::OpenTab {
+                    window: None,
+                    url: url("https://new.example/"),
+                    active: true,
+                },
+                false,
+            ),
+            (
+                ExtensionRequest::OpenTab {
+                    window: Some(WindowId(99)),
+                    url: url("https://new.example/"),
+                    active: true,
+                },
+                true,
+            ),
+            (ExtensionRequest::ActivateTab(t[1]), false),
+            (ExtensionRequest::ActivateTab(TabId(99)), true),
+            (
+                ExtensionRequest::MoveTab {
+                    tab: t[2],
+                    index: 0,
+                },
+                false,
+            ),
+            (
+                ExtensionRequest::MoveTab {
+                    tab: TabId(99),
+                    index: 0,
+                },
+                true,
+            ),
+            (
+                ExtensionRequest::GroupTabs {
+                    tabs: vec![t[1]],
+                    folder: Some(folder),
+                },
+                false,
+            ),
+            (
+                ExtensionRequest::GroupTabs {
+                    tabs: vec![TabId(99)],
+                    folder: None,
+                },
+                true,
+            ),
+            (
+                ExtensionRequest::UpdateFolder {
+                    folder,
+                    name: Some("Named".to_string()),
+                    expanded: None,
+                },
+                false,
+            ),
+            (
+                ExtensionRequest::UpdateFolder {
+                    folder: FolderId(99),
+                    name: None,
+                    expanded: None,
+                },
+                true,
+            ),
+            (ExtensionRequest::UngroupTabs(vec![t[1]]), false),
+            (ExtensionRequest::UngroupTabs(vec![TabId(99)]), true),
+            (
+                ExtensionRequest::OpenSidePanel {
+                    window,
+                    tab: Some(t[1]),
+                    page: page(),
+                },
+                false,
+            ),
+            (
+                ExtensionRequest::OpenSidePanel {
+                    window: WindowId(99),
+                    tab: None,
+                    page: page(),
+                },
+                true,
+            ),
+            (
+                ExtensionRequest::CloseSidePanel {
+                    window,
+                    tab: Some(t[1]),
+                },
+                false,
+            ),
+            (
+                ExtensionRequest::CloseSidePanel {
+                    window: WindowId(99),
+                    tab: None,
+                },
+                true,
+            ),
+            (ExtensionRequest::OpenWindow { url: None }, false),
+            (ExtensionRequest::CloseTabs(vec![t[3]]), false),
+            (ExtensionRequest::CloseTabs(vec![TabId(99)]), true),
+        ];
+        for (n, (request, refusal)) in requests.into_iter().enumerate() {
+            let token = 100 + n as u64;
+            let actions = ask(&mut b, token, request.clone());
+            let replies: Vec<&EngineAction> = actions
+                .iter()
+                .filter(|a| matches!(a, EngineAction::ExtensionReply { .. }))
+                .collect();
+            assert_eq!(replies.len(), 1, "{request:?}: {actions:?}");
+            let Some(EngineAction::ExtensionReply { token: got, reply }) = actions.last() else {
+                panic!("the reply comes last: {request:?}: {actions:?}");
+            };
+            assert_eq!(*got, token, "{request:?}");
+            assert_eq!(
+                matches!(reply, ExtensionReply::Refused(_)),
+                refusal,
+                "{request:?}: {reply:?}"
+            );
+            // A refusal comes alone: nothing was asked of the engine.
+            if refusal {
+                assert_eq!(actions.len(), 1, "{request:?}: {actions:?}");
+            }
+        }
     }
 }
