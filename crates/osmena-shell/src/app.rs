@@ -1271,8 +1271,9 @@ impl<E: Engine> App<E> {
                 }
             }
             EngineAction::CloseView { window, view } => {
+                let active = self.browser.window(window).map(|w| w.active);
                 if let Some(w) = self.window_for_core_id(window) {
-                    w.close_view(view);
+                    w.close_view(view, active);
                 }
             }
             EngineAction::SetExtensionEnabled { extension, enabled } => {

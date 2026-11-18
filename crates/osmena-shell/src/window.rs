@@ -13,9 +13,9 @@ use keyboard_types::{KeyState, Modifiers};
 use osmena_chrome::chrome::{self, ChromeState, WindowRequest};
 use osmena_chrome::input::extension_chords;
 use osmena_chrome::routing::{
-    KeyRouter, KeyStroke, KeyTarget, PointerCapture, PointerContext, PointerTarget, ViewPixels,
-    content_pixels, panel_shown, panel_transition, resize_edge, route_pointer, split_content,
-    view_pixels,
+    ContentRegion, KeyRouter, KeyStroke, KeyTarget, PointerCapture, PointerContext, PointerTarget,
+    ViewPixels, content_pixels, content_region, keyboard_view, panel_shown, panel_transition,
+    resize_edge, route_pointer, split_content, view_pixels,
 };
 use osmena_chrome::{icon, input, keyutils, menus, native_menu, theme};
 use osmena_core::{
@@ -66,15 +66,26 @@ pub struct BrowserWindow<E: Engine> {
     /// Physical-pixel height of the chrome above the page, from the last
     /// frame. Events below it go to the page, above it to egui.
     content_top_px: f32,
-    /// True while egui draws the page area itself (the crash panel).
+    /// True while egui draws the page's rectangle itself (the crash panel,
+    /// a block page). The side panel is not part of it.
     content_is_egui: bool,
     /// The side panel drawn in the last frame, if one was: `None` while
     /// the window shows no panel, is full screen, or is too narrow for
     /// one. The view in it is the one the engine was last told to show.
     panel: Option<ShownPanel>,
+    /// The side panel view that has the keyboard, after a button press in
+    /// it; `None` while the page has it. Cleared by a press in the page,
+    /// by any tab becoming the focused tab (`focus_tab`), when the view
+    /// closes, and by the first frame that no longer draws that view.
+    keyboard_in_panel: Option<TabId>,
     pointer_in_content: bool,
+    /// The view the pointer is in, which got its last move: a tab's page
+    /// or the side panel's view. It hears the pointer leave.
+    hovered: Option<TabId>,
     /// The pointer shape the active page asked for.
     page_cursor: CursorIcon,
+    /// The pointer shape the drawn side panel's page asked for.
+    panel_cursor: CursorIcon,
     /// Which side holds the pointer during a drag or click. See
     /// [`PointerCapture`].
     capture: PointerCapture,
@@ -161,8 +172,11 @@ impl<E: Engine> BrowserWindow<E> {
             content_top_px: 0.0,
             content_is_egui: false,
             panel: None,
+            keyboard_in_panel: None,
             pointer_in_content: false,
+            hovered: None,
             page_cursor: CursorIcon::Default,
+            panel_cursor: CursorIcon::Default,
             capture: PointerCapture::default(),
             keys: KeyRouter::default(),
             page_presses: HashMap::new(),
@@ -234,17 +248,69 @@ impl<E: Engine> BrowserWindow<E> {
     pub fn typed_text(&mut self, browser: &Browser, text: String) {
         if self.egui.egui_ctx.egui_wants_keyboard_input() || self.chrome.takes_every_key() {
             self.inject_egui_events(vec![egui::Event::Text(text)]);
-        } else if !self.content_is_egui
-            && let Some(tab) = browser.window(self.id).map(|w| w.active)
+        } else if let Some(view) = self.keyboard_view(browser)
+            && !(self.content_is_egui && browser.window(self.id).is_some_and(|w| w.active == view))
         {
-            self.host.input(tab, EngineInput::ImeCommit(text));
+            self.host.input(view, EngineInput::ImeCommit(text));
         }
     }
 
-    /// Tell the engine `tab` has focus, if this window does.
-    pub fn focus_tab(&self, tab: TabId) {
+    /// `tab` became the tab this window shows (created, adopted, or
+    /// switched to): the keyboard is its page's, so a side panel that had
+    /// it gives it up, and the engine is told `tab` has focus if this
+    /// window does.
+    pub fn focus_tab(&mut self, tab: TabId) {
+        self.keyboard_to_page();
         if self.has_focus() {
             self.host.set_focused(tab, true);
+        }
+    }
+
+    /// Take the keyboard back from the side panel, if it has it, telling
+    /// its view so. The caller gives the focus to the active tab.
+    fn keyboard_to_page(&mut self) {
+        if let Some(view) = self.keyboard_in_panel.take()
+            && self.host.has_tab(view)
+        {
+            self.host.set_focused(view, false);
+        }
+    }
+
+    /// The view that has the keyboard: the drawn side panel's after a
+    /// click in it, else the active tab.
+    fn keyboard_view(&self, browser: &Browser) -> Option<TabId> {
+        let active = browser.window(self.id).map(|w| w.active);
+        keyboard_view(
+            active,
+            self.keyboard_in_panel,
+            self.panel.map(|panel| panel.view),
+        )
+    }
+
+    /// A button press landed on `target`, in `view`: the keyboard goes
+    /// where the click went. A press in the chrome moves nothing.
+    fn keyboard_follows(
+        &mut self,
+        target: PointerTarget,
+        active: Option<TabId>,
+        view: Option<TabId>,
+    ) {
+        match (target, view) {
+            (PointerTarget::Panel, Some(view)) if self.keyboard_in_panel != Some(view) => {
+                self.keyboard_to_page();
+                if let Some(tab) = active {
+                    self.host.set_focused(tab, false);
+                }
+                self.host.set_focused(view, true);
+                self.keyboard_in_panel = Some(view);
+            }
+            (PointerTarget::Page, _) if self.keyboard_in_panel.is_some() => {
+                self.keyboard_to_page();
+                if let Some(tab) = active {
+                    self.host.set_focused(tab, true);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -259,8 +325,20 @@ impl<E: Engine> BrowserWindow<E> {
     }
 
     /// Close a side panel's view in the engine and drop its texture: its
-    /// panel left the model.
-    pub fn close_view(&mut self, view: TabId) {
+    /// panel left the model. `active` is the window's active tab, which
+    /// gets the keyboard back if the view had it.
+    pub fn close_view(&mut self, view: TabId, active: Option<TabId>) {
+        if self.keyboard_in_panel == Some(view) {
+            self.keyboard_in_panel = None;
+            if let Some(tab) = active
+                && self.has_focus()
+            {
+                self.host.set_focused(tab, true);
+            }
+        }
+        if self.hovered == Some(view) {
+            self.hovered = None;
+        }
         self.host.close_view(view);
         if let Some(texture) = self.textures.remove(&view) {
             let _ = self.surface.make_current();
@@ -478,14 +556,19 @@ impl<E: Engine> BrowserWindow<E> {
         let _ = self.egui.on_window_event(&self.window, &release);
     }
 
-    /// The page in `tab` asked for a pointer shape.
+    /// The page in `tab` asked for a pointer shape: the active tab's
+    /// page, or the drawn side panel's. Any other view is ignored.
     pub fn set_page_cursor(&mut self, tab: TabId, browser: &Browser, cursor: Cursor) {
-        if browser.window(self.id).is_none_or(|w| w.active != tab) {
+        let shape = cursor_icon(cursor);
+        if self.panel.is_some_and(|panel| panel.view == tab) {
+            self.panel_cursor = shape;
+        } else if browser.window(self.id).is_some_and(|w| w.active == tab) {
+            self.page_cursor = shape;
+        } else {
             return;
         }
-        self.page_cursor = cursor_icon(cursor);
-        if self.pointer_in_content {
-            self.window.set_cursor(self.page_cursor);
+        if self.pointer_in_content && self.hovered == Some(tab) {
+            self.window.set_cursor(shape);
         }
     }
 
@@ -521,14 +604,22 @@ impl<E: Engine> BrowserWindow<E> {
 
     /// Who the pointer belongs to right now: the side holding a capture,
     /// otherwise whatever [`route_pointer`] decides from the position and
-    /// egui's state.
+    /// egui's state. The side panel's header is the chrome's.
     fn pointer_target(&self) -> PointerTarget {
+        let region = self.cursor.map(|p| {
+            content_region(
+                p.x as f32,
+                p.y as f32,
+                self.content_top_px,
+                self.panel.map(|panel| panel.px),
+            )
+        });
         let ctx = PointerContext {
-            over_chrome: match self.cursor {
-                Some(p) => (p.y as f32) < self.content_top_px,
-                None => true,
-            },
-            over_panel: false,
+            over_chrome: matches!(
+                region,
+                None | Some(ContentRegion::Chrome | ContentRegion::PanelHeader)
+            ),
+            over_panel: region == Some(ContentRegion::Panel),
             content_is_egui: self.content_is_egui,
             over_egui: self.egui.egui_ctx.is_pointer_over_egui(),
             popup_open: egui::Popup::is_any_open(&self.egui.egui_ctx) || self.chrome.popup_open(),
@@ -536,24 +627,41 @@ impl<E: Engine> BrowserWindow<E> {
         route_pointer(self.capture.captured(), ctx)
     }
 
-    /// The tab a pointer event for the page goes to: the tab holding the
-    /// capture while one is held (even if another tab is active now),
-    /// otherwise the active tab. Nothing while the capturing tab is gone:
-    /// its release ends the capture without reaching anyone.
-    fn pointer_tab(&self, browser: &Browser, active: Option<TabId>) -> Option<TabId> {
+    /// The view a pointer event for `side` goes to: the view holding the
+    /// capture while one is held (even if another tab is active or
+    /// another panel shown now), otherwise the active tab for the page
+    /// and the drawn panel's view for the panel. Nothing while the
+    /// capturing view is gone: its release ends the capture without
+    /// reaching anyone.
+    fn pointer_view(
+        &self,
+        browser: &Browser,
+        active: Option<TabId>,
+        side: PointerTarget,
+    ) -> Option<TabId> {
         match self.capture.tab() {
-            Some(tab) => browser
-                .window(self.id)
-                .is_some_and(|w| w.tab(tab).is_some())
-                .then_some(tab),
-            None => active,
+            Some(view) => view_is_live(browser, self.id, view).then_some(view),
+            None => match side {
+                PointerTarget::Page => active,
+                PointerTarget::Panel => self.panel.map(|panel| panel.view),
+                PointerTarget::Egui => None,
+            },
         }
     }
 
-    /// Cursor position in physical pixels relative to the page area.
-    fn content_point(&self) -> Option<(f32, f32)> {
+    /// Cursor position in physical pixels as the view on `side` wants
+    /// it: from the page area's top left, or from the panel view's own.
+    /// A panel capture that outlived the drawn panel (its tab went into
+    /// the background mid-drag) is given the view's corner, as a release
+    /// on focus loss is.
+    fn view_point(&self, side: PointerTarget) -> Option<(f32, f32)> {
         let p = self.cursor?;
-        Some((p.x as f32, p.y as f32 - self.content_top_px))
+        let (x, y) = (p.x as f32, p.y as f32);
+        Some(match (side, self.panel) {
+            (PointerTarget::Panel, Some(panel)) => panel.px.local(x, y),
+            (PointerTarget::Panel, None) => (0.0, 0.0),
+            _ => (x, y - self.content_top_px),
+        })
     }
 
     /// The keyboard modifiers held now, for pointer events. winit keeps
@@ -564,24 +672,42 @@ impl<E: Engine> BrowserWindow<E> {
         keyutils::keyboard_modifiers_from_winit_modifiers(self.modifiers)
     }
 
-    fn enter_content(&mut self, active: Option<TabId>, x: f32, y: f32) {
+    /// The pointer is over `view` (a tab's page or the panel's) at
+    /// `(x, y)` in that view's own pixels.
+    fn enter_content(&mut self, view: Option<TabId>, x: f32, y: f32) {
+        if self.pointer_in_content && self.hovered != view {
+            // From one view straight into another (across the boundary,
+            // or the tab under a resting pointer changed): the one left
+            // behind hears the pointer go.
+            self.leave_content();
+        }
         if !self.pointer_in_content {
-            self.window.set_cursor(self.page_cursor);
+            let shape = if view.is_some() && self.panel.map(|panel| panel.view) == view {
+                self.panel_cursor
+            } else {
+                self.page_cursor
+            };
+            self.window.set_cursor(shape);
         }
         self.pointer_in_content = true;
-        if let Some(tab) = active {
+        self.hovered = view;
+        if let Some(view) = view {
             let modifiers = self.modifiers();
             self.host
-                .input(tab, EngineInput::MouseMove { x, y, modifiers });
+                .input(view, EngineInput::MouseMove { x, y, modifiers });
         }
     }
 
-    fn leave_content(&mut self, active: Option<TabId>) {
+    /// The pointer left the view it was in, which is told if the host
+    /// still has it.
+    fn leave_content(&mut self) {
         if self.pointer_in_content {
             self.pointer_in_content = false;
             self.window.set_cursor(CursorIcon::Default);
-            if let Some(tab) = active {
-                self.host.input(tab, EngineInput::MouseLeft);
+            if let Some(view) = self.hovered.take()
+                && self.host.has_tab(view)
+            {
+                self.host.input(view, EngineInput::MouseLeft);
             }
         }
     }
@@ -595,7 +721,6 @@ impl<E: Engine> BrowserWindow<E> {
         event: &WindowEvent,
     ) -> Vec<Command> {
         let active = browser.window(self.id).map(|w| w.active);
-        let pointer_tab = self.pointer_tab(browser, active);
         let mut commands = Vec::new();
         let mut forward_to_egui = true;
 
@@ -627,8 +752,8 @@ impl<E: Engine> BrowserWindow<E> {
                 } else {
                     self.release_held(browser);
                 }
-                if let Some(tab) = active {
-                    self.host.set_focused(tab, *focused);
+                if let Some(view) = self.keyboard_view(browser) {
+                    self.host.set_focused(view, *focused);
                 }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
@@ -648,24 +773,25 @@ impl<E: Engine> BrowserWindow<E> {
                 if edge != self.resize_edge {
                     self.resize_edge = edge;
                     if let Some(edge) = edge {
-                        self.leave_content(active);
+                        self.leave_content();
                         self.window.set_cursor(resize_cursor(edge));
                     } else {
                         self.window.set_cursor(CursorIcon::Default);
                     }
                 }
-                if edge.is_some() {
-                    // Nothing else to do: the pointer is on the border.
-                } else if self.pointer_target() == PointerTarget::Page {
-                    if let Some((x, y)) = self.content_point() {
-                        self.enter_content(pointer_tab, x, y);
+                if edge.is_none() {
+                    let target = self.pointer_target();
+                    match self.view_point(target) {
+                        Some((x, y)) if target != PointerTarget::Egui => {
+                            let view = self.pointer_view(browser, active, target);
+                            self.enter_content(view, x, y);
+                        }
+                        _ => self.leave_content(),
                     }
-                } else {
-                    self.leave_content(pointer_tab);
                 }
             }
             WindowEvent::CursorLeft { .. } => {
-                self.leave_content(pointer_tab);
+                self.leave_content();
                 if self.resize_edge.take().is_some() {
                     self.window.set_cursor(CursorIcon::Default);
                 }
@@ -699,16 +825,25 @@ impl<E: Engine> BrowserWindow<E> {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let current = self.pointer_target();
+                // The side this event belongs to is the capture's while
+                // one is held; its view and the point in it are read
+                // before a release ends the capture.
+                let side = self.capture.captured().unwrap_or(current);
+                let view = self.pointer_view(browser, active, side);
+                let point = self.view_point(side);
                 let target = match state {
-                    ElementState::Pressed => self.capture.press(*button, current, pointer_tab),
+                    ElementState::Pressed => self.capture.press(*button, current, view),
                     ElementState::Released => self.capture.release(*button, current),
                 };
-                if target == PointerTarget::Page {
+                if target != PointerTarget::Egui {
                     forward_to_egui = false;
                     self.surrender_egui_focus();
-                    if let (Some(tab), Some((x, y))) = (pointer_tab, self.content_point()) {
+                    if *state == ElementState::Pressed {
+                        self.keyboard_follows(target, active, view);
+                    }
+                    if let (Some(view), Some((x, y))) = (view, point) {
                         self.host.input(
-                            tab,
+                            view,
                             EngineInput::MouseButton {
                                 action: input::button_action(*state),
                                 button: input::mouse_button(*button),
@@ -721,19 +856,24 @@ impl<E: Engine> BrowserWindow<E> {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if self.pointer_target() == PointerTarget::Page {
+                let target = self.pointer_target();
+                if target != PointerTarget::Egui {
                     forward_to_egui = false;
-                    if let (Some(tab), Some((x, y))) = (pointer_tab, self.content_point()) {
+                    if let (Some(tab), Some((x, y))) = (
+                        self.pointer_view(browser, active, target),
+                        self.view_point(target),
+                    ) {
                         let (dx, dy) = input::wheel_delta(*delta, self.engine_info.wheel_line_px);
                         let modifiers = self.modifiers();
                         // Ctrl (Cmd) and the wheel zoom the page a step per
-                        // notch instead of scrolling it.
+                        // notch instead of scrolling it. A side panel has no
+                        // zoom of its own: there the wheel scrolls.
                         let primary = if cfg!(target_os = "macos") {
                             Modifiers::META
                         } else {
                             Modifiers::CONTROL
                         };
-                        if modifiers.contains(primary) {
+                        if target == PointerTarget::Page && modifiers.contains(primary) {
                             self.zoom_wheel += dy;
                             let notch = f64::from(self.engine_info.wheel_line_px).max(1.0);
                             while self.zoom_wheel >= notch {
@@ -775,15 +915,12 @@ impl<E: Engine> BrowserWindow<E> {
                     pressed: key.state == ElementState::Pressed,
                     repeat: key.repeat,
                 };
-                let live = |tab| {
-                    browser
-                        .window(self.id)
-                        .is_some_and(|w| w.tab(tab).is_some())
-                };
+                let live = |view| view_is_live(browser, self.id, view);
                 let chords = extension_chords(&browser.extensions);
+                let keyboard = self.keyboard_view(browser);
                 let target =
                     self.keys
-                        .route(stroke, egui_wants_keyboard, active, live, keymap, &chords);
+                        .route(stroke, egui_wants_keyboard, keyboard, live, keymap, &chords);
                 match target {
                     Some(KeyTarget::Page(tab)) => {
                         forward_to_egui = false;
@@ -825,8 +962,8 @@ impl<E: Engine> BrowserWindow<E> {
             // content yet. The arm is ready for when it does.
             WindowEvent::Ime(ime) if !self.egui.egui_ctx.egui_wants_keyboard_input() => {
                 forward_to_egui = false;
-                if let (Some(tab), Some(input)) = (active, input::ime(ime)) {
-                    self.host.input(tab, input);
+                if let (Some(view), Some(input)) = (self.keyboard_view(browser), input::ime(ime)) {
+                    self.host.input(view, input);
                 }
             }
             _ => {}
@@ -844,20 +981,16 @@ impl<E: Engine> BrowserWindow<E> {
     /// The window lost focus: the releases of the keys and buttons the
     /// page holds will arrive elsewhere (Alt+Tab takes the Alt release;
     /// the system does not synthesize one), so release them in the page
-    /// now, each in the tab that got its press, with the modifiers as
+    /// now, each in the view that got its press, with the modifiers as
     /// the window knows them (all up, on Windows, by this point). A page
     /// that tracks key or button state is then never stuck with one
     /// down; egui forgets its own on the same event.
     fn release_held(&mut self, browser: &Browser) {
-        let live = |tab: TabId| {
-            browser
-                .window(self.id)
-                .is_some_and(|w| w.tab(tab).is_some())
-        };
+        let live = |view: TabId| view_is_live(browser, self.id, view);
         let modifiers = self.modifiers();
-        for (code, tab) in self.keys.release_all() {
+        for (code, view) in self.keys.release_all() {
             if let Some(press) = self.page_presses.remove(&code)
-                && live(tab)
+                && live(view)
             {
                 let release = KeyInput {
                     state: KeyState::Up,
@@ -865,17 +998,22 @@ impl<E: Engine> BrowserWindow<E> {
                     repeat: false,
                     ..press
                 };
-                self.host.input(tab, EngineInput::Key(release));
+                self.host.input(view, EngineInput::Key(release));
             }
         }
         self.page_presses.clear();
-        if let Some((tab, buttons)) = self.capture.release_all()
-            && live(tab)
+        // The side is read before the capture is let go of: it says whose
+        // pixels the release is in.
+        let side = self.capture.captured();
+        if let Some((view, buttons)) = self.capture.release_all()
+            && live(view)
         {
-            let (x, y) = self.content_point().unwrap_or((0.0, 0.0));
+            let (x, y) = side
+                .and_then(|side| self.view_point(side))
+                .unwrap_or((0.0, 0.0));
             for button in buttons {
                 self.host.input(
-                    tab,
+                    view,
                     EngineInput::MouseButton {
                         action: osmena_core::ButtonAction::Up,
                         button: input::mouse_button(button),
@@ -1056,9 +1194,8 @@ impl<E: Engine> BrowserWindow<E> {
             if let Some((rects, view)) = panel {
                 paint_view(ui, &*host, textures, &gl, view, rects.view);
             }
-            // The header: a plain strip in the toolbar's fill until the
-            // chrome draws the extension's name and the close control
-            // here (Phase 4 replaces this statement).
+            // The header: a plain strip in the toolbar's fill, until the
+            // chrome draws the extension's name and the close control here.
             if let Some(rects) = &split.panel {
                 let fill = chrome::Palette::new(chrome_color, ui.visuals().dark_mode).toolbar;
                 ui.painter().rect_filled(rects.header, 0.0, fill);
@@ -1066,6 +1203,19 @@ impl<E: Engine> BrowserWindow<E> {
         });
         self.content_top_px = content_top_px;
         self.content_is_egui = crashed.is_some() || blocked.is_some();
+        let drawn = panel_now.map(|panel| panel.view);
+        if self.keyboard_in_panel.is_some() && self.keyboard_in_panel != drawn {
+            // The panel that had the keyboard is not drawn any more
+            // (closed by its extension, full screen, a narrower window):
+            // the page has it again.
+            self.keyboard_to_page();
+            if self.has_focus() {
+                self.host.set_focused(active, true);
+            }
+        }
+        if drawn != previous {
+            self.panel_cursor = CursorIcon::Default;
+        }
         self.panel = panel_now;
         self.update_content_origin();
 
@@ -1229,6 +1379,16 @@ impl<E: Engine> Drop for BrowserWindow<E> {
         }
         self.egui.destroy();
     }
+}
+
+/// Whether `view` can still be sent input in `window`: a tab of the
+/// window, or the view of one of its side panels. Held keys, a pointer
+/// capture and the hover all name a view and are dropped once this is
+/// false.
+fn view_is_live(browser: &Browser, window: WindowId, view: TabId) -> bool {
+    browser
+        .window(window)
+        .is_some_and(|w| w.tab(view).is_some() || w.has_panel_view(view))
 }
 
 /// Paint `view` (a tab's page, or a side panel's) into `rect`, whichever
