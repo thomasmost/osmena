@@ -121,7 +121,8 @@ All notable changes to the osmena crates. The crates version together.
   long; an extension no longer installed is named by its id) and a
   close control, with a hairline under the header and between page and
   panel (`chrome::draw_side_panel_header`, which answers
-  `Command::CloseSidePanel`). It is drawn wherever
+  `Command::CloseSidePanel`). Its sizes are `theme::SIDE_PANEL_PADDING`,
+  `theme::SIDE_PANEL_GAP` and `theme::SIDE_PANEL_CLOSE`. It is drawn wherever
   `routing::panel_shown` and `routing::split_content` give the panel
   its rectangles: the engine has `ExtensionSupport::side_panels`, the
   window is not in full screen, the model has a panel for the active
@@ -130,10 +131,15 @@ All notable changes to the osmena crates. The crates version together.
   window has a panel in the model; the "☰" menu and the macOS menu bar
   are unchanged. A pinned toolbar action without a popup is a live
   button, and a live row of that menu. The settings window lists each
-  extension's shortcuts under it and marks one the keymap holds with
-  the action that has its keys; `osmena_core::extension::shortcut_verdict`
-  gives that answer (`ShortcutVerdict`: unassigned, free, or overridden
-  by the `CommandKind` that holds the chord). The header, the "Close
+  extension's shortcuts under it. One that will not run its command is
+  marked "Not active" with the reason: the keymap holds its keys (the
+  action that has them is named), an earlier enabled command holds them
+  (another extension's, or this extension's own earlier command), or the
+  extension is off. Who holds a chord is `osmena_chrome::input::extension_taking`,
+  the rule `route_key` applies too. `osmena_core::extension::shortcut_verdict`
+  (with `ShortcutVerdict`, re-exported from `osmena_core`) gives the
+  keymap's answer alone: unassigned, free, or overridden by the
+  `CommandKind` that holds the chord. The header, the "Close
   side panel" entry and the panel need `side_panels`; the pinned-action
   button and the shortcut list show on any engine that runs extensions.
 

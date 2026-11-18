@@ -7,7 +7,7 @@
 use std::time::Instant;
 
 use egui_glow::EguiGlow;
-use osmena_chrome::chrome::{self, describe_chord, location_input_to_url};
+use osmena_chrome::chrome::{self, Palette, describe_chord, location_input_to_url};
 use osmena_chrome::input::{self, KeyRoute};
 use osmena_chrome::keyboard_types::{Code, Modifiers};
 use osmena_chrome::{icon, keyutils, theme};
@@ -1011,14 +1011,12 @@ fn draw_updates(
         });
 }
 
-/// The installed extensions, each with its switches, and the ways to add
-/// one. Enabling, removing, and installing go to the engine as commands;
-/// pinning is a setting.
-/// The installed extensions, each with its switches and its shortcuts,
-/// and the ways to add one. Enabling, removing, and installing go to
-/// the engine as commands; pinning is a setting. A shortcut the keymap
-/// holds is marked with the action that has its keys (`shortcut_row`):
-/// the keymap wins, and the table below is where to free the keys.
+/// The installed extensions, each with its switches, its shortcuts, and
+/// the ways to add one. Enabling, removing, and installing go to the
+/// engine as commands; pinning is a setting. Each shortcut shows its
+/// keys, and one that will not run its command is marked "Not active"
+/// with the reason (`shortcut_row`): the keymap holds the keys, another
+/// command holds them, or the extension is off.
 fn draw_extensions(
     ui: &mut egui::Ui,
     settings: &mut Settings,
@@ -1031,6 +1029,10 @@ fn draw_extensions(
     let store_input: &mut String = section.store_input;
     let store_notice = &mut *section.store_notice;
     let commands = &mut *section.commands;
+    let chords = input::extension_chords(extensions);
+    // The "Not active" line is in the palette's ink, which the contrast
+    // test holds at AA on the surface this window fills with.
+    let note_ink = Palette::new(settings.chrome_color, ui.visuals().dark_mode).ink;
     if extensions.is_empty() {
         ui.label(egui::RichText::new("No extensions installed.").weak());
     }
@@ -1054,14 +1056,16 @@ fn draw_extensions(
                     ui.add(egui::Label::new(egui::RichText::new(detail).small().weak()).truncate())
                         .on_hover_text(&extension.description);
                     for command in &extension.commands {
-                        let (text, taken) = shortcut_row(keymap, command);
+                        let (text, taken) =
+                            shortcut_row(keymap, extensions, &chords, extension, command);
                         ui.add(egui::Label::new(egui::RichText::new(&text).small()).truncate())
                             .on_hover_text(&text);
                         if let Some(taken) = taken {
-                            let color = ui.visuals().warn_fg_color;
                             ui.add(
-                                egui::Label::new(egui::RichText::new(&taken).small().color(color))
-                                    .truncate(),
+                                egui::Label::new(
+                                    egui::RichText::new(&taken).small().color(note_ink),
+                                )
+                                .truncate(),
                             )
                             .on_hover_text(&taken);
                         }
@@ -1149,22 +1153,20 @@ fn set_pinned(settings: &mut Settings, extension: &str, pinned: bool) {
 /// does with its keys, and, when the keymap holds those keys, the
 /// action that has them. A command without a description is named by
 /// what its reserved name means, or by its name.
-fn shortcut_row(keymap: &Keymap, command: &ExtensionCommand) -> (String, Option<String>) {
-    let described = command.description.trim();
-    let what = if !described.is_empty() {
-        described
-    } else {
-        match command.name.as_str() {
-            "_execute_action" | "_execute_browser_action" | "_execute_page_action" => {
-                "Activate the extension"
-            }
-            "_execute_side_panel" => "Open the side panel",
-            name => name,
-        }
-    };
+fn shortcut_row(
+    keymap: &Keymap,
+    extensions: &[Extension],
+    chords: &[input::ExtensionChord<'_>],
+    owner: &Extension,
+    command: &ExtensionCommand,
+) -> (String, Option<String>) {
+    let what = command_what(command);
     match shortcut_verdict(keymap, command) {
         ShortcutVerdict::Unassigned => (format!("{what}: no shortcut"), None),
-        ShortcutVerdict::Free(chord) => (format!("{what}: {}", describe_chord(chord)), None),
+        ShortcutVerdict::Free(chord) => {
+            let note = free_shortcut_note(extensions, chords, owner, command, chord);
+            (format!("{what}: {}", describe_chord(chord)), note)
+        }
         ShortcutVerdict::Overridden { chord, by } => {
             let keys = describe_chord(chord);
             (
@@ -1175,6 +1177,57 @@ fn shortcut_row(keymap: &Keymap, command: &ExtensionCommand) -> (String, Option<
                 )),
             )
         }
+    }
+}
+
+/// What names a command in its row: its description, else what its
+/// reserved name means, else its name.
+fn command_what(command: &ExtensionCommand) -> &str {
+    let described = command.description.trim();
+    if !described.is_empty() {
+        return described;
+    }
+    match command.name.as_str() {
+        "_execute_action" | "_execute_browser_action" | "_execute_page_action" => {
+            "Activate the extension"
+        }
+        "_execute_side_panel" => "Open the side panel",
+        name => name,
+    }
+}
+
+/// Why a shortcut the keymap leaves free does not run its command, when it
+/// does not: its extension is off, or the routing rule gives the chord to
+/// another command, of this extension or of an earlier one. `chords` is
+/// the enabled extensions' shortcuts in list order, the rule's own input.
+fn free_shortcut_note(
+    extensions: &[Extension],
+    chords: &[input::ExtensionChord<'_>],
+    owner: &Extension,
+    command: &ExtensionCommand,
+    chord: KeyChord,
+) -> Option<String> {
+    if !owner.enabled {
+        return Some("Not active: the extension is off".to_string());
+    }
+    let taker = chords[input::extension_taking(chords, chord)?];
+    if taker.extension == owner.id && taker.name == command.name {
+        return None;
+    }
+    let keys = describe_chord(chord);
+    if taker.extension == owner.id {
+        let other = owner
+            .commands
+            .iter()
+            .find(|other| other.name == taker.name)
+            .map_or(taker.name, command_what);
+        Some(format!("Not active: {keys} is the shortcut for {other}"))
+    } else {
+        let name = extensions
+            .iter()
+            .find(|other| other.id == taker.extension)
+            .map_or(taker.extension, |other| other.name.as_str());
+        Some(format!("Not active: {keys} is {name}'s shortcut"))
     }
 }
 
@@ -1654,6 +1707,48 @@ mod tests {
         }
     }
 
+    fn extension_named(
+        id: &str,
+        name: &str,
+        enabled: bool,
+        commands: Vec<ExtensionCommand>,
+    ) -> Extension {
+        Extension {
+            id: id.to_string(),
+            name: name.to_string(),
+            version: "1".to_string(),
+            description: String::new(),
+            enabled,
+            icon: None,
+            action_title: None,
+            side_panel: false,
+            commands,
+        }
+    }
+
+    /// The row of command `command` of extension `owner` in `extensions`,
+    /// as the Extensions section draws it.
+    fn row_of(
+        keymap: &Keymap,
+        extensions: &[Extension],
+        owner: usize,
+        command: usize,
+    ) -> (String, Option<String>) {
+        let chords = input::extension_chords(extensions);
+        let owner = &extensions[owner];
+        shortcut_row(keymap, extensions, &chords, owner, &owner.commands[command])
+    }
+
+    /// The row of one command of an extension that is the only one installed.
+    fn single_row(keymap: &Keymap, command: ExtensionCommand) -> (String, Option<String>) {
+        row_of(
+            keymap,
+            &[extension_named("solo", "Solo", true, vec![command])],
+            0,
+            0,
+        )
+    }
+
     #[test]
     fn a_shortcut_row_names_the_keys_and_who_took_them() {
         let keymap = Keymap::defaults(Platform::Windows);
@@ -1661,17 +1756,17 @@ mod tests {
         let ctrl_t = KeyChord::new(Modifiers::CONTROL, Code::KeyT);
         // Free: the description and the keys, nothing to add.
         assert_eq!(
-            shortcut_row(
+            single_row(
                 &keymap,
-                &extension_command("toggle", "Toggle the panel", Some(ctrl_e))
+                extension_command("toggle", "Toggle the panel", Some(ctrl_e))
             ),
             ("Toggle the panel: Ctrl+E".to_string(), None)
         );
         // Overridden: the same line, and the action that has the keys.
         assert_eq!(
-            shortcut_row(
+            single_row(
                 &keymap,
-                &extension_command("toggle", "Toggle the panel", Some(ctrl_t))
+                extension_command("toggle", "Toggle the panel", Some(ctrl_t))
             ),
             (
                 "Toggle the panel: Ctrl+T".to_string(),
@@ -1680,33 +1775,165 @@ mod tests {
         );
         // No key suggested.
         assert_eq!(
-            shortcut_row(
+            single_row(
                 &keymap,
-                &extension_command("toggle", "Toggle the panel", None)
+                extension_command("toggle", "Toggle the panel", None)
             ),
             ("Toggle the panel: no shortcut".to_string(), None)
         );
         // No description: the reserved names read as what they do, any
         // other name stands for itself.
         assert_eq!(
-            shortcut_row(
+            single_row(
                 &keymap,
-                &extension_command("_execute_action", " ", Some(ctrl_e))
+                extension_command("_execute_action", " ", Some(ctrl_e))
             )
             .0,
             "Activate the extension: Ctrl+E"
         );
         assert_eq!(
-            shortcut_row(
+            single_row(
                 &keymap,
-                &extension_command("_execute_side_panel", "", Some(ctrl_e))
+                extension_command("_execute_side_panel", "", Some(ctrl_e))
             )
             .0,
             "Open the side panel: Ctrl+E"
         );
         assert_eq!(
-            shortcut_row(&keymap, &extension_command("save-page", "", None)).0,
+            single_row(&keymap, extension_command("save-page", "", None)).0,
             "save-page: no shortcut"
+        );
+    }
+
+    #[test]
+    fn a_later_extension_is_not_active_where_an_earlier_one_holds_the_chord() {
+        let keymap = Keymap::defaults(Platform::Windows);
+        let ctrl_e = KeyChord::new(Modifiers::CONTROL, Code::KeyE);
+        let extensions = [
+            extension_named(
+                "reader",
+                "Reader",
+                true,
+                vec![extension_command("open", "Open the reader", Some(ctrl_e))],
+            ),
+            extension_named(
+                "notes",
+                "Notes",
+                true,
+                vec![extension_command("save", "Save a note", Some(ctrl_e))],
+            ),
+        ];
+        // The first holder: live, no line.
+        assert_eq!(
+            row_of(&keymap, &extensions, 0, 0),
+            ("Open the reader: Ctrl+E".to_string(), None)
+        );
+        // The later one: its key runs the earlier extension's command.
+        assert_eq!(
+            row_of(&keymap, &extensions, 1, 0),
+            (
+                "Save a note: Ctrl+E".to_string(),
+                Some("Not active: Ctrl+E is Reader's shortcut".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn a_second_command_of_one_extension_is_not_active_where_its_first_holds_the_chord() {
+        let keymap = Keymap::defaults(Platform::Windows);
+        let ctrl_e = KeyChord::new(Modifiers::CONTROL, Code::KeyE);
+        let extensions = [extension_named(
+            "reader",
+            "Reader",
+            true,
+            vec![
+                extension_command("open", "Open the reader", Some(ctrl_e)),
+                extension_command("close", "Close the reader", Some(ctrl_e)),
+            ],
+        )];
+        assert_eq!(
+            row_of(&keymap, &extensions, 0, 0),
+            ("Open the reader: Ctrl+E".to_string(), None)
+        );
+        assert_eq!(
+            row_of(&keymap, &extensions, 0, 1),
+            (
+                "Close the reader: Ctrl+E".to_string(),
+                Some("Not active: Ctrl+E is the shortcut for Open the reader".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn a_disabled_extension_is_not_active_and_holds_no_chord_for_a_later_one() {
+        let keymap = Keymap::defaults(Platform::Windows);
+        let ctrl_e = KeyChord::new(Modifiers::CONTROL, Code::KeyE);
+        let extensions = [
+            extension_named(
+                "reader",
+                "Reader",
+                false,
+                vec![extension_command("open", "Open the reader", Some(ctrl_e))],
+            ),
+            extension_named(
+                "notes",
+                "Notes",
+                true,
+                vec![extension_command("save", "Save a note", Some(ctrl_e))],
+            ),
+        ];
+        assert_eq!(
+            row_of(&keymap, &extensions, 0, 0),
+            (
+                "Open the reader: Ctrl+E".to_string(),
+                Some("Not active: the extension is off".to_string())
+            )
+        );
+        // The later extension's key does fire, so its row is live.
+        assert_eq!(
+            row_of(&keymap, &extensions, 1, 0),
+            ("Save a note: Ctrl+E".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn the_keymap_override_wins_over_an_extension_holding_the_chord() {
+        let keymap = Keymap::defaults(Platform::Windows);
+        let ctrl_t = KeyChord::new(Modifiers::CONTROL, Code::KeyT);
+        let keymap_line = "Not active: Ctrl+T is the shortcut for New tab";
+        let live = [
+            extension_named(
+                "reader",
+                "Reader",
+                true,
+                vec![extension_command("open", "Open the reader", Some(ctrl_t))],
+            ),
+            extension_named(
+                "notes",
+                "Notes",
+                true,
+                vec![extension_command("save", "Save a note", Some(ctrl_t))],
+            ),
+        ];
+        assert_eq!(
+            row_of(&keymap, &live, 1, 0),
+            (
+                "Save a note: Ctrl+T".to_string(),
+                Some(keymap_line.to_string())
+            )
+        );
+        let disabled = [extension_named(
+            "reader",
+            "Reader",
+            false,
+            vec![extension_command("open", "Open the reader", Some(ctrl_t))],
+        )];
+        assert_eq!(
+            row_of(&keymap, &disabled, 0, 0),
+            (
+                "Open the reader: Ctrl+T".to_string(),
+                Some(keymap_line.to_string())
+            )
         );
     }
 }

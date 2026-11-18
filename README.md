@@ -381,8 +381,11 @@ The engine contract, in `osmena-engine`:
   toolbar" submenu with a check per extension, offers to install the
   extension on the active tab's store page, opens the store, loads an
   unpacked directory, and opens the settings window, whose Extensions
-  section switches each extension on or off, pins it, removes it, and
-  installs by store URL or id. Pinned extensions sit as icons beside the
+  section switches each extension on or off, pins it, removes it, installs
+  by store URL or id, and lists each extension's shortcuts. One that will
+  not run its command is marked "Not active" with the reason:
+  the keymap holds its keys, another command holds them, or the extension
+  is off. Pinned extensions sit as icons beside the
   address bar; clicking one opens the popup under it, or runs the action
   when it has no popup. On an engine with `side_panels`, a panel an
   extension opens sits at the page's right edge under a header with its
