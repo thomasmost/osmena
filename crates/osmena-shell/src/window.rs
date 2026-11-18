@@ -495,6 +495,7 @@ impl<E: Engine> BrowserWindow<E> {
                 Some(p) => (p.y as f32) < self.content_top_px,
                 None => true,
             },
+            over_panel: false,
             content_is_egui: self.content_is_egui,
             over_egui: self.egui.egui_ctx.is_pointer_over_egui(),
             popup_open: egui::Popup::is_any_open(&self.egui.egui_ctx) || self.chrome.popup_open(),

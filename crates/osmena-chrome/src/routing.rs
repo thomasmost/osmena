@@ -16,19 +16,25 @@ use winit::window::ResizeDirection;
 use crate::input::{self, KeyRoute};
 use crate::theme;
 
-/// Who receives a pointer event: the chrome (egui) or the page.
+/// Who receives a pointer event: the chrome (egui), the active tab's
+/// page, or the side panel's view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PointerTarget {
     Egui,
     Page,
+    Panel,
 }
 
 /// What the window knows about the pointer's position and egui's state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PointerContext {
-    /// The pointer is above the page area, or its position is unknown.
+    /// The pointer is above the page area or over the side panel's
+    /// header, or its position is unknown.
     pub over_chrome: bool,
-    /// egui draws the page area itself (the crash panel).
+    /// The pointer is over the side panel's view ([`ContentRegion::Panel`]).
+    pub over_panel: bool,
+    /// egui draws the page area itself (the crash panel, a block page).
+    /// The side panel beside it is still the engine's.
     pub content_is_egui: bool,
     /// The pointer is over an interactable egui layer (menus, the error
     /// overlay).
@@ -39,12 +45,17 @@ pub struct PointerContext {
 
 /// The side that gets a pointer event. A capture (set by a press) wins over
 /// everything else; otherwise egui owns the pointer over the chrome and over
-/// any egui layer or open popup, and the page owns the rest.
+/// any egui layer or open popup, the side panel's view owns it over its own
+/// rectangle, and the page owns the rest unless egui draws the page area.
 pub fn route_pointer(captured: Option<PointerTarget>, ctx: PointerContext) -> PointerTarget {
     if let Some(captured) = captured {
         return captured;
     }
-    if ctx.over_chrome || ctx.content_is_egui || ctx.over_egui || ctx.popup_open {
+    if ctx.over_chrome || ctx.over_egui || ctx.popup_open {
+        PointerTarget::Egui
+    } else if ctx.over_panel {
+        PointerTarget::Panel
+    } else if ctx.content_is_egui {
         PointerTarget::Egui
     } else {
         PointerTarget::Page
@@ -53,11 +64,13 @@ pub fn route_pointer(captured: Option<PointerTarget>, ctx: PointerContext) -> Po
 
 /// Pointer capture: the side that took the first button press gets every
 /// pointer event until the last pressed button is released, so a drag that
-/// crosses the toolbar edge ends where it started, and holding a second
-/// button does not hand the pointer over in the middle.
+/// crosses the toolbar edge, or the edge between the page and the side
+/// panel, ends where it started, and holding a second button does not hand
+/// the pointer over in the middle.
 ///
-/// A capture held by the page also remembers the tab that got the press:
-/// its moves and release go to that tab even if another tab became active
+/// A capture held by the page or the panel also remembers the view that
+/// got the press (a tab, or the panel's view): its moves and release go to
+/// that view even if another tab became active or another panel is shown
 /// meanwhile (a press in tab A, then Ctrl+Tab makes B active, then the
 /// release: A gets it, so A never keeps a button down and B never sees a
 /// release it did not start).
@@ -65,7 +78,7 @@ pub fn route_pointer(captured: Option<PointerTarget>, ctx: PointerContext) -> Po
 pub struct PointerCapture {
     pressed: HashSet<MouseButton>,
     target: Option<PointerTarget>,
-    /// The tab holding a page capture.
+    /// The view holding a page or panel capture.
     tab: Option<TabId>,
 }
 
@@ -75,14 +88,16 @@ impl PointerCapture {
         self.target
     }
 
-    /// The tab holding the capture, when the page holds it.
+    /// The view holding the capture, when the page or the panel holds it:
+    /// the tab, or the panel's view.
     pub fn tab(&self) -> Option<TabId> {
         self.tab
     }
 
     /// A button went down while `current` was the pointer's side and
-    /// `tab` was the tab a page press would reach. Returns the side that
-    /// gets this press.
+    /// `tab` was the view a press there would reach (the pointer's tab
+    /// for the page, the shown panel's view for the panel). Returns the
+    /// side that gets this press.
     pub fn press(
         &mut self,
         button: MouseButton,
@@ -91,7 +106,7 @@ impl PointerCapture {
     ) -> PointerTarget {
         if self.pressed.is_empty() {
             self.target = Some(current);
-            self.tab = (current == PointerTarget::Page).then_some(tab).flatten();
+            self.tab = (current != PointerTarget::Egui).then_some(tab).flatten();
         }
         self.pressed.insert(button);
         self.target.unwrap_or(current)
@@ -118,9 +133,9 @@ impl PointerCapture {
     }
 
     /// End the capture because the window lost focus: the releases will
-    /// arrive elsewhere. Returns the tab and the buttons it holds down
-    /// when the page holds the capture, so the window can release them
-    /// there; egui forgets its own on focus loss.
+    /// arrive elsewhere. Returns the view and the buttons it holds down
+    /// when the page or the panel holds the capture, so the window can
+    /// release them there; egui forgets its own on focus loss.
     pub fn release_all(&mut self) -> Option<(TabId, Vec<MouseButton>)> {
         let held = self
             .tab
@@ -472,10 +487,13 @@ mod tests {
     const RIGHT: MouseButton = MouseButton::Right;
     const TAB_A: TabId = TabId(1);
     const TAB_B: TabId = TabId(2);
+    /// A side panel's view.
+    const PANEL: TabId = TabId(9);
 
     fn ctx() -> PointerContext {
         PointerContext {
             over_chrome: false,
+            over_panel: false,
             content_is_egui: false,
             over_egui: false,
             popup_open: false,
@@ -682,6 +700,124 @@ mod tests {
 
         capture.press(LEFT, PointerTarget::Egui, Some(TAB_A));
         assert_eq!(capture.release_all(), None);
+        assert_eq!(capture.captured(), None);
+    }
+
+    #[test]
+    fn pointer_over_the_panel_goes_to_the_panel() {
+        let c = PointerContext {
+            over_panel: true,
+            ..ctx()
+        };
+        assert_eq!(route_pointer(None, c), PointerTarget::Panel);
+    }
+
+    /// The crash panel and the block page cover the page's rectangle
+    /// only: the side panel beside them still gets its pointer.
+    #[test]
+    fn the_chromes_own_page_keeps_the_page_area_but_not_the_panel() {
+        let over_page = PointerContext {
+            content_is_egui: true,
+            ..ctx()
+        };
+        assert_eq!(route_pointer(None, over_page), PointerTarget::Egui);
+        let over_panel = PointerContext {
+            content_is_egui: true,
+            over_panel: true,
+            ..ctx()
+        };
+        assert_eq!(route_pointer(None, over_panel), PointerTarget::Panel);
+    }
+
+    #[test]
+    fn egui_layers_and_popups_take_the_pointer_over_the_panel_too() {
+        for c in [
+            PointerContext {
+                over_panel: true,
+                over_egui: true,
+                ..ctx()
+            },
+            PointerContext {
+                over_panel: true,
+                popup_open: true,
+                ..ctx()
+            },
+        ] {
+            assert_eq!(route_pointer(None, c), PointerTarget::Egui, "{c:?}");
+        }
+    }
+
+    /// A text selection dragged from the page across the boundary: the
+    /// page keeps every move and the release, in the tab that got the
+    /// press, and the panel sees nothing of it.
+    #[test]
+    fn a_press_in_the_page_dragged_over_the_panel_stays_with_the_page() {
+        let mut capture = PointerCapture::default();
+        assert_eq!(
+            capture.press(LEFT, PointerTarget::Page, Some(TAB_A)),
+            PointerTarget::Page
+        );
+        let over_panel = PointerContext {
+            over_panel: true,
+            ..ctx()
+        };
+        let now = route_pointer(capture.captured(), over_panel);
+        assert_eq!(now, PointerTarget::Page);
+        assert_eq!(capture.tab(), Some(TAB_A));
+        assert_eq!(capture.release(LEFT, now), PointerTarget::Page);
+        // The capture is over: the panel owns the pointer where it rests.
+        assert_eq!(
+            route_pointer(capture.captured(), over_panel),
+            PointerTarget::Panel
+        );
+    }
+
+    /// And the other way: a press in the panel names the panel's view,
+    /// and a drag over the page, or up over the toolbar, stays the
+    /// panel's until the release.
+    #[test]
+    fn a_press_in_the_panel_dragged_over_the_page_stays_with_the_panel() {
+        let mut capture = PointerCapture::default();
+        assert_eq!(
+            capture.press(LEFT, PointerTarget::Panel, Some(PANEL)),
+            PointerTarget::Panel
+        );
+        assert_eq!(capture.tab(), Some(PANEL));
+        assert_eq!(
+            route_pointer(capture.captured(), ctx()),
+            PointerTarget::Panel
+        );
+        let over_chrome = PointerContext {
+            over_chrome: true,
+            ..ctx()
+        };
+        assert_eq!(
+            route_pointer(capture.captured(), over_chrome),
+            PointerTarget::Panel
+        );
+        // A second button pressed over the page joins the panel's capture.
+        assert_eq!(
+            capture.press(RIGHT, PointerTarget::Page, Some(TAB_A)),
+            PointerTarget::Panel
+        );
+        assert_eq!(capture.tab(), Some(PANEL));
+        assert_eq!(
+            capture.release(RIGHT, PointerTarget::Page),
+            PointerTarget::Panel
+        );
+        assert_eq!(
+            capture.release(LEFT, PointerTarget::Page),
+            PointerTarget::Panel
+        );
+        assert_eq!(capture.captured(), None);
+        assert_eq!(capture.tab(), None);
+    }
+
+    #[test]
+    fn losing_focus_hands_back_the_buttons_the_panel_holds() {
+        let mut capture = PointerCapture::default();
+        capture.press(LEFT, PointerTarget::Panel, Some(PANEL));
+        assert_eq!(capture.release_all(), Some((PANEL, vec![LEFT])));
         assert_eq!(capture.captured(), None);
     }
 
