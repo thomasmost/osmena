@@ -101,6 +101,21 @@ The engine contract, in `osmena-engine`:
   tell frames apart may cancel those too) and report
   `EngineEvent::NavigationBlocked`; the model blocks what the user types
   whether or not the engine has a hook).
+  For an engine that runs extensions (`EngineInfo::extensions` is
+  `Some`, with or without `ExtensionSupport::side_panels`),
+  `strip_changed` hands over every window's strip (`WindowStrip`: the
+  tabs in strip order with the active one flagged, deferred tabs
+  included, the folders, the side panel the window shows, and which
+  window has the focus) once after the first windows open and then
+  whenever it differs from the last one sent, after the commands and
+  events of a turn of the event loop; `extension_reply` answers an
+  `EngineEvent::ExtensionRequest` by its token, exactly once, and always
+  before the `strip_changed` that shows the request's effect (both
+  defaulted to nothing). `StripSnapshot` is the same data owned
+  (`StripSnapshot::of(&browser, browser.focused)`, `lend`), for an
+  engine that keeps the last strip to compare the next against. The
+  shell keeps `Browser::focused`: the browser window with the focus,
+  `None` while none has it.
 - `TabHost`: create, adopt, close, navigate, history, show and hide,
   focus, resize, input (every pointer event carries the keyboard modifiers
   held at that moment, from the window's own state; an engine never infers
@@ -128,7 +143,22 @@ The engine contract, in `osmena-engine`:
   that can replace an entry should). Forward after Back from a block page
   then lands on the bare `about:blank` the block page sat over; the model
   keeps no per-entry state, so the page cannot be restored and this is
-  accepted.
+  accepted. A side panel is a second view in the window, under a `TabId`
+  the model allocates and that is in no strip: `create_view` makes it
+  (hidden and without focus, showing a page of an extension), `close_view`
+  ends it, `set_view_origin` says where it sits on screen as
+  `set_content_origin` does for the page, and `extension_command` runs an
+  extension's keyboard command for the window's active tab (all four
+  defaulted to nothing). Between `create_view` and `close_view` the view
+  answers `has_tab`, `resize_content`, `paint_page`, `input`,
+  `set_focused`, `show` and `hide` under its id as a tab does: it has a
+  size of its own, its pointer positions count from its own top left, the
+  shell shows it while its panel is drawn (not in full screen, not in a
+  window too narrow for page and panel) and hides it otherwise, and it
+  has the focus from a click in it until a click in the page or a tab
+  switch. A view that ends on its own reports `EngineEvent::TabClosed` or
+  `TabCrashed` with its id. An engine whose `ExtensionSupport::side_panels`
+  is false sees none of this.
 - `Surface`: make current, resize, the glow handle, begin frame, present.
 
 ## What the user gets

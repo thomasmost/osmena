@@ -7,9 +7,8 @@ All notable changes to the osmena crates. The crates version together.
 ### Added
 
 - The model knows extension side panels, extension keyboard commands
-  and what an extension asks of the browser. Nothing is drawn or
-  forwarded yet: this is `osmena-core`, and the shell performs the new
-  actions as no-ops. For an engine crate: `Extension` gains
+  and what an extension asks of the browser (this is `osmena-core`; the
+  shell's half is the entry below). For an engine crate: `Extension` gains
   `side_panel: bool` and `commands: Vec<ExtensionCommand>` (a name, a
   description and the `KeyChord` the extension suggests), and
   `ExtensionSupport` gains `side_panels: bool` (`false` keeps today's
@@ -57,6 +56,35 @@ All notable changes to the osmena crates. The crates version together.
   restored tab loading out of sight is refused without a question. An
   engine that reports no such requests needs nothing.
 
+- The engine contract and the shell for a side panel and for extension
+  shortcuts. An engine that sets `ExtensionSupport::side_panels` gets a
+  second view in a window: `TabHost::{create_view, close_view,
+  set_view_origin}` for the panel's page, which then answers
+  `resize_content`, `paint_page`, `input`, `set_focused`, `show` and
+  `hide` under its own id; `Engine::strip_changed` with every window's
+  strip (`WindowStrip`, `StripTab`; `StripSnapshot` is the owned form)
+  whenever it changes; `Engine::extension_reply` for each
+  `EngineEvent::ExtensionRequest`; and `TabHost::extension_command` for
+  an extension's shortcut. All six are defaulted, so an engine without
+  side panels needs no change. `strip_changed` goes to every engine
+  that runs extensions (`EngineInfo::extensions` is `Some`), whatever
+  `side_panels` says, and the shell now sets `Browser::focused` to the
+  browser window with the focus. The shell carves the panel from the
+  right of the page area (`routing::panel_shown` says whether a window
+  draws one: the engine has `side_panels`, the window is not in full
+  screen, the model has a panel; `routing::split_content` says where,
+  360 points wide under a 36-point header, absent when the page would
+  get under 320 points), sizes and paints the view there, sends the pointer
+  over it to the view in its own coordinates (`PointerTarget::Panel`; a
+  drag across the boundary stays with the side that got the press) and
+  gives it the keyboard on a click, until a click in the page or a tab
+  switch. A shortcut an enabled extension declares fires as
+  `Command::ExtensionCommand` when the keymap holds no such chord
+  (`input::extension_chords`, `KeyTarget::ExtensionCommand`); a chord in
+  the keymap always runs the keymap's command. `input::route_key` and
+  `routing::KeyRouter::route` take the extensions' chords as a last
+  argument, `PointerContext` gains `over_panel`, and `KeyTarget` is no
+  longer `Copy`.
 - The Launch Panel's field completes an address ahead of the typist.
   Before the first space, the most visited page whose address starts
   with the typing stands in the field, the rest of its address after
