@@ -843,8 +843,9 @@ pub fn extensions_menu(
             })
             .collect(),
     });
-    // Kept and disabled while no panel shows, like Find on an engine
-    // that cannot search; absent on an engine that shows none.
+    // Kept and disabled while the window has no panel in the model, like
+    // Find on an engine that cannot search; absent on an engine that shows
+    // none.
     if support.side_panels {
         entries.push(MenuEntry::item(
             "Close side panel",
