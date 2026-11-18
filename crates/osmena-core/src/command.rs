@@ -7412,6 +7412,31 @@ mod tests {
     }
 
     #[test]
+    fn an_extension_closing_the_last_tab_while_downloads_go_asks_first_and_closes_nothing() {
+        let (mut b, window, tab) = one_window();
+        crate::apply(
+            &mut b,
+            &crate::EngineEvent::DownloadUpdated {
+                id: 42,
+                report: download_report("f.zip", DownloadState::InProgress),
+            },
+        );
+        let actions = ask(&mut b, 1, ExtensionRequest::CloseTabs(vec![tab]));
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::ShowPrompt {
+                    window,
+                    prompt: Prompt::QuitWithDownloads { count: 1 },
+                },
+                reply(1, ExtensionReply::Done),
+            ]
+        );
+        assert!(b.window(window).is_some());
+        assert_eq!(order(&b, window), vec![tab]);
+    }
+
+    #[test]
     fn grouping_tabs_makes_an_expanded_folder_named_after_the_extension() {
         // side-panel.AC4.1
         let (mut b, window, t) = window_with_tabs(5);
