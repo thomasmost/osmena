@@ -48,7 +48,8 @@ pub use event::{
 };
 pub use extension::{
     Extension, ExtensionCommand, ExtensionReply, ExtensionRequest, ExtensionSource,
-    InstalledExtension, InstalledExtensions, InstalledExtensionsError, SidePanel,
+    InstalledExtension, InstalledExtensions, InstalledExtensionsError, ShortcutVerdict, SidePanel,
+    shortcut_verdict,
 };
 pub use history::{History, HistoryEntry, HistoryError};
 pub use input::{ButtonAction, EngineInput, KeyInput, MouseButton};

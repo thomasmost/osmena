@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::keymap::KeyChord;
+use crate::keymap::{CommandKind, KeyChord, Keymap};
 use crate::model::{Favicon, FolderId, TabId, WindowId};
 use crate::settings::write_atomically;
 
@@ -62,6 +62,33 @@ pub struct ExtensionCommand {
     /// The chord the extension suggests for this platform, if any. A
     /// chord the keymap holds is the keymap's.
     pub chord: Option<KeyChord>,
+}
+
+/// What becomes of an extension command's suggested shortcut. The
+/// keymap is resolved before any extension's chord, so a chord the
+/// keymap holds never reaches the extension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShortcutVerdict {
+    /// The manifest suggests no key for this platform.
+    Unassigned,
+    /// No keymap chord uses it: the key runs the extension's command.
+    Free(KeyChord),
+    /// The keymap holds the chord: the key runs `by`, not the
+    /// extension's command.
+    Overridden { chord: KeyChord, by: CommandKind },
+}
+
+/// The verdict on `command`'s shortcut against `keymap`: the same
+/// lookup the key router makes, for the places that tell the user (the
+/// settings window) or the extension (its commands list).
+pub fn shortcut_verdict(keymap: &Keymap, command: &ExtensionCommand) -> ShortcutVerdict {
+    match command.chord {
+        None => ShortcutVerdict::Unassigned,
+        Some(chord) => match keymap.resolve(chord) {
+            Some(by) => ShortcutVerdict::Overridden { chord, by },
+            None => ShortcutVerdict::Free(chord),
+        },
+    }
 }
 
 /// A side panel an extension opened: a page of the extension docked
@@ -313,5 +340,52 @@ mod tests {
         let snapshot = InstalledExtensions::of(&[extension("aaaa", "Blocker")]);
         snapshot.save(&path).unwrap();
         assert_eq!(InstalledExtensions::load(&path).unwrap(), snapshot);
+    }
+
+    use crate::keymap::Platform;
+    use keyboard_types::{Code, Modifiers};
+
+    fn shortcut(chord: Option<KeyChord>) -> ExtensionCommand {
+        ExtensionCommand {
+            name: "toggle".to_string(),
+            description: "Toggle the panel".to_string(),
+            chord,
+        }
+    }
+
+    #[test]
+    fn a_shortcut_is_free_overridden_or_unassigned() {
+        let mut keymap = Keymap::defaults(Platform::Windows);
+        let ctrl_e = KeyChord::new(Modifiers::CONTROL, Code::KeyE);
+        let ctrl_t = KeyChord::new(Modifiers::CONTROL, Code::KeyT);
+        assert_eq!(
+            shortcut_verdict(&keymap, &shortcut(None)),
+            ShortcutVerdict::Unassigned
+        );
+        assert_eq!(
+            shortcut_verdict(&keymap, &shortcut(Some(ctrl_e))),
+            ShortcutVerdict::Free(ctrl_e)
+        );
+        assert_eq!(
+            shortcut_verdict(&keymap, &shortcut(Some(ctrl_t))),
+            ShortcutVerdict::Overridden {
+                chord: ctrl_t,
+                by: CommandKind::NewTab
+            }
+        );
+        // The verdict follows the user's keymap, not the defaults.
+        keymap.bind(ctrl_e, CommandKind::Find);
+        assert_eq!(
+            shortcut_verdict(&keymap, &shortcut(Some(ctrl_e))),
+            ShortcutVerdict::Overridden {
+                chord: ctrl_e,
+                by: CommandKind::Find
+            }
+        );
+        keymap.unbind(ctrl_t);
+        assert_eq!(
+            shortcut_verdict(&keymap, &shortcut(Some(ctrl_t))),
+            ShortcutVerdict::Free(ctrl_t)
+        );
     }
 }
