@@ -74,6 +74,16 @@ pub fn extension_chords(extensions: &[Extension]) -> Vec<ExtensionChord<'_>> {
         .collect()
 }
 
+/// The index into `extensions` of the entry that takes `chord` when the
+/// keymap does not hold it: the first one declaring it, which is the rule
+/// [`route_key`] applies. `None` when no entry declares it. The settings
+/// window asks the same question to say who holds a shortcut.
+pub fn extension_taking(extensions: &[ExtensionChord<'_>], chord: KeyChord) -> Option<usize> {
+    extensions
+        .iter()
+        .position(|e| KeyChord::new(e.chord.modifiers, e.chord.code) == chord)
+}
+
 /// Where a key event goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyRoute {
@@ -122,9 +132,7 @@ pub fn route_key(
     let initial = pressed && !repeat;
     let bound = if initial { keymap.resolve(chord) } else { None };
     let extension = if initial && bound.is_none() {
-        extensions
-            .iter()
-            .position(|e| KeyChord::new(e.chord.modifiers, e.chord.code) == chord)
+        extension_taking(extensions, chord)
     } else {
         None
     };
@@ -483,5 +491,61 @@ mod tests {
             &chords,
         );
         assert_eq!(r, KeyRoute::Extension(0));
+    }
+
+    #[test]
+    fn the_first_listed_entry_takes_a_chord_and_no_entry_takes_an_undeclared_one() {
+        let extensions = [
+            extension("aaa", true, &[("open", Some(cmd_e()))]),
+            extension("ccc", true, &[("other", Some(cmd_e()))]),
+        ];
+        let chords = extension_chords(&extensions);
+        assert_eq!(extension_taking(&chords, cmd_e()), Some(0));
+        assert_eq!(extension_taking(&chords, alt_shift_y()), None);
+    }
+
+    #[test]
+    fn a_disabled_extension_takes_no_chord_so_a_later_one_does() {
+        let extensions = [
+            extension("aaa", false, &[("open", Some(cmd_e()))]),
+            extension("ccc", true, &[("other", Some(cmd_e()))]),
+        ];
+        let chords = extension_chords(&extensions);
+        let taker = extension_taking(&chords, cmd_e()).expect("ccc declares the chord");
+        assert_eq!(chords[taker].extension, "ccc");
+    }
+
+    #[test]
+    fn a_second_command_of_one_extension_loses_a_chord_its_first_command_holds() {
+        let extensions = [extension(
+            "aaa",
+            true,
+            &[("open", Some(cmd_e())), ("close", Some(cmd_e()))],
+        )];
+        let chords = extension_chords(&extensions);
+        assert_eq!(extension_taking(&chords, cmd_e()), Some(0));
+        assert_eq!(chords[0].name, "open");
+    }
+
+    #[test]
+    fn route_key_sends_a_chord_to_the_entry_extension_taking_names() {
+        let extensions = [
+            extension("aaa", true, &[("open", Some(cmd_e()))]),
+            extension("ccc", true, &[("other", Some(cmd_e()))]),
+        ];
+        let chords = extension_chords(&extensions);
+        let r = route_key(
+            false,
+            true,
+            false,
+            Modifiers::META,
+            Code::KeyE,
+            &mac(),
+            &chords,
+        );
+        assert_eq!(
+            r,
+            KeyRoute::Extension(extension_taking(&chords, cmd_e()).unwrap())
+        );
     }
 }
