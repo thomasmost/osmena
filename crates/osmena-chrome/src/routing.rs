@@ -13,7 +13,7 @@ use osmena_core::{CommandKind, ExtensionSupport, Keymap, TabId, Window};
 use winit::event::MouseButton;
 use winit::window::ResizeDirection;
 
-use crate::input::{self, KeyRoute};
+use crate::input::{self, ExtensionChord, KeyRoute};
 use crate::theme;
 
 /// Who receives a pointer event: the chrome (egui), the active tab's
@@ -146,13 +146,16 @@ impl PointerCapture {
 }
 
 /// Where a key event goes, as decided by [`KeyRouter::route`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeyTarget {
     /// egui gets the key.
     Egui,
     /// The key fires a keymap command.
     Command(CommandKind),
-    /// The page gets the key in this tab: the tab that received its press.
+    /// The key is an enabled extension's shortcut, and no keymap chord.
+    ExtensionCommand { extension: String, name: String },
+    /// The page gets the key in this view: the view that received its
+    /// press, a tab or the side panel's.
     Page(TabId),
 }
 
@@ -172,37 +175,45 @@ pub struct KeyStroke {
 /// misses the release of a key it saw go down (after Enter submits the
 /// address bar, the field loses focus before the Enter release arrives).
 ///
-/// A key the page holds remembers the tab that received its press. Its
-/// repeats and release go to that tab even if another tab became active
-/// meanwhile (Meta pressed in tab A, then Cmd+Shift+] makes B active, then
-/// Meta is released: A gets the release, so A never keeps a key down). If
-/// that tab has closed, the hold is dropped and nothing is delivered.
+/// A key the page holds remembers the view that received its press: the
+/// active tab, or the side panel's view while that has the keyboard. Its
+/// repeats and release go to that view even if another became active or
+/// took the keyboard meanwhile (Meta pressed in tab A, then Cmd+Shift+]
+/// makes B active, then Meta is released: A gets the release, so A never
+/// keeps a key down; Shift pressed in the panel, then a click in the page:
+/// the panel gets the release). If that view has gone, the hold is dropped
+/// and nothing is delivered.
 ///
 /// The full rule, in order:
 /// 1. A release goes to the side that got the press, whoever has focus now;
 ///    a release nobody here saw pressed goes to egui while it has focus and
 ///    nowhere otherwise.
 /// 2. A press or repeat is first put to [`input::route_key`]: the initial
-///    press of a bound chord is a command (while egui has focus, only chords
-///    with Cmd or Ctrl). A command takes its key away from the page, so the
-///    chord's repeats and release never reach it.
-/// 3. A press or repeat of a key the page holds goes to the tab that holds
-///    it, or is dropped if that tab is gone.
+///    press of a chord bound in the keymap is a command, and failing that
+///    the initial press of an enabled extension's chord is that extension's
+///    command (while egui has focus, only chords with Cmd or Ctrl, for
+///    both). A command takes its key away from the page, so the chord's
+///    repeats and release never reach it.
+/// 3. A press or repeat of a key the page holds goes to the view that holds
+///    it, or is dropped if that view is gone.
 /// 4. egui gets the key while it has focus, or if it got the key's press.
 /// 5. A repeat nobody here saw pressed is dropped.
-/// 6. Otherwise the active tab gets the press and holds the key until its
-///    release.
+/// 6. Otherwise the view that has the keyboard gets the press and holds the
+///    key until its release.
 #[derive(Debug, Default)]
 pub struct KeyRouter {
-    /// Keys the page holds, each with the tab that received its press.
+    /// Keys the page holds, each with the view that received its press.
     page_keys: HashMap<Code, TabId>,
     egui_keys: HashSet<Code>,
 }
 
 impl KeyRouter {
-    /// Route one key event. `active` is the window's active tab, which gets
-    /// new page presses; `live` says whether a tab still exists. `None`
-    /// means nobody sees the event.
+    /// Route one key event. `active` is the view that has the keyboard,
+    /// which gets new page presses: the window's active tab, or the shown
+    /// side panel's view after a click in it ([`keyboard_view`]). `live`
+    /// says whether a view still exists (a tab of the window, or a side
+    /// panel's view). `extensions` are the enabled extensions' shortcuts.
+    /// `None` means nobody sees the event.
     pub fn route(
         &mut self,
         stroke: KeyStroke,
@@ -210,6 +221,7 @@ impl KeyRouter {
         active: Option<TabId>,
         live: impl Fn(TabId) -> bool,
         keymap: &Keymap,
+        extensions: &[ExtensionChord<'_>],
     ) -> Option<KeyTarget> {
         let KeyStroke {
             code,
@@ -226,11 +238,29 @@ impl KeyRouter {
             }
             return egui_wants_keyboard.then_some(KeyTarget::Egui);
         }
-        let first_cut =
-            input::route_key(egui_wants_keyboard, true, repeat, modifiers, code, keymap);
-        if let KeyRoute::Command(kind) = first_cut {
-            self.page_keys.remove(&code);
-            return Some(KeyTarget::Command(kind));
+        let first_cut = input::route_key(
+            egui_wants_keyboard,
+            true,
+            repeat,
+            modifiers,
+            code,
+            keymap,
+            extensions,
+        );
+        match first_cut {
+            KeyRoute::Command(kind) => {
+                self.page_keys.remove(&code);
+                return Some(KeyTarget::Command(kind));
+            }
+            KeyRoute::Extension(index) => {
+                self.page_keys.remove(&code);
+                let chord = &extensions[index];
+                return Some(KeyTarget::ExtensionCommand {
+                    extension: chord.extension.to_string(),
+                    name: chord.name.to_string(),
+                });
+            }
+            KeyRoute::Egui | KeyRoute::Page => {}
         }
         if let Some(&tab) = self.page_keys.get(&code) {
             if live(tab) {
@@ -255,12 +285,51 @@ impl KeyRouter {
     }
 
     /// Forget every key because the window lost focus: the releases will
-    /// arrive elsewhere. Returns the keys the page holds, with their tabs,
+    /// arrive elsewhere. Returns the keys the page holds, with their views,
     /// so the window can release them there; egui forgets its own held
     /// keys on `WindowFocused(false)`.
     pub fn release_all(&mut self) -> Vec<(Code, TabId)> {
         self.egui_keys.clear();
         self.page_keys.drain().collect()
+    }
+}
+
+/// The view that has the keyboard: the side panel's view `in_panel` after
+/// a click in it, for as long as that same view is the panel `shown`;
+/// otherwise the window's `active` tab. A panel that is closed, replaced
+/// by another tab's, or not drawn (full screen, a narrow window) never
+/// keeps the keyboard.
+pub fn keyboard_view(
+    active: Option<TabId>,
+    in_panel: Option<TabId>,
+    shown: Option<TabId>,
+) -> Option<TabId> {
+    match in_panel {
+        Some(view) if shown == Some(view) => Some(view),
+        _ => active,
+    }
+}
+
+/// What to tell the engine when the side panel a window draws changes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PanelTransition {
+    /// The view that was drawn and no longer is: `TabHost::hide` it, if
+    /// the host still has it.
+    pub hide: Option<TabId>,
+    /// The view that is drawn from now on: `TabHost::show` it.
+    pub show: Option<TabId>,
+}
+
+/// From the panel view the last frame drew to the one this frame draws
+/// (each `None` when no panel is drawn: none open, full screen, a window
+/// too narrow). The same view both times is nothing to do.
+pub fn panel_transition(previous: Option<TabId>, now: Option<TabId>) -> PanelTransition {
+    if previous == now {
+        return PanelTransition::default();
+    }
+    PanelTransition {
+        hide: previous,
+        show: now,
     }
 }
 
@@ -481,7 +550,9 @@ mod resize_tests {
 mod tests {
     use super::*;
     use egui::pos2;
-    use osmena_core::Platform;
+    use osmena_core::{KeyChord, Platform};
+
+    use crate::input::ExtensionChord;
 
     const LEFT: MouseButton = MouseButton::Left;
     const RIGHT: MouseButton = MouseButton::Right;
@@ -853,6 +924,7 @@ mod tests {
             Some(TAB_A),
             all_live,
             &mac(),
+            &[],
         )
     }
 
@@ -871,6 +943,7 @@ mod tests {
             Some(TAB_A),
             all_live,
             &mac(),
+            &[],
         )
     }
 
@@ -975,6 +1048,7 @@ mod tests {
                 Some(TAB_A),
                 all_live,
                 &mac(),
+                &[],
             ),
             Some(KeyTarget::Page(TAB_A))
         );
@@ -986,6 +1060,7 @@ mod tests {
                 Some(TAB_B),
                 all_live,
                 &mac(),
+                &[],
             ),
             Some(KeyTarget::Page(TAB_A))
         );
@@ -996,6 +1071,7 @@ mod tests {
                 Some(TAB_B),
                 all_live,
                 &mac(),
+                &[],
             ),
             Some(KeyTarget::Page(TAB_A))
         );
@@ -1007,6 +1083,7 @@ mod tests {
                 Some(TAB_B),
                 all_live,
                 &mac(),
+                &[],
             ),
             None
         );
@@ -1026,6 +1103,7 @@ mod tests {
                 Some(TAB_B),
                 tab_a_gone,
                 &mac(),
+                &[],
             ),
             None
         );
@@ -1038,6 +1116,7 @@ mod tests {
                 Some(TAB_B),
                 tab_a_gone,
                 &mac(),
+                &[],
             ),
             None,
             "a repeat of a key whose tab closed is not delivered"
@@ -1049,6 +1128,7 @@ mod tests {
                 Some(TAB_B),
                 tab_a_gone,
                 &mac(),
+                &[],
             ),
             Some(KeyTarget::Page(TAB_B)),
             "a fresh press goes to the active tab"
@@ -1108,6 +1188,225 @@ mod tests {
         assert_eq!(
             cmd(&mut keys, Code::KeyA, true, false, true),
             Some(KeyTarget::Egui)
+        );
+    }
+
+    fn claude() -> [ExtensionChord<'static>; 1] {
+        [ExtensionChord {
+            chord: KeyChord::new(Modifiers::META, Code::KeyE),
+            extension: "claude",
+            name: "toggle-side-panel",
+        }]
+    }
+
+    /// Cmd+E is an extension's: the press is its command, and neither the
+    /// page nor egui sees the press, the repeats or the release.
+    #[test]
+    fn an_extensions_chord_is_its_command_and_never_reaches_the_page() {
+        let mut keys = KeyRouter::default();
+        let mut route = |pressed, repeat| {
+            keys.route(
+                stroke(Code::KeyE, Modifiers::META, pressed, repeat),
+                false,
+                Some(TAB_A),
+                all_live,
+                &mac(),
+                &claude(),
+            )
+        };
+        assert_eq!(
+            route(true, false),
+            Some(KeyTarget::ExtensionCommand {
+                extension: "claude".to_string(),
+                name: "toggle-side-panel".to_string(),
+            })
+        );
+        assert_eq!(route(true, true), None);
+        assert_eq!(route(false, false), None);
+    }
+
+    /// An extension that declares Cmd+T gets nothing: the keymap's New
+    /// tab runs.
+    #[test]
+    fn an_extension_chord_loses_to_the_keymap() {
+        let mut keys = KeyRouter::default();
+        let greedy = [ExtensionChord {
+            chord: KeyChord::new(Modifiers::META, Code::KeyT),
+            extension: "greedy",
+            name: "grab",
+        }];
+        assert_eq!(
+            keys.route(
+                stroke(Code::KeyT, Modifiers::META, true, false),
+                false,
+                Some(TAB_A),
+                all_live,
+                &mac(),
+                &greedy,
+            ),
+            Some(KeyTarget::Command(CommandKind::NewTab))
+        );
+    }
+
+    /// The keyboard is the panel's only after a click in it and only
+    /// while that same panel is the one drawn; otherwise the active tab
+    /// has it.
+    #[test]
+    fn the_keyboard_is_the_panels_only_while_that_panel_is_shown() {
+        // No click in a panel yet.
+        assert_eq!(keyboard_view(Some(TAB_A), None, Some(PANEL)), Some(TAB_A));
+        // Clicked in, still shown.
+        assert_eq!(
+            keyboard_view(Some(TAB_A), Some(PANEL), Some(PANEL)),
+            Some(PANEL)
+        );
+        // Another panel is shown now, or none (closed, full screen).
+        assert_eq!(
+            keyboard_view(Some(TAB_A), Some(PANEL), Some(TabId(10))),
+            Some(TAB_A)
+        );
+        assert_eq!(keyboard_view(Some(TAB_A), Some(PANEL), None), Some(TAB_A));
+        // A window with no model has nobody to type to.
+        assert_eq!(keyboard_view(None, None, None), None);
+    }
+
+    #[test]
+    fn keys_go_to_the_panel_while_it_has_the_keyboard() {
+        let mut keys = KeyRouter::default();
+        let keyboard = keyboard_view(Some(TAB_A), Some(PANEL), Some(PANEL));
+        let mut route = |pressed, repeat| {
+            keys.route(
+                stroke(Code::KeyA, Modifiers::empty(), pressed, repeat),
+                false,
+                keyboard,
+                all_live,
+                &mac(),
+                &[],
+            )
+        };
+        assert_eq!(route(true, false), Some(KeyTarget::Page(PANEL)));
+        assert_eq!(route(true, true), Some(KeyTarget::Page(PANEL)));
+        assert_eq!(route(false, false), Some(KeyTarget::Page(PANEL)));
+    }
+
+    /// Cmd+T with the keyboard in the panel still opens a tab, and the
+    /// panel's page never sees the T.
+    #[test]
+    fn a_keymap_chord_fires_whichever_view_has_the_keyboard() {
+        let mut keys = KeyRouter::default();
+        let mut route = |pressed, repeat| {
+            keys.route(
+                stroke(Code::KeyT, Modifiers::META, pressed, repeat),
+                false,
+                Some(PANEL),
+                all_live,
+                &mac(),
+                &claude(),
+            )
+        };
+        assert_eq!(
+            route(true, false),
+            Some(KeyTarget::Command(CommandKind::NewTab))
+        );
+        assert_eq!(route(true, true), None);
+        assert_eq!(route(false, false), None);
+    }
+
+    /// A key pressed in the panel, then a click in the page: the release
+    /// goes to the panel's view, which saw the press, and the next press
+    /// to the tab.
+    #[test]
+    fn a_key_held_in_the_panel_releases_there_after_the_page_takes_the_keyboard() {
+        let mut keys = KeyRouter::default();
+        let mut route = |code, pressed, keyboard| {
+            keys.route(
+                stroke(code, Modifiers::empty(), pressed, false),
+                false,
+                keyboard,
+                all_live,
+                &mac(),
+                &[],
+            )
+        };
+        assert_eq!(
+            route(Code::ShiftLeft, true, Some(PANEL)),
+            Some(KeyTarget::Page(PANEL))
+        );
+        assert_eq!(
+            route(Code::KeyB, true, Some(TAB_A)),
+            Some(KeyTarget::Page(TAB_A))
+        );
+        assert_eq!(
+            route(Code::ShiftLeft, false, Some(TAB_A)),
+            Some(KeyTarget::Page(PANEL))
+        );
+    }
+
+    /// The panel closed with a key down in it: the liveness test says the
+    /// view is gone, so the release goes nowhere.
+    #[test]
+    fn a_key_held_in_a_panel_that_closed_is_dropped() {
+        let mut keys = KeyRouter::default();
+        keys.route(
+            stroke(Code::KeyA, Modifiers::empty(), true, false),
+            false,
+            Some(PANEL),
+            all_live,
+            &mac(),
+            &[],
+        );
+        let panel_gone = |view: TabId| view != PANEL;
+        assert_eq!(
+            keys.route(
+                stroke(Code::KeyA, Modifiers::empty(), false, false),
+                false,
+                Some(TAB_A),
+                panel_gone,
+                &mac(),
+                &[],
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn nothing_is_shown_or_hidden_while_the_same_panel_stays() {
+        assert_eq!(panel_transition(None, None), PanelTransition::default());
+        assert_eq!(
+            panel_transition(Some(PANEL), Some(PANEL)),
+            PanelTransition::default()
+        );
+    }
+
+    #[test]
+    fn a_panel_that_appears_is_shown_and_one_that_goes_is_hidden() {
+        assert_eq!(
+            panel_transition(None, Some(PANEL)),
+            PanelTransition {
+                hide: None,
+                show: Some(PANEL),
+            }
+        );
+        // Closed, or the window went full screen, or got too narrow.
+        assert_eq!(
+            panel_transition(Some(PANEL), None),
+            PanelTransition {
+                hide: Some(PANEL),
+                show: None,
+            }
+        );
+    }
+
+    /// A tab switch from a tab with its own panel to another with its
+    /// own: one view out, the other in.
+    #[test]
+    fn switching_between_two_panels_hides_one_and_shows_the_other() {
+        assert_eq!(
+            panel_transition(Some(PANEL), Some(TabId(10))),
+            PanelTransition {
+                hide: Some(PANEL),
+                show: Some(TabId(10)),
+            }
         );
     }
 

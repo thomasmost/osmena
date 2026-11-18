@@ -276,6 +276,7 @@ impl<S: Surface> SettingsWindow<S> {
                     key_input.modifiers,
                     key_input.code,
                     keymap,
+                    &[],
                 );
                 if let KeyRoute::Command(kind) = route {
                     return SettingsOutcome::Shortcut(kind);

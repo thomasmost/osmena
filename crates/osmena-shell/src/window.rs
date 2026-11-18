@@ -11,6 +11,7 @@ use egui::{Color32, LayerId, PaintCallback, Rect as EguiRect, pos2};
 use egui_glow::{CallbackFn, EguiGlow};
 use keyboard_types::{KeyState, Modifiers};
 use osmena_chrome::chrome::{self, ChromeState, WindowRequest};
+use osmena_chrome::input::extension_chords;
 use osmena_chrome::routing::{
     KeyRouter, KeyStroke, KeyTarget, PointerCapture, PointerContext, PointerTarget, content_pixels,
     resize_edge, route_pointer,
@@ -747,9 +748,10 @@ impl<E: Engine> BrowserWindow<E> {
                         .window(self.id)
                         .is_some_and(|w| w.tab(tab).is_some())
                 };
-                let target = self
-                    .keys
-                    .route(stroke, egui_wants_keyboard, active, live, keymap);
+                let chords = extension_chords(&browser.extensions);
+                let target =
+                    self.keys
+                        .route(stroke, egui_wants_keyboard, active, live, keymap, &chords);
                 match target {
                     Some(KeyTarget::Page(tab)) => {
                         forward_to_egui = false;
@@ -773,6 +775,14 @@ impl<E: Engine> BrowserWindow<E> {
                         if let Some(tab) = active {
                             commands.push(kind.into_command(self.id, tab));
                         }
+                    }
+                    Some(KeyTarget::ExtensionCommand { extension, name }) => {
+                        forward_to_egui = false;
+                        commands.push(Command::ExtensionCommand {
+                            window: self.id,
+                            extension,
+                            name,
+                        });
                     }
                     Some(KeyTarget::Egui) => {}
                     None => forward_to_egui = false,
