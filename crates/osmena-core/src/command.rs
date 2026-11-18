@@ -2012,15 +2012,18 @@ fn folder_mut(browser: &mut Browser, folder: FolderId) -> Option<&mut Folder> {
 /// Put the tabs (those in the window of the first) in the folder, which
 /// is made if `target` names a new one, and gather the folder's tabs
 /// where its first tab is. A tab leaves the folder it was in; a folder
-/// left empty goes.
-fn move_tabs_to_folder(browser: &mut Browser, tabs: &[TabId], target: &FolderTarget) {
-    let Some(window) = tabs.iter().find_map(|t| browser.window_of_tab(*t)) else {
-        return;
-    };
+/// left empty goes. Returns the folder, or `None` when nothing was done
+/// (no such tab, or a folder of another window).
+fn move_tabs_to_folder(
+    browser: &mut Browser,
+    tabs: &[TabId],
+    target: &FolderTarget,
+) -> Option<FolderId> {
+    let window = tabs.iter().find_map(|t| browser.window_of_tab(*t))?;
     let folder = match target {
         FolderTarget::Existing(id) => {
             if browser.window_of_folder(*id) != Some(window) {
-                return;
+                return None;
             }
             *id
         }
@@ -2047,6 +2050,7 @@ fn move_tabs_to_folder(browser: &mut Browser, tabs: &[TabId], target: &FolderTar
     }
     w.gather_folder(folder);
     w.prune_folders();
+    Some(folder)
 }
 
 /// The star's command: bookmark `tab`'s page in the last-used group
@@ -2815,6 +2819,10 @@ fn no_window(window: WindowId) -> String {
     format!("No window with id: {}.", window.0)
 }
 
+fn no_group(folder: FolderId) -> String {
+    format!("No group with id: {}.", folder.0)
+}
+
 /// The first of `tabs` the model does not have, as a refusal. A request
 /// naming several tabs is refused whole when one is unknown, as the
 /// extension API refuses it.
@@ -2823,6 +2831,14 @@ fn known_tabs(browser: &Browser, tabs: &[TabId]) -> Result<(), String> {
         Some(tab) => Err(no_tab(*tab)),
         None => Ok(()),
     }
+}
+
+/// The name a folder made for `extension` has until the extension names
+/// it: "<Extension name> Session", with the id standing in for an
+/// extension the model does not list.
+fn session_folder_name(browser: &Browser, extension: &str) -> String {
+    let name = browser.extension(extension).map_or(extension, |e| &e.name);
+    format!("{name} Session")
 }
 
 /// A new tab at `url` at the end of `window`'s strip, outside any
@@ -2905,6 +2921,40 @@ fn answer_request(
             known_tabs(browser, &[*tab])?;
             move_tabs(browser, &[*tab], *index);
             Ok((Vec::new(), ExtensionReply::Done))
+        }
+        ExtensionRequest::GroupTabs { tabs, folder } => {
+            known_tabs(browser, tabs)?;
+            let window = match folder {
+                Some(folder) => browser
+                    .window_of_folder(*folder)
+                    .ok_or_else(|| no_group(*folder))?,
+                None => tabs
+                    .first()
+                    .and_then(|tab| browser.window_of_tab(*tab))
+                    .ok_or_else(|| "No tabs to group.".to_string())?,
+            };
+            if tabs
+                .iter()
+                .any(|tab| browser.window_of_tab(*tab) != Some(window))
+            {
+                return Err("Tabs of another window cannot join this group.".to_string());
+            }
+            let target = match folder {
+                Some(folder) => FolderTarget::Existing(*folder),
+                None => FolderTarget::New {
+                    name: session_folder_name(browser, extension),
+                },
+            };
+            let folder = move_tabs_to_folder(browser, tabs, &target)
+                .ok_or_else(|| "No tabs to group.".to_string())?;
+            // A folder an extension makes starts open: the extension
+            // works in its tabs and the user watches.
+            if matches!(target, FolderTarget::New { .. })
+                && let Some(f) = folder_mut(browser, folder)
+            {
+                f.expanded = true;
+            }
+            Ok((Vec::new(), ExtensionReply::Folder(folder)))
         }
         ExtensionRequest::OpenWindow { url } => {
             let url = url.clone().unwrap_or_else(|| browser.new_tab_url());
@@ -7276,5 +7326,136 @@ mod tests {
             "{actions:?}"
         );
         assert_eq!(actions.last(), Some(&reply(2, ExtensionReply::Done)));
+    }
+
+    #[test]
+    fn grouping_tabs_makes_an_expanded_folder_named_after_the_extension() {
+        // side-panel.AC4.1
+        let (mut b, window, t) = window_with_tabs(5);
+        installed(&mut b, "ext", true, true);
+        b.extensions[0].name = "Claude".to_string();
+        let actions = ask(
+            &mut b,
+            1,
+            ExtensionRequest::GroupTabs {
+                tabs: vec![t[3], t[1]],
+                folder: None,
+            },
+        );
+        let w = b.window(window).unwrap();
+        assert_eq!(w.folders.len(), 1);
+        let folder = w.folders[0].id;
+        assert_eq!(actions, vec![reply(1, ExtensionReply::Folder(folder))]);
+        assert_eq!(w.folders[0].name, "Claude Session");
+        assert!(w.folders[0].expanded, "an extension's folder starts open");
+        // Gathered where the first of them is, in strip order.
+        assert_eq!(w.folder_tabs(folder), vec![t[1], t[3]]);
+        assert_eq!(order(&b, window), vec![t[0], t[1], t[3], t[2], t[4]]);
+        // The user's own new folder still starts collapsed.
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToFolder {
+                tabs: vec![t[4]],
+                folder: FolderTarget::New {
+                    name: String::new(),
+                },
+            },
+        );
+        let w = b.window(window).unwrap();
+        assert_eq!(w.folders[1].name, "Folder A");
+        assert!(!w.folders[1].expanded);
+        // An extension the model does not list lends its id.
+        let actions = crate::event::apply(
+            &mut b,
+            &crate::event::EngineEvent::ExtensionRequest {
+                token: 2,
+                extension: "unlisted".to_string(),
+                request: ExtensionRequest::GroupTabs {
+                    tabs: vec![t[0]],
+                    folder: None,
+                },
+            },
+        );
+        let w = b.window(window).unwrap();
+        assert_eq!(
+            actions,
+            vec![reply(2, ExtensionReply::Folder(w.folders[2].id))]
+        );
+        assert_eq!(w.folders[2].name, "unlisted Session");
+    }
+
+    #[test]
+    fn grouping_into_an_existing_folder_adds_the_tabs_and_keeps_its_state() {
+        // side-panel.AC4.2
+        let (mut b, window, t) = window_with_tabs(5);
+        // A folder the user made, collapsed and named by them.
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToFolder {
+                tabs: vec![t[1]],
+                folder: FolderTarget::New {
+                    name: "Work".to_string(),
+                },
+            },
+        );
+        let folder = b.window(window).unwrap().folders[0].id;
+        let actions = ask(
+            &mut b,
+            1,
+            ExtensionRequest::GroupTabs {
+                tabs: vec![t[4], t[2]],
+                folder: Some(folder),
+            },
+        );
+        assert_eq!(actions, vec![reply(1, ExtensionReply::Folder(folder))]);
+        let w = b.window(window).unwrap();
+        assert_eq!(w.folders.len(), 1);
+        assert_eq!(w.folder_tabs(folder), vec![t[1], t[2], t[4]]);
+        assert_eq!(order(&b, window), vec![t[0], t[1], t[2], t[4], t[3]]);
+        assert_eq!(w.folders[0].name, "Work");
+        assert!(!w.folders[0].expanded, "an existing folder is not opened");
+    }
+
+    #[test]
+    fn grouping_is_refused_whole_for_an_unknown_tab_or_folder_or_another_windows_tab() {
+        let (mut b, window, t) = window_with_tabs(3);
+        let other = dispatch(&mut b, &Command::NewWindow);
+        let EngineAction::OpenWindow { tab: far, .. } = other[0].clone() else {
+            panic!("NewWindow returns OpenWindow");
+        };
+        ask(
+            &mut b,
+            0,
+            ExtensionRequest::GroupTabs {
+                tabs: vec![t[0]],
+                folder: None,
+            },
+        );
+        let folder = b.window(window).unwrap().folders[0].id;
+        let before = b.windows.clone();
+        let group = |tabs, folder| ExtensionRequest::GroupTabs { tabs, folder };
+        assert_eq!(
+            ask(&mut b, 1, group(vec![t[1], TabId(99)], None)),
+            vec![refused(1, "No tab with id: 99.")]
+        );
+        assert_eq!(
+            ask(&mut b, 2, group(vec![t[1]], Some(FolderId(98)))),
+            vec![refused(2, "No group with id: 98.")]
+        );
+        // A page cannot change windows, so neither can a tab join a
+        // group of another window, or a new group span two.
+        assert_eq!(
+            ask(&mut b, 3, group(vec![t[1], far], Some(folder))),
+            vec![refused(3, "Tabs of another window cannot join this group.")]
+        );
+        assert_eq!(
+            ask(&mut b, 4, group(vec![t[1], far], None)),
+            vec![refused(4, "Tabs of another window cannot join this group.")]
+        );
+        assert_eq!(
+            ask(&mut b, 5, group(Vec::new(), None)),
+            vec![refused(5, "No tabs to group.")]
+        );
+        assert_eq!(b.windows, before, "a refused request changes nothing");
     }
 }
