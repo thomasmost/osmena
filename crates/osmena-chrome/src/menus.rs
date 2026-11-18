@@ -794,10 +794,11 @@ pub fn folder_menu(window: &Window, folder: FolderId) -> Vec<MenuEntry> {
 /// (disabled when it has no action, or the extension is off). "Pin to
 /// toolbar" holds a check item per extension. On an engine that shows
 /// side panels (`ExtensionSupport::side_panels`), "Close side panel"
-/// follows, enabled while this window shows one. Then the ways to add
-/// an extension: load an unpacked directory, install the extension the
-/// active tab's store page shows (`active_url` is the page the user is
-/// on), visit the store, and manage them in the settings window.
+/// follows, enabled while the window has a panel in the model (the active
+/// tab's, else the window's, even one too narrow to draw). Then the ways to
+/// add an extension: load an unpacked directory, install the extension the
+/// active tab's store page shows (`active_url` is the page the user is on),
+/// visit the store, and manage them in the settings window.
 pub fn extensions_menu(
     window: &Window,
     extensions: &[Extension],

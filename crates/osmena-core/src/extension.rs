@@ -71,16 +71,18 @@ pub struct ExtensionCommand {
 pub enum ShortcutVerdict {
     /// The manifest suggests no key for this platform.
     Unassigned,
-    /// No keymap chord uses it: the key runs the extension's command.
+    /// No keymap chord uses it. Another enabled command may still declare
+    /// the same chord, and then the key runs that one instead.
     Free(KeyChord),
     /// The keymap holds the chord: the key runs `by`, not the
     /// extension's command.
     Overridden { chord: KeyChord, by: CommandKind },
 }
 
-/// The verdict on `command`'s shortcut against `keymap`: the same
-/// lookup the key router makes, for the places that tell the user (the
-/// settings window) or the extension (its commands list).
+/// The verdict on `command`'s shortcut against `keymap` alone: the first
+/// lookup the key router makes. Which extension command holds a chord the
+/// keymap leaves free is not decided here; the settings window decides it
+/// where it draws the list.
 pub fn shortcut_verdict(keymap: &Keymap, command: &ExtensionCommand) -> ShortcutVerdict {
     match command.chord {
         None => ShortcutVerdict::Unassigned,
