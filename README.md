@@ -376,13 +376,18 @@ The engine contract, in `osmena-engine`:
   "Updates" below for what a browser's CI publishes.
 - **Extensions**, when the engine runs them (`EngineInfo::extensions`).
   The toolbar ends in a puzzle-piece button: its menu lists the installed
-  extensions (click one to open its action's popup), has a "Pin to
+  extensions (click one to run its action: its popup under the button, or
+  the extension's own click when it has no popup), has a "Pin to
   toolbar" submenu with a check per extension, offers to install the
   extension on the active tab's store page, opens the store, loads an
   unpacked directory, and opens the settings window, whose Extensions
   section switches each extension on or off, pins it, removes it, and
   installs by store URL or id. Pinned extensions sit as icons beside the
-  address bar; clicking one opens the popup under it. The model only
+  address bar; clicking one opens the popup under it, or runs the action
+  when it has no popup. On an engine with `side_panels`, a panel an
+  extension opens sits at the page's right edge under a header with its
+  icon, its name (or its id) and a close control; the puzzle menu's
+  "Close side panel" closes it. The model only
   holds the list (`Browser::extensions`) and the pinned ids
   (`pinned_extensions` in `settings.toml`); installing, enabling, and
   running them is the engine's, through `Engine::install_extension`

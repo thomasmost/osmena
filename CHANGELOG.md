@@ -116,6 +116,26 @@ All notable changes to the osmena crates. The crates version together.
   `osmena_core::completion`: visits, then the shorter address, then the
   later visit; a never-visited bookmark completes only what nothing in
   the history does.
+- The side panel's chrome. A panel an extension opens has a header
+  over it: the extension's icon and name (cut with an ellipsis when
+  long; an extension no longer installed is named by its id) and a
+  close control, with a hairline under the header and between page and
+  panel (`chrome::draw_side_panel_header`, which answers
+  `Command::CloseSidePanel`). It is drawn wherever
+  `routing::panel_shown` and `routing::split_content` give the panel
+  its rectangles: the engine has `ExtensionSupport::side_panels`, the
+  window is not in full screen, the model has a panel for the active
+  tab or the window, and the window is wide enough. On such an engine
+  the extensions menu gains "Close side panel", enabled while the
+  window has a panel in the model; the "☰" menu and the macOS menu bar
+  are unchanged. A pinned toolbar action without a popup is a live
+  button, and a live row of that menu. The settings window lists each
+  extension's shortcuts under it and marks one the keymap holds with
+  the action that has its keys; `osmena_core::extension::shortcut_verdict`
+  gives that answer (`ShortcutVerdict`: unassigned, free, or overridden
+  by the `CommandKind` that holds the chord). The header, the "Close
+  side panel" entry and the panel need `side_panels`; the pinned-action
+  button and the shortcut list show on any engine that runs extensions.
 
 ### Changed
 
