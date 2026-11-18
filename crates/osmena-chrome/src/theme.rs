@@ -40,6 +40,19 @@ pub const PANEL: u8 = 18;
 /// The rounding of a popup (a suggestions list, a popover, a prompt).
 pub const POPUP: u8 = 12;
 
+/// The width of the side panel docked on the right of the page area, in
+/// points. Fixed: the panel is not resizable.
+pub const SIDE_PANEL_WIDTH: f32 = 360.0;
+
+/// The height of the side panel's header (the extension's icon and name,
+/// the close control), in points.
+pub const SIDE_PANEL_HEADER: f32 = 36.0;
+
+/// The narrowest the page may get beside a side panel, in points: a
+/// content area narrower than this plus [`SIDE_PANEL_WIDTH`] shows no
+/// panel.
+pub const SIDE_PANEL_MIN_PAGE: f32 = 320.0;
+
 /// The shadow under a popup: wide and soft, cast straight down, so a
 /// list reads as lifted off the page rather than outlined.
 pub const POPUP_SHADOW: Shadow = Shadow {

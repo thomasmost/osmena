@@ -1,19 +1,20 @@
 //! The window's routing decisions as pure functions and small state
 //! machines: which side gets a pointer event, whether a key event is a
-//! keymap command or goes to egui or the page, and where the page area sits
-//! in physical pixels. The window reads egui
+//! keymap command, an extension's command, or goes to egui or a view, and
+//! where the page area and the side panel sit. The window reads egui
 //! and winit state and feeds it in here, so every rule has a unit test.
 
 use std::collections::{HashMap, HashSet};
 
 use dpi::PhysicalSize;
-use egui::Rect;
+use egui::{Rect, pos2};
 use keyboard_types::{Code, Modifiers};
-use osmena_core::{CommandKind, Keymap, TabId};
+use osmena_core::{CommandKind, ExtensionSupport, Keymap, TabId, Window};
 use winit::event::MouseButton;
 use winit::window::ResizeDirection;
 
 use crate::input::{self, KeyRoute};
+use crate::theme;
 
 /// Who receives a pointer event: the chrome (egui) or the page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -248,20 +249,154 @@ impl KeyRouter {
     }
 }
 
-/// The page area in physical pixels: its top edge, which pointer routing
-/// compares against, and its size. Both edges are rounded to whole pixels
-/// first and the size is the difference, so the size covers exactly the
-/// pixel rows and columns the blit paints.
-pub fn content_pixels(rect: Rect, pixels_per_point: f32) -> (f32, PhysicalSize<u32>) {
+/// The page area and the side panel beside it, in points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContentSplit {
+    /// The active tab's page: the whole content area while no panel is
+    /// drawn.
+    pub page: Rect,
+    /// The side panel, when one is drawn.
+    pub panel: Option<PanelRects>,
+}
+
+/// The two parts of a drawn side panel, in points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PanelRects {
+    /// The strip the chrome draws: the extension's name and the close
+    /// control.
+    pub header: Rect,
+    /// Where the engine's view of the panel's page is painted.
+    pub view: Rect,
+}
+
+/// Whether `window` draws a side panel: the engine shows them
+/// (`support` is `EngineInfo::extensions`), the window is not in full
+/// screen, which shows the page alone, and the model has a panel for
+/// the active tab or the window. This is [`split_content`]'s
+/// `panel_shown`; whether the panel also fits is `split_content`'s to
+/// say. The model keeps the panel through full screen, so leaving it
+/// brings the panel back.
+pub fn panel_shown(window: &Window, support: Option<&ExtensionSupport>) -> bool {
+    support.is_some_and(|support| support.side_panels)
+        && !window.fullscreen
+        && window.shown_panel().is_some()
+}
+
+/// Divide the content area (what is left under the toolbar) between the
+/// page and the side panel. The panel is [`theme::SIDE_PANEL_WIDTH`] wide
+/// on the right, its header [`theme::SIDE_PANEL_HEADER`] tall, and the
+/// page keeps its left edge, so the page still starts where it always
+/// did. There is no panel when `panel_shown` is false (the window shows
+/// none, the engine has none, or the window is full screen: the caller
+/// says, with [`panel_shown`]) or when the content area is narrower than the panel plus
+/// [`theme::SIDE_PANEL_MIN_PAGE`].
+///
+/// The rectangles are in points and share their edges exactly; put each
+/// through [`view_pixels`] (or [`content_pixels`]) and neighbours land on
+/// the same pixel column and row, with no gap and no overlap. The
+/// chrome's drawing, the shell's sizing and the pointer routing all read
+/// this one function.
+pub fn split_content(content: Rect, panel_shown: bool) -> ContentSplit {
+    if !panel_shown || content.width() < theme::SIDE_PANEL_WIDTH + theme::SIDE_PANEL_MIN_PAGE {
+        return ContentSplit {
+            page: content,
+            panel: None,
+        };
+    }
+    let boundary = content.max.x - theme::SIDE_PANEL_WIDTH;
+    let header_foot = (content.min.y + theme::SIDE_PANEL_HEADER).min(content.max.y);
+    ContentSplit {
+        page: Rect::from_min_max(content.min, pos2(boundary, content.max.y)),
+        panel: Some(PanelRects {
+            header: Rect::from_min_max(
+                pos2(boundary, content.min.y),
+                pos2(content.max.x, header_foot),
+            ),
+            view: Rect::from_min_max(pos2(boundary, header_foot), content.max),
+        }),
+    }
+}
+
+/// A view's rectangle in physical pixels from the window's top left.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewPixels {
+    pub left: f32,
+    pub top: f32,
+    /// Never zero in either direction: an engine's surface cannot be.
+    pub size: PhysicalSize<u32>,
+}
+
+impl ViewPixels {
+    /// The window point `(x, y)` (physical pixels) from this view's own
+    /// top left, which is how the view's engine wants its pointer events.
+    /// Negative, or beyond the size, while a captured drag is outside it.
+    pub fn local(&self, x: f32, y: f32) -> (f32, f32) {
+        (x - self.left, y - self.top)
+    }
+}
+
+/// `rect` on the pixel grid. Every edge is rounded to a whole pixel first
+/// and the size is the difference, so the size covers exactly the pixel
+/// rows and columns the paint fills, and two rectangles that share an
+/// edge in points share it in pixels.
+pub fn view_pixels(rect: Rect, pixels_per_point: f32) -> ViewPixels {
     let left = (rect.min.x * pixels_per_point).round();
     let right = (rect.max.x * pixels_per_point).round();
     let top = (rect.min.y * pixels_per_point).round();
     let bottom = (rect.max.y * pixels_per_point).round();
-    let size = PhysicalSize::new(
-        (right - left).max(1.0) as u32,
-        (bottom - top).max(1.0) as u32,
-    );
-    (top, size)
+    ViewPixels {
+        left,
+        top,
+        size: PhysicalSize::new(
+            (right - left).max(1.0) as u32,
+            (bottom - top).max(1.0) as u32,
+        ),
+    }
+}
+
+/// The page area in physical pixels: its top edge, which pointer routing
+/// compares against, and its size. See [`view_pixels`].
+pub fn content_pixels(rect: Rect, pixels_per_point: f32) -> (f32, PhysicalSize<u32>) {
+    let pixels = view_pixels(rect, pixels_per_point);
+    (pixels.top, pixels.size)
+}
+
+/// What the pointer is over, by position alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContentRegion {
+    /// Above the content area: the strip and the toolbar.
+    Chrome,
+    /// The active tab's page.
+    Page,
+    /// The side panel's header, which the chrome draws.
+    PanelHeader,
+    /// The side panel's view.
+    Panel,
+}
+
+/// Where the window point `(x, y)` (physical pixels) is, given the
+/// content area's top edge and the drawn panel's view, both from the last
+/// frame. The panel takes everything from its left edge rightwards; its
+/// header is what lies above the view's top.
+pub fn content_region(
+    x: f32,
+    y: f32,
+    content_top: f32,
+    panel: Option<ViewPixels>,
+) -> ContentRegion {
+    if y < content_top {
+        return ContentRegion::Chrome;
+    }
+    match panel {
+        Some(view) if x >= view.left => {
+            if y < view.top {
+                ContentRegion::PanelHeader
+            } else {
+                ContentRegion::Panel
+            }
+        }
+        _ => ContentRegion::Page,
+    }
 }
 
 /// Which edge of a frameless window the pointer at `(x, y)` (physical
@@ -863,5 +998,224 @@ mod tests {
         let rect = Rect::from_min_max(pos2(5.0, 5.0), pos2(5.0, 5.0));
         let (_, size) = content_pixels(rect, 1.0);
         assert_eq!(size, PhysicalSize::new(1, 1));
+    }
+
+    /// A content area under an 80-point chrome in a 1024 by 768 window.
+    fn content() -> Rect {
+        Rect::from_min_max(pos2(0.0, 80.0), pos2(1024.0, 768.0))
+    }
+
+    fn no_store_item(_: &url::Url) -> Option<String> {
+        None
+    }
+
+    /// An engine with extensions and side panels, and one without the
+    /// panels.
+    const PANELS: ExtensionSupport = ExtensionSupport {
+        store_name: "Test Store",
+        store_url: "https://store.example/",
+        store_item_id: no_store_item,
+        side_panels: true,
+    };
+    const NO_PANELS: ExtensionSupport = ExtensionSupport {
+        side_panels: false,
+        ..PANELS
+    };
+
+    /// `ext`'s panel, rendered by view 90.
+    fn side_panel() -> osmena_core::extension::SidePanel {
+        osmena_core::extension::SidePanel {
+            extension: "ext".to_string(),
+            page: "panel.html".to_string(),
+            view: TabId(90),
+        }
+    }
+
+    #[test]
+    fn a_panel_is_drawn_only_out_of_full_screen_on_an_engine_with_side_panels() {
+        let address = url::Url::parse("https://a.example/").expect("test URL parses");
+        let mut w = Window::with_tab(
+            osmena_core::WindowId(1),
+            osmena_core::Tab::new(TabId(1), address),
+        );
+        // No panel in the model: nothing to draw on any engine.
+        assert!(!panel_shown(&w, Some(&PANELS)));
+        w.panel = Some(side_panel());
+        assert!(panel_shown(&w, Some(&PANELS)));
+        // An engine without side panels, or without extensions at all.
+        assert!(!panel_shown(&w, Some(&NO_PANELS)));
+        assert!(!panel_shown(&w, None));
+        // Full screen shows the page alone; leaving it brings the panel
+        // back, since the model kept it.
+        w.fullscreen = true;
+        assert!(!panel_shown(&w, Some(&PANELS)));
+        w.fullscreen = false;
+        assert!(panel_shown(&w, Some(&PANELS)));
+        // The active tab's own panel counts as much as the window's.
+        w.panel = None;
+        w.tabs[0].panel = Some(side_panel());
+        assert!(panel_shown(&w, Some(&PANELS)));
+        // What the predicate feeds: no panel rectangle without it.
+        assert!(split_content(content(), false).panel.is_none());
+        assert!(split_content(content(), true).panel.is_some());
+    }
+
+    #[test]
+    fn a_window_without_a_shown_panel_gives_the_page_everything() {
+        assert_eq!(
+            split_content(content(), false),
+            ContentSplit {
+                page: content(),
+                panel: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_shown_panel_takes_a_fixed_width_on_the_right_under_its_header() {
+        assert_eq!(
+            split_content(content(), true),
+            ContentSplit {
+                page: Rect::from_min_max(pos2(0.0, 80.0), pos2(664.0, 768.0)),
+                panel: Some(PanelRects {
+                    header: Rect::from_min_max(pos2(664.0, 80.0), pos2(1024.0, 116.0)),
+                    view: Rect::from_min_max(pos2(664.0, 116.0), pos2(1024.0, 768.0)),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn a_content_area_too_narrow_for_page_and_panel_shows_no_panel() {
+        // 360 for the panel and 320 for the page: 680 is the least.
+        let narrow = Rect::from_min_max(pos2(0.0, 80.0), pos2(679.0, 768.0));
+        assert_eq!(
+            split_content(narrow, true),
+            ContentSplit {
+                page: narrow,
+                panel: None,
+            }
+        );
+        let just_enough = Rect::from_min_max(pos2(0.0, 80.0), pos2(680.0, 768.0));
+        let split = split_content(just_enough, true);
+        assert_eq!(split.page.width(), 320.0);
+        assert!(split.panel.is_some());
+    }
+
+    #[test]
+    fn a_content_area_shorter_than_the_header_gives_the_view_no_height() {
+        let short = Rect::from_min_max(pos2(0.0, 80.0), pos2(1024.0, 100.0));
+        let panel = split_content(short, true).panel.expect("wide enough");
+        assert_eq!(panel.header.max.y, 100.0);
+        assert_eq!(panel.view.height(), 0.0);
+    }
+
+    /// The page's right edge and the panel's left are one pixel column,
+    /// and the header's foot and the view's top one pixel row, whatever
+    /// the scale: no gap and no overlap between the three rectangles.
+    #[test]
+    fn the_page_and_the_panel_share_their_pixel_edges_at_fractional_scales() {
+        let content = Rect::from_min_max(pos2(0.0, 80.4), pos2(1023.6, 767.2));
+        for ppp in [1.0, 1.25, 1.5, 1.75, 2.0] {
+            let split = split_content(content, true);
+            let panel = split.panel.expect("wide enough");
+            let page = view_pixels(split.page, ppp);
+            let header = view_pixels(panel.header, ppp);
+            let view = view_pixels(panel.view, ppp);
+            assert_eq!(page.left, 0.0, "at {ppp}");
+            assert_eq!(page.left + page.size.width as f32, view.left, "at {ppp}");
+            assert_eq!(header.left, view.left, "at {ppp}");
+            assert_eq!(header.top, page.top, "at {ppp}");
+            assert_eq!(header.top + header.size.height as f32, view.top, "at {ppp}");
+            assert_eq!(
+                view.left + view.size.width as f32,
+                (content.max.x * ppp).round(),
+                "at {ppp}"
+            );
+            assert_eq!(
+                view.top + view.size.height as f32,
+                (content.max.y * ppp).round(),
+                "at {ppp}"
+            );
+        }
+    }
+
+    #[test]
+    fn view_pixels_gives_the_top_left_and_the_size_on_the_pixel_grid() {
+        // 664 * 1.5 = 996; 116 * 1.5 = 174; 1024 * 1.5 = 1536; 768 * 1.5 = 1152.
+        let rect = Rect::from_min_max(pos2(664.0, 116.0), pos2(1024.0, 768.0));
+        assert_eq!(
+            view_pixels(rect, 1.5),
+            ViewPixels {
+                left: 996.0,
+                top: 174.0,
+                size: PhysicalSize::new(540, 978),
+            }
+        );
+        // The page area's top and size are the same arithmetic.
+        assert_eq!(
+            content_pixels(rect, 1.5),
+            (174.0, PhysicalSize::new(540, 978))
+        );
+    }
+
+    /// A pointer position in the window, seen from a view: from the
+    /// view's own top left, and negative once a drag has left it to the
+    /// left or upward.
+    #[test]
+    fn a_point_in_the_window_becomes_the_views_own_point() {
+        let view = ViewPixels {
+            left: 664.0,
+            top: 116.0,
+            size: PhysicalSize::new(360, 652),
+        };
+        assert_eq!(view.local(664.0, 116.0), (0.0, 0.0));
+        assert_eq!(view.local(700.0, 200.0), (36.0, 84.0));
+        assert_eq!(view.local(600.0, 100.0), (-64.0, -16.0));
+    }
+
+    #[test]
+    fn the_pointer_is_classified_by_the_rectangle_it_is_over() {
+        let panel = Some(ViewPixels {
+            left: 664.0,
+            top: 116.0,
+            size: PhysicalSize::new(360, 652),
+        });
+        // Above the content area it is the chrome, panel or not.
+        assert_eq!(
+            content_region(300.0, 79.0, 80.0, panel),
+            ContentRegion::Chrome
+        );
+        assert_eq!(
+            content_region(700.0, 79.0, 80.0, panel),
+            ContentRegion::Chrome
+        );
+        // Left of the panel, the page; the boundary column is the panel's.
+        assert_eq!(
+            content_region(663.0, 300.0, 80.0, panel),
+            ContentRegion::Page
+        );
+        assert_eq!(
+            content_region(664.0, 300.0, 80.0, panel),
+            ContentRegion::Panel
+        );
+        // The header strip above the view.
+        assert_eq!(
+            content_region(700.0, 80.0, 80.0, panel),
+            ContentRegion::PanelHeader
+        );
+        assert_eq!(
+            content_region(700.0, 115.0, 80.0, panel),
+            ContentRegion::PanelHeader
+        );
+        assert_eq!(
+            content_region(700.0, 116.0, 80.0, panel),
+            ContentRegion::Panel
+        );
+        // With no panel drawn the whole width is the page's.
+        assert_eq!(
+            content_region(700.0, 300.0, 80.0, None),
+            ContentRegion::Page
+        );
     }
 }
