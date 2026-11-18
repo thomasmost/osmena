@@ -1198,11 +1198,20 @@ impl<E: Engine> BrowserWindow<E> {
             if let Some((rects, view)) = panel {
                 paint_view(ui, &*host, textures, &gl, view, rects.view);
             }
-            // The header: a plain strip in the toolbar's fill, until the
-            // chrome draws the extension's name and the close control here.
-            if let Some(rects) = &split.panel {
-                let fill = chrome::Palette::new(chrome_color, ui.visuals().dark_mode).toolbar;
-                ui.painter().rect_filled(rects.header, 0.0, fill);
+            // The header over the panel's view, drawn after the view so
+            // its hairline lies over the view's first pixel column. No
+            // rectangles, no header: full screen, an engine without
+            // side panels, a window too narrow for both.
+            if let (Some(rects), Some(panel)) = (&split.panel, model.shown_panel()) {
+                commands.extend(chrome::draw_side_panel_header(
+                    ui,
+                    chrome_state,
+                    rects,
+                    chrome_color,
+                    model.id,
+                    panel,
+                    &browser.extensions,
+                ));
             }
         });
         self.content_top_px = content_top_px;
