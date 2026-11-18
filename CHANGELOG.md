@@ -137,7 +137,7 @@ All notable changes to the osmena crates. The crates version together.
   (another extension's, or this extension's own earlier command), or the
   extension is off. Who holds a chord is `osmena_chrome::input::extension_taking`,
   the rule `route_key` applies too. `osmena_core::extension::shortcut_verdict`
-  (with `ShortcutVerdict`, re-exported from `osmena_core`) gives the
+  (both re-exported from `osmena_core`) gives the
   keymap's answer alone: unassigned, free, or overridden by the
   `CommandKind` that holds the chord. The header, the "Close
   side panel" entry and the panel need `side_panels`; the pinned-action
