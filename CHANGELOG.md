@@ -34,14 +34,16 @@ All notable changes to the osmena crates. The crates version together.
   `EngineAction::CreateView`; `EngineAction::CloseView` follows when
   the panel is replaced or closed, or its tab or window closes, and a
   `TabClosed` or `TabCrashed` naming the view removes the panel with
-  nothing asked. `Command::CloseSidePanel` closes the panel a window
+  nothing asked; `osmena_core::window_losing_panel` names the window
+  that panel was in, for a shell that redraws it before `apply` drops
+  the panel. `Command::CloseSidePanel` closes the panel a window
   shows; `Command::ExtensionCommand` becomes
   `EngineAction::ExtensionCommand` for an enabled extension that
   declares the command (`Extension::has_command` says whether it does).
   `Browser::focused_window` is the window a request that names none
   lands in: `Browser::focused` while that window exists, else the first
-  window. Nothing sets `Browser::focused` yet, so until the shell does,
-  such a request lands in the first window.
+  window. The shell sets `Browser::focused` when a browser window gains
+  focus (see the engine contract entry below).
 - A page that asks for the microphone or the camera (`getUserMedia`)
   is answered by the user. An engine reports the request as
   `EngineEvent::MediaAccessRequested` (a `MediaRequest`: an id of the
@@ -83,8 +85,18 @@ All notable changes to the osmena crates. The crates version together.
   (`input::extension_chords`, `KeyTarget::ExtensionCommand`); a chord in
   the keymap always runs the keymap's command. `input::route_key` and
   `routing::KeyRouter::route` take the extensions' chords as a last
-  argument, `PointerContext` gains `over_panel`, and `KeyTarget` is no
-  longer `Copy`.
+  argument; `input::KeyRoute` gains `Extension(usize)` (the index of
+  the chord an extension declared); `KeyTarget` gains `ExtensionCommand`
+  and is no longer `Copy`; `PointerTarget` gains `Panel`;
+  `PointerContext` gains `over_panel`. Also new in `osmena-chrome`:
+  `input::{ExtensionChord, extension_chords}`,
+  `routing::{ContentRegion, ContentSplit, PanelRects, PanelTransition,
+  ViewPixels, content_region, drawn_panel_view, keyboard_view,
+  panel_shown, panel_transition, split_content, view_pixels}`, and
+  `theme::{SIDE_PANEL_WIDTH, SIDE_PANEL_HEADER, SIDE_PANEL_MIN_PAGE}`.
+  `osmena-engine` gains `WindowStrip`, `StripTab`, `StripSnapshot` (with
+  `of` and `lend`), `WindowSnapshot` and `TabSnapshot`. `osmena-shell`
+  gains no public item: its window and app modules are private.
 - The Launch Panel's field completes an address ahead of the typist.
   Before the first space, the most visited page whose address starts
   with the typing stands in the field, the rest of its address after
