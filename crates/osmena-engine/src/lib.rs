@@ -15,7 +15,11 @@
 use std::fmt;
 use std::sync::Arc;
 
-use osmena_core::{EngineEvent, EngineInput, ExtensionSource, PageCommand, PendingTab, TabId};
+use osmena_core::extension::{ExtensionReply, SidePanel};
+use osmena_core::{
+    EngineEvent, EngineInput, ExtensionSource, Folder, FolderId, LoadState, PageCommand,
+    PendingTab, TabId, WindowId,
+};
 use raw_window_handle::{DisplayHandle, WindowHandle};
 use url::Url;
 
@@ -126,8 +130,53 @@ pub enum PagePaint<'a> {
     Frame(FrameRef<'a>),
 }
 
-/// The engine side of one browser window: its tabs. Positions in
-/// [`EngineInput`] are physical pixels from the top left of the page area.
+/// One window's strip as an engine that runs extensions needs it: the
+/// tabs in strip order, the folders, and the side panel the window shows
+/// now. Read-only; the engine changes the model only through
+/// [`EngineEvent`]s. Handed out by [`Engine::strip_changed`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowStrip<'a> {
+    pub window: WindowId,
+    /// This is the browser window with the keyboard focus. False for
+    /// every window while none has it.
+    pub focused: bool,
+    /// The tabs, in strip order.
+    pub tabs: &'a [StripTab<'a>],
+    /// The window's folders, in the order they were made.
+    pub folders: &'a [Folder],
+    /// The panel the window shows: the active tab's, else the window's.
+    pub shown_panel: Option<&'a SidePanel>,
+}
+
+/// One tab of a [`WindowStrip`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StripTab<'a> {
+    pub id: TabId,
+    pub url: &'a Url,
+    /// The page's title as reported; empty until it has one.
+    pub title: &'a str,
+    pub active: bool,
+    /// The folder the tab is in, when the window has that folder.
+    pub folder: Option<FolderId>,
+    pub load: LoadState,
+    /// A restored tab the engine has not been asked for yet: it has an
+    /// address and a title but no engine tab until it is first shown.
+    pub deferred: bool,
+}
+
+/// The engine side of one browser window: its tabs and, for an engine
+/// with side panels, the panels' views. Positions in [`EngineInput`] are
+/// physical pixels from the top left of the page area, or of the view's
+/// own rectangle for a panel's view.
+///
+/// A side panel's view is addressed by a [`TabId`] the model allocates,
+/// in no strip. It is made by [`TabHost::create_view`] and from then
+/// until [`TabHost::close_view`] answers [`TabHost::has_tab`],
+/// [`TabHost::resize_content`], [`TabHost::paint_page`],
+/// [`TabHost::input`], [`TabHost::set_focused`], [`TabHost::show`] and
+/// [`TabHost::hide`] under that id exactly as a tab does, with a size of
+/// its own. Only engines whose `ExtensionSupport::side_panels` is true
+/// ever see one.
 pub trait TabHost {
     /// Create a visible tab loading `url`.
     fn create_tab(&mut self, tab: TabId, url: Url);
@@ -211,6 +260,28 @@ pub trait TabHost {
     fn replace_with_blank(&self, tab: TabId) {
         self.navigate(tab, osmena_core::about_blank());
     }
+    /// Run `extension`'s keyboard command `name` (its
+    /// `commands.onCommand` listeners), for `tab`, the window's active
+    /// tab. The chord was not in the keymap; the model checked that the
+    /// extension is enabled and declares the command. Default: nothing.
+    fn extension_command(&mut self, _tab: TabId, _extension: &str, _name: &str) {}
+    /// Create the view of a side panel under `view`, showing `page` (the
+    /// engine's own address for it, as it gave it in
+    /// `ExtensionRequest::OpenSidePanel`) of `extension`. The view starts
+    /// hidden and without focus; the shell sizes it, places it and calls
+    /// [`TabHost::show`] in the first frame that draws it. A view that
+    /// ends on its own reports `EngineEvent::TabClosed` or `TabCrashed`
+    /// with this id. Default: nothing.
+    fn create_view(&mut self, _view: TabId, _extension: &str, _page: &str) {}
+    /// Close a view made by [`TabHost::create_view`]: its panel is shown
+    /// nowhere any more. [`TabHost::has_tab`] is false for it afterwards.
+    /// Default: nothing.
+    fn close_view(&mut self, _view: TabId) {}
+    /// Where `view`'s rectangle sits on screen, in logical pixels, as
+    /// [`TabHost::set_content_origin`] says it for the page area. Sent
+    /// after every frame that draws the view and when the window moves.
+    /// Default: ignored.
+    fn set_view_origin(&mut self, _view: TabId, _x: i32, _y: i32) {}
 }
 
 /// One engine instance, one per process. The shell builds it through a
@@ -273,4 +344,19 @@ pub trait Engine: 'static {
     /// `TabHost::navigate`: after an unblock the shell sends it just ahead
     /// of the navigations that return tabs to their pages. Default: nothing.
     fn configure_blocked_sites(&self, _sites: BlockedSites) {}
+    /// Every window's strip, sent whenever it differs from the last one
+    /// sent (a tab opened, closed, moved, activated, renamed or loading;
+    /// a folder made or renamed; a panel shown; the focus moved), once the
+    /// commands and events of a turn of the event loop are done, and once
+    /// after the first windows open. The engine answers extensions' read
+    /// calls from it and compares it with the one before to fire their
+    /// events; [`StripSnapshot`] is the same data owned, to keep. Only an
+    /// engine that runs extensions (`EngineInfo::extensions` is `Some`)
+    /// receives it, with or without side panels. Default: nothing.
+    fn strip_changed(&self, _windows: &[WindowStrip<'_>]) {}
+    /// The model's answer to the `EngineEvent::ExtensionRequest` that
+    /// carried `token`: exactly one per request, sent before the
+    /// [`Engine::strip_changed`] that shows the request's effect.
+    /// Default: nothing.
+    fn extension_reply(&self, _token: u64, _reply: ExtensionReply) {}
 }
