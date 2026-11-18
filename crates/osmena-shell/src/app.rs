@@ -2056,7 +2056,6 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
         if cfg!(target_os = "macos") {
             self.sync_menu_bar();
         }
-        self.sync_strip();
         let mut next = None;
         // The history is written a moment after it last changed.
         if let Some(since) = self.history_dirty {
@@ -2085,6 +2084,10 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
         if self.exiting {
             return;
         }
+        // Last, so the strip carries the turn's changes, a warm's completion
+        // among them: the update check and the warms run commands above, and
+        // nothing below changes the model.
+        self.sync_strip();
         for w in self.windows.values_mut() {
             next = repaint::earliest(next, w.redraw_deadline());
         }
