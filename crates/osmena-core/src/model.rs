@@ -242,6 +242,18 @@ impl Window {
             .chain(self.panel.as_ref())
     }
 
+    /// Take the panel whose view is `view` out of this window, wherever
+    /// it is.
+    pub(crate) fn take_panel_view(&mut self, view: TabId) -> Option<SidePanel> {
+        if self.panel.as_ref().is_some_and(|p| p.view == view) {
+            return self.panel.take();
+        }
+        self.tabs
+            .iter_mut()
+            .find(|t| t.panel.as_ref().is_some_and(|p| p.view == view))
+            .and_then(|t| t.panel.take())
+    }
+
     pub fn folder(&self, id: FolderId) -> Option<&Folder> {
         self.folders.iter().find(|f| f.id == id)
     }

@@ -2876,6 +2876,16 @@ fn close_shown_panel(browser: &mut Browser, window: WindowId) -> Vec<EngineActio
     }
 }
 
+/// The engine says the view `view` is gone (its page closed itself, or
+/// crashed): the side panel it rendered leaves the model. Whether `view`
+/// was a panel's view at all.
+pub(crate) fn drop_panel_view(browser: &mut Browser, view: TabId) -> bool {
+    browser
+        .windows
+        .iter_mut()
+        .any(|w| w.take_panel_view(view).is_some())
+}
+
 /// `SaveSettings` when a setting changed, nothing otherwise.
 fn save_if(changed: bool) -> Vec<EngineAction> {
     if changed {

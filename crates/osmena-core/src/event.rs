@@ -4,7 +4,7 @@
 use url::Url;
 
 use crate::blocked::{BlockedPage, line_seed};
-use crate::command::{EngineAction, close_tab, extension_request, open_window};
+use crate::command::{EngineAction, close_tab, drop_panel_view, extension_request, open_window};
 use crate::download::DownloadReport;
 use crate::extension::{Extension, ExtensionRequest};
 use crate::media::MediaRequest;
@@ -377,7 +377,12 @@ pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
             pending,
             background,
         } => {
-            let Some(window) = browser.window_of_tab(*opener) else {
+            // A side panel's page opens tabs too (a link in it): its tab
+            // goes to the end of the panel's window.
+            let Some(window) = browser
+                .window_of_tab(*opener)
+                .or_else(|| browser.window_of_panel_view(*opener))
+            else {
                 return Vec::new();
             };
             let tab = browser.allocate_tab_id();
@@ -407,12 +412,20 @@ pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
             ]
         }
         EngineEvent::NewWindowRequested { opener, url } => {
-            if browser.tab(*opener).is_none() {
+            if browser.tab(*opener).is_none() && browser.window_of_panel_view(*opener).is_none() {
                 return Vec::new();
             }
             open_window(browser, url.clone())
         }
         EngineEvent::ContextMenuRequested { .. } | EngineEvent::ClipboardImage(_) => Vec::new(),
+        // A side panel's view that closed itself (`window.close()`) or
+        // crashed: the panel leaves the model, and the engine, whose view
+        // is gone already, is asked nothing.
+        EngineEvent::TabClosed(view) | EngineEvent::TabCrashed { tab: view, .. }
+            if drop_panel_view(browser, *view) =>
+        {
+            Vec::new()
+        }
         // A warming page that closed itself: its engine tab is gone and
         // the model's tab stays, deferred, with what it got.
         EngineEvent::TabClosed(tab) if crate::command::end_warm(browser, *tab) => Vec::new(),
@@ -515,6 +528,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::command::{Command, dispatch, open_window};
+    use crate::extension::ExtensionReply;
     use crate::model::WindowId;
     use crate::model::test_support::{browser, url};
 
@@ -1387,5 +1401,201 @@ mod tests {
         let t = b.tab(tab).unwrap();
         assert_eq!(t.blocked.as_ref().unwrap().site, "b.example");
         assert_eq!(t.url.as_str(), "https://m.b.example/r");
+    }
+
+    /// Open the extension "ext"'s `page` in the panel of `tab`, or of
+    /// `window`, and return its view.
+    fn open_panel(b: &mut Browser, window: WindowId, tab: Option<TabId>, page: &str) -> TabId {
+        let actions = apply(
+            b,
+            &EngineEvent::ExtensionRequest {
+                token: 0,
+                extension: "ext".to_string(),
+                request: ExtensionRequest::OpenSidePanel {
+                    window,
+                    tab,
+                    page: page.to_string(),
+                },
+            },
+        );
+        let EngineAction::CreateView { view, .. } = actions[0] else {
+            panic!("OpenSidePanel returns CreateView: {actions:?}");
+        };
+        view
+    }
+
+    #[test]
+    fn a_panel_view_that_closed_or_crashed_leaves_the_model_and_asks_the_engine_nothing() {
+        let (mut b, window, tab) = one_window();
+        let for_window = open_panel(&mut b, window, None, "window.html");
+        let for_tab = open_panel(&mut b, window, Some(tab), "tab.html");
+        // The panel's page called `window.close()`.
+        assert!(apply(&mut b, &EngineEvent::TabClosed(for_tab)).is_empty());
+        assert!(b.tab(tab).unwrap().panel.is_none());
+        assert_eq!(
+            b.window(window).unwrap().shown_panel().map(|p| p.view),
+            Some(for_window)
+        );
+        // The panel's page crashed: no crash panel, no tab touched.
+        assert!(
+            apply(
+                &mut b,
+                &EngineEvent::TabCrashed {
+                    tab: for_window,
+                    reason: "gone".to_string(),
+                },
+            )
+            .is_empty()
+        );
+        let w = b.window(window).unwrap();
+        assert_eq!(w.shown_panel(), None);
+        assert_eq!(w.tabs.len(), 1);
+        assert!(w.tabs[0].crashed.is_none());
+        // The engine's echo of a view the model closed is nothing.
+        let view = open_panel(&mut b, window, None, "again.html");
+        assert_eq!(
+            dispatch(&mut b, &Command::CloseSidePanel { window }),
+            vec![EngineAction::CloseView { window, view }]
+        );
+        let before = b.windows.clone();
+        assert!(apply(&mut b, &EngineEvent::TabClosed(view)).is_empty());
+        assert_eq!(b.windows, before);
+    }
+
+    #[test]
+    fn a_panel_view_is_no_tab_to_events_commands_requests_or_the_session() {
+        let (mut b, window, tab) = one_window();
+        let session = crate::session::Session::capture(&b, &|_| None);
+        let view = open_panel(&mut b, window, None, "panel.html");
+        let before = b.windows.clone();
+        // What the panel's page reports changes no tab and is no visit.
+        for event in [
+            EngineEvent::UrlChanged {
+                tab: view,
+                url: url("https://panel.example/"),
+            },
+            EngineEvent::TitleChanged {
+                tab: view,
+                title: "Panel".to_string(),
+            },
+            EngineEvent::LoadStateChanged {
+                tab: view,
+                state: LoadState::Complete,
+            },
+            EngineEvent::HistoryChanged {
+                tab: view,
+                can_go_back: true,
+                can_go_forward: false,
+            },
+            EngineEvent::FrameReady(view),
+        ] {
+            assert!(apply(&mut b, &event).is_empty(), "{event:?}");
+        }
+        assert_eq!(b.windows, before);
+        assert!(b.history.is_empty());
+        // Commands that name a tab do nothing with it.
+        for command in [
+            Command::CloseTab(view),
+            Command::ActivateTab(view),
+            Command::Reload(view),
+            Command::CloseTabs(vec![view]),
+            Command::MoveTabs {
+                tabs: vec![view],
+                index: 0,
+            },
+        ] {
+            assert!(dispatch(&mut b, &command).is_empty(), "{command:?}");
+        }
+        assert_eq!(b.windows, before);
+        assert!(b.closed_tabs.is_empty());
+        // An extension naming it as a tab is told there is none. (The
+        // request is `OpenSidePanel` on the view as a tab: the requests
+        // about tabs are answered only from Task 8 on.)
+        assert_eq!(
+            apply(
+                &mut b,
+                &EngineEvent::ExtensionRequest {
+                    token: 1,
+                    extension: "ext".to_string(),
+                    request: ExtensionRequest::OpenSidePanel {
+                        window,
+                        tab: Some(view),
+                        page: "panel.html".to_string(),
+                    },
+                },
+            ),
+            vec![EngineAction::ExtensionReply {
+                token: 1,
+                reply: ExtensionReply::Refused(format!("No tab with id: {}.", view.0)),
+            }]
+        );
+        // The session file knows tabs and folders, not panels.
+        assert_eq!(crate::session::Session::capture(&b, &|_| None), session);
+        assert_eq!(b.window(window).unwrap().active, tab);
+    }
+
+    #[test]
+    fn a_tab_a_panel_opens_goes_to_the_end_of_the_panels_window() {
+        let (mut b, window, t1) = one_window();
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window,
+                url: Some(url("https://tab.example/")),
+            },
+        );
+        let t2 = b.window(window).unwrap().active;
+        dispatch(&mut b, &Command::ActivateTab(t1));
+        let view = open_panel(&mut b, window, None, "panel.html");
+        let actions = apply(
+            &mut b,
+            &EngineEvent::NewTabRequested {
+                opener: view,
+                pending: PendingTab(4),
+                background: false,
+            },
+        );
+        let w = b.window(window).unwrap();
+        let new = w.active;
+        assert_eq!(
+            w.tabs.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![t1, t2, new]
+        );
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::Hide(t1),
+                EngineAction::AdoptTab {
+                    window,
+                    tab: new,
+                    pending: PendingTab(4),
+                    background: false,
+                },
+            ]
+        );
+        // A new window from the panel opens too.
+        let actions = apply(
+            &mut b,
+            &EngineEvent::NewWindowRequested {
+                opener: view,
+                url: url("https://w.example/"),
+            },
+        );
+        assert!(matches!(
+            actions.as_slice(),
+            [EngineAction::OpenWindow { url, .. }] if url.as_str() == "https://w.example/"
+        ));
+        // A view nobody knows still opens nothing.
+        assert!(
+            apply(
+                &mut b,
+                &EngineEvent::NewTabRequested {
+                    opener: TabId(99),
+                    pending: PendingTab(5),
+                    background: false,
+                },
+            )
+            .is_empty()
+        );
     }
 }
