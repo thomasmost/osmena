@@ -10,7 +10,7 @@ use crate::bookmarks_html;
 use crate::default_browser::DefaultBrowser;
 use crate::download::{Download, DownloadId, DownloadState};
 use crate::event::PendingTab;
-use crate::extension::{ExtensionReply, ExtensionSource};
+use crate::extension::{ExtensionReply, ExtensionRequest, ExtensionSource, SidePanel};
 use crate::history::unix_now;
 use crate::launch::{
     DRIVE_LIFETIME, DriveState, Fetched, LOCATION_LIFETIME, Place, Units, WEATHER_LIFETIME,
@@ -2702,6 +2702,137 @@ fn close_window(browser: &mut Browser, window: WindowId) -> Vec<EngineAction> {
         actions.push(EngineAction::Quit);
     }
     actions
+}
+
+/// The place a side panel request names: `tab`'s own panel, or
+/// `window`'s when `tab` is `None`. Refused when the window is not in
+/// the model or the tab is not one of its tabs.
+fn panel_slot(
+    browser: &mut Browser,
+    window: WindowId,
+    tab: Option<TabId>,
+) -> Result<&mut Option<SidePanel>, String> {
+    let w = browser
+        .window_mut(window)
+        .ok_or_else(|| no_window(window))?;
+    match tab {
+        Some(tab) => w
+            .tab_mut(tab)
+            .map(|t| &mut t.panel)
+            .ok_or_else(|| no_tab(tab)),
+        None => Ok(&mut w.panel),
+    }
+}
+
+/// Show `extension`'s `page` in the side panel of `tab`, or of `window`.
+/// The model picks the view's id (no engine allocates a `TabId`) and
+/// asks the engine for the view. The same page already there changes
+/// nothing; another panel there is replaced, its view closed first.
+fn open_side_panel(
+    browser: &mut Browser,
+    extension: &str,
+    window: WindowId,
+    tab: Option<TabId>,
+    page: &str,
+) -> Result<Vec<EngineAction>, String> {
+    let slot = panel_slot(browser, window, tab)?;
+    if slot
+        .as_ref()
+        .is_some_and(|p| p.extension == extension && p.page == page)
+    {
+        return Ok(Vec::new());
+    }
+    let mut actions = Vec::new();
+    if let Some(old) = slot.take() {
+        actions.push(EngineAction::CloseView {
+            window,
+            view: old.view,
+        });
+    }
+    let view = browser.allocate_tab_id();
+    *panel_slot(browser, window, tab)? = Some(SidePanel {
+        extension: extension.to_string(),
+        page: page.to_string(),
+        view,
+    });
+    actions.push(EngineAction::CreateView {
+        window,
+        view,
+        extension: extension.to_string(),
+        page: page.to_string(),
+    });
+    Ok(actions)
+}
+
+/// Close `extension`'s side panel of `tab`, or of `window`. Nothing
+/// when that place has no panel, or another extension's.
+fn close_side_panel(
+    browser: &mut Browser,
+    extension: &str,
+    window: WindowId,
+    tab: Option<TabId>,
+) -> Result<Vec<EngineAction>, String> {
+    let slot = panel_slot(browser, window, tab)?;
+    if slot.as_ref().is_none_or(|p| p.extension != extension) {
+        return Ok(Vec::new());
+    }
+    let panel = slot.take().expect("checked above");
+    Ok(vec![EngineAction::CloseView {
+        window,
+        view: panel.view,
+    }])
+}
+
+/// The words the extension API itself has for a tab, a group and a
+/// window that do not exist, which an extension's own error handling
+/// already knows.
+fn no_tab(tab: TabId) -> String {
+    format!("No tab with id: {}.", tab.0)
+}
+
+fn no_window(window: WindowId) -> String {
+    format!("No window with id: {}.", window.0)
+}
+
+/// Answer an extension's request (`EngineEvent::ExtensionRequest`):
+/// what the request takes, then exactly one `ExtensionReply` carrying
+/// `token`. A request that names a tab, folder or window the model lacks
+/// changes nothing and is `Refused`.
+pub(crate) fn extension_request(
+    browser: &mut Browser,
+    token: u64,
+    extension: &str,
+    request: &ExtensionRequest,
+) -> Vec<EngineAction> {
+    let (mut actions, reply) = match answer_request(browser, extension, request) {
+        Ok(answer) => answer,
+        Err(why) => (Vec::new(), ExtensionReply::Refused(why)),
+    };
+    actions.push(EngineAction::ExtensionReply { token, reply });
+    actions
+}
+
+/// The work of [`extension_request`]: the actions and the reply, or why
+/// the request is refused. Everything is checked before anything
+/// changes.
+fn answer_request(
+    browser: &mut Browser,
+    extension: &str,
+    request: &ExtensionRequest,
+) -> Result<(Vec<EngineAction>, ExtensionReply), String> {
+    match request {
+        ExtensionRequest::OpenSidePanel { window, tab, page } => {
+            let actions = open_side_panel(browser, extension, *window, *tab, page)?;
+            Ok((actions, ExtensionReply::Done))
+        }
+        ExtensionRequest::CloseSidePanel { window, tab } => {
+            let actions = close_side_panel(browser, extension, *window, *tab)?;
+            Ok((actions, ExtensionReply::Done))
+        }
+        // The requests about tabs, folders and windows are not answered
+        // yet.
+        _ => Err("Not supported.".to_string()),
+    }
 }
 
 /// `SaveSettings` when a setting changed, nothing otherwise.
@@ -6256,5 +6387,306 @@ mod tests {
         assert!(b.tab(deferred_id).unwrap().deferred);
 
         assert!(dispatch(&mut b, &Command::UnblockSite("a.example".to_string())).is_empty());
+    }
+
+    /// Send `request` from the extension "ext" through `apply`, as the
+    /// engine does.
+    fn ask(b: &mut Browser, token: u64, request: ExtensionRequest) -> Vec<EngineAction> {
+        crate::event::apply(
+            b,
+            &crate::event::EngineEvent::ExtensionRequest {
+                token,
+                extension: "ext".to_string(),
+                request,
+            },
+        )
+    }
+
+    fn reply(token: u64, reply: ExtensionReply) -> EngineAction {
+        EngineAction::ExtensionReply { token, reply }
+    }
+
+    fn refused(token: u64, why: &str) -> EngineAction {
+        reply(token, ExtensionReply::Refused(why.to_string()))
+    }
+
+    /// Open "ext"'s `page` in the panel of `tab`, or of `window`, and
+    /// return its view.
+    fn open_panel(b: &mut Browser, window: WindowId, tab: Option<TabId>, page: &str) -> TabId {
+        let actions = ask(
+            b,
+            0,
+            ExtensionRequest::OpenSidePanel {
+                window,
+                tab,
+                page: page.to_string(),
+            },
+        );
+        let Some(EngineAction::CreateView { view, .. }) = actions.iter().rev().nth(1) else {
+            panic!("OpenSidePanel returns CreateView before its reply: {actions:?}");
+        };
+        *view
+    }
+
+    #[test]
+    fn opening_a_side_panel_creates_a_view_the_model_names() {
+        let (mut b, window, tab) = one_window();
+        let actions = ask(
+            &mut b,
+            7,
+            ExtensionRequest::OpenSidePanel {
+                window,
+                tab: None,
+                page: "panel.html".to_string(),
+            },
+        );
+        let view = TabId(tab.0 + 1);
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::CreateView {
+                    window,
+                    view,
+                    extension: "ext".to_string(),
+                    page: "panel.html".to_string(),
+                },
+                reply(7, ExtensionReply::Done),
+            ]
+        );
+        let w = b.window(window).unwrap();
+        assert_eq!(
+            w.panel,
+            Some(SidePanel {
+                extension: "ext".to_string(),
+                page: "panel.html".to_string(),
+                view,
+            })
+        );
+        assert_eq!(w.shown_panel(), w.panel.as_ref());
+        // The view is no tab, and no tab is given its id afterwards.
+        assert_eq!(order(&b, window), vec![tab]);
+        assert!(b.tab(view).is_none());
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window,
+                url: Some(url("https://tab.example/")),
+            },
+        );
+        assert_eq!(b.window(window).unwrap().active, TabId(view.0 + 1));
+    }
+
+    #[test]
+    fn a_panel_opened_for_a_tab_shows_only_while_that_tab_is_active() {
+        // side-panel.AC1.4
+        let (mut b, window, t) = window_with_tabs(3);
+        let for_window = open_panel(&mut b, window, None, "window.html");
+        let for_tab = open_panel(&mut b, window, Some(t[0]), "tab.html");
+        assert_eq!(b.tab(t[0]).unwrap().panel.as_ref().unwrap().view, for_tab);
+        let shown = |b: &Browser| b.window(window).unwrap().shown_panel().map(|p| p.view);
+        // t[2] is active and has none of its own: the window's shows.
+        assert_eq!(shown(&b), Some(for_window));
+        dispatch(&mut b, &Command::ActivateTab(t[0]));
+        assert_eq!(shown(&b), Some(for_tab));
+        dispatch(&mut b, &Command::ActivateTab(t[1]));
+        assert_eq!(shown(&b), Some(for_window));
+        // Both stay in the model whichever shows.
+        let w = b.window(window).unwrap();
+        assert!(w.has_panel_view(for_window) && w.has_panel_view(for_tab));
+    }
+
+    #[test]
+    fn the_same_panel_opened_again_changes_nothing() {
+        let (mut b, window, tab) = one_window();
+        let view = open_panel(&mut b, window, Some(tab), "panel.html");
+        let before = b.windows.clone();
+        let actions = ask(
+            &mut b,
+            3,
+            ExtensionRequest::OpenSidePanel {
+                window,
+                tab: Some(tab),
+                page: "panel.html".to_string(),
+            },
+        );
+        assert_eq!(actions, vec![reply(3, ExtensionReply::Done)]);
+        assert_eq!(b.windows, before);
+        assert_eq!(b.tab(tab).unwrap().panel.as_ref().unwrap().view, view);
+    }
+
+    #[test]
+    fn another_page_replaces_the_panel_closing_the_old_view_first() {
+        let (mut b, window, tab) = one_window();
+        let old = open_panel(&mut b, window, None, "one.html");
+        let actions = ask(
+            &mut b,
+            4,
+            ExtensionRequest::OpenSidePanel {
+                window,
+                tab: None,
+                page: "two.html".to_string(),
+            },
+        );
+        let new = TabId(old.0 + 1);
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::CloseView { window, view: old },
+                EngineAction::CreateView {
+                    window,
+                    view: new,
+                    extension: "ext".to_string(),
+                    page: "two.html".to_string(),
+                },
+                reply(4, ExtensionReply::Done),
+            ]
+        );
+        let w = b.window(window).unwrap();
+        assert_eq!(w.panel.as_ref().unwrap().page, "two.html");
+        assert!(w.has_panel_view(new) && !w.has_panel_view(old));
+        // Another extension asking for the same place replaces it too.
+        let actions = crate::event::apply(
+            &mut b,
+            &crate::event::EngineEvent::ExtensionRequest {
+                token: 5,
+                extension: "other".to_string(),
+                request: ExtensionRequest::OpenSidePanel {
+                    window,
+                    tab: None,
+                    page: "two.html".to_string(),
+                },
+            },
+        );
+        assert_eq!(actions[0], EngineAction::CloseView { window, view: new });
+        assert_eq!(
+            b.window(window).unwrap().panel.as_ref().unwrap().extension,
+            "other"
+        );
+        assert_eq!(order(&b, window), vec![tab]);
+    }
+
+    #[test]
+    fn a_side_panel_for_an_unknown_window_or_tab_is_refused() {
+        // side-panel.AC5.3 at the model level
+        let (mut b, window, tab) = one_window();
+        let other = dispatch(&mut b, &Command::NewWindow);
+        let EngineAction::OpenWindow {
+            window: w2,
+            tab: t2,
+            ..
+        } = other[0].clone()
+        else {
+            panic!("NewWindow returns OpenWindow");
+        };
+        let before = b.windows.clone();
+        let open = |window, tab| ExtensionRequest::OpenSidePanel {
+            window,
+            tab,
+            page: "panel.html".to_string(),
+        };
+        assert_eq!(
+            ask(&mut b, 1, open(WindowId(99), None)),
+            vec![refused(1, "No window with id: 99.")]
+        );
+        assert_eq!(
+            ask(&mut b, 2, open(window, Some(TabId(98)))),
+            vec![refused(2, "No tab with id: 98.")]
+        );
+        // A tab of another window is no tab of this one.
+        assert_eq!(
+            ask(&mut b, 3, open(window, Some(t2))),
+            vec![refused(3, &format!("No tab with id: {}.", t2.0))]
+        );
+        assert_eq!(
+            ask(
+                &mut b,
+                4,
+                ExtensionRequest::CloseSidePanel {
+                    window: WindowId(99),
+                    tab: None
+                }
+            ),
+            vec![refused(4, "No window with id: 99.")]
+        );
+        assert_eq!(
+            ask(
+                &mut b,
+                5,
+                ExtensionRequest::CloseSidePanel {
+                    window: w2,
+                    tab: Some(tab)
+                }
+            ),
+            vec![refused(5, &format!("No tab with id: {}.", tab.0))]
+        );
+        assert_eq!(b.windows, before, "a refused request changes nothing");
+    }
+
+    #[test]
+    fn an_extension_closes_its_own_panel_and_no_other() {
+        let (mut b, window, tab) = one_window();
+        let for_window = open_panel(&mut b, window, None, "window.html");
+        let for_tab = open_panel(&mut b, window, Some(tab), "tab.html");
+        // Only the place named is closed.
+        assert_eq!(
+            ask(
+                &mut b,
+                1,
+                ExtensionRequest::CloseSidePanel {
+                    window,
+                    tab: Some(tab)
+                }
+            ),
+            vec![
+                EngineAction::CloseView {
+                    window,
+                    view: for_tab
+                },
+                reply(1, ExtensionReply::Done),
+            ]
+        );
+        assert!(b.tab(tab).unwrap().panel.is_none());
+        assert!(b.window(window).unwrap().panel.is_some());
+        // Closing what is not open is done, with nothing to do.
+        assert_eq!(
+            ask(
+                &mut b,
+                2,
+                ExtensionRequest::CloseSidePanel {
+                    window,
+                    tab: Some(tab)
+                }
+            ),
+            vec![reply(2, ExtensionReply::Done)]
+        );
+        // Another extension's panel stays.
+        let actions = crate::event::apply(
+            &mut b,
+            &crate::event::EngineEvent::ExtensionRequest {
+                token: 3,
+                extension: "other".to_string(),
+                request: ExtensionRequest::CloseSidePanel { window, tab: None },
+            },
+        );
+        assert_eq!(actions, vec![reply(3, ExtensionReply::Done)]);
+        assert_eq!(
+            b.window(window).unwrap().panel.as_ref().unwrap().view,
+            for_window
+        );
+        assert_eq!(
+            ask(
+                &mut b,
+                4,
+                ExtensionRequest::CloseSidePanel { window, tab: None }
+            ),
+            vec![
+                EngineAction::CloseView {
+                    window,
+                    view: for_window
+                },
+                reply(4, ExtensionReply::Done),
+            ]
+        );
+        assert_eq!(b.window(window).unwrap().shown_panel(), None);
     }
 }

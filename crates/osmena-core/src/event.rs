@@ -4,7 +4,7 @@
 use url::Url;
 
 use crate::blocked::{BlockedPage, line_seed};
-use crate::command::{EngineAction, close_tab, open_window};
+use crate::command::{EngineAction, close_tab, extension_request, open_window};
 use crate::download::DownloadReport;
 use crate::extension::{Extension, ExtensionRequest};
 use crate::media::MediaRequest;
@@ -495,7 +495,11 @@ pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
             browser.extensions = extensions.clone();
             Vec::new()
         }
-        EngineEvent::ExtensionRequest { .. } => Vec::new(),
+        EngineEvent::ExtensionRequest {
+            token,
+            extension,
+            request,
+        } => extension_request(browser, *token, extension, request),
     }
 }
 
