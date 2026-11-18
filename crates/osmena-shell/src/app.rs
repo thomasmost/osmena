@@ -1270,6 +1270,11 @@ impl<E: Engine> App<E> {
                     w.open_extension_action(tab, &extension);
                 }
             }
+            EngineAction::CloseView { window, view } => {
+                if let Some(w) = self.window_for_core_id(window) {
+                    w.close_view(view);
+                }
+            }
             EngineAction::SetExtensionEnabled { extension, enabled } => {
                 engine.set_extension_enabled(&extension, enabled);
             }
@@ -1405,8 +1410,7 @@ impl<E: Engine> App<E> {
             // engine in Phase 3 of the side panel plan; until then nothing.
             EngineAction::ExtensionCommand { .. }
             | EngineAction::ExtensionReply { .. }
-            | EngineAction::CreateView { .. }
-            | EngineAction::CloseView { .. } => {}
+            | EngineAction::CreateView { .. } => {}
             EngineAction::Quit => {
                 self.save_session_for_exit(None);
                 self.exiting = true;

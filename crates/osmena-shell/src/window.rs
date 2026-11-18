@@ -13,8 +13,9 @@ use keyboard_types::{KeyState, Modifiers};
 use osmena_chrome::chrome::{self, ChromeState, WindowRequest};
 use osmena_chrome::input::extension_chords;
 use osmena_chrome::routing::{
-    KeyRouter, KeyStroke, KeyTarget, PointerCapture, PointerContext, PointerTarget, content_pixels,
-    resize_edge, route_pointer,
+    KeyRouter, KeyStroke, KeyTarget, PointerCapture, PointerContext, PointerTarget, ViewPixels,
+    content_pixels, panel_shown, panel_transition, resize_edge, route_pointer, split_content,
+    view_pixels,
 };
 use osmena_chrome::{icon, input, keyutils, menus, native_menu, theme};
 use osmena_core::{
@@ -39,6 +40,16 @@ use crate::repaint::RepaintSchedule;
 /// pointer resizes it instead of acting on what is under it.
 const RESIZE_BORDER_PX: f32 = 6.0;
 
+/// The side panel as the last frame drew it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ShownPanel {
+    /// The engine view that renders the panel's page.
+    view: TabId,
+    /// The view's rectangle, in physical pixels from the window's top
+    /// left.
+    px: ViewPixels,
+}
+
 pub struct BrowserWindow<E: Engine> {
     id: WindowId,
     brand: &'static Brand,
@@ -57,6 +68,10 @@ pub struct BrowserWindow<E: Engine> {
     content_top_px: f32,
     /// True while egui draws the page area itself (the crash panel).
     content_is_egui: bool,
+    /// The side panel drawn in the last frame, if one was: `None` while
+    /// the window shows no panel, is full screen, or is too narrow for
+    /// one. The view in it is the one the engine was last told to show.
+    panel: Option<ShownPanel>,
     pointer_in_content: bool,
     /// The pointer shape the active page asked for.
     page_cursor: CursorIcon,
@@ -69,7 +84,7 @@ pub struct BrowserWindow<E: Engine> {
     /// The press the page got for each key it holds, so the key can be
     /// released there if the real release never arrives.
     page_presses: HashMap<keyboard_types::Code, KeyInput>,
-    /// The uploaded frame of each tab that handed the shell pixels.
+    /// The uploaded frame of each view (a tab, or a side panel's) that handed the shell pixels.
     textures: HashMap<TabId, PageTexture>,
     /// Wheel travel with the primary modifier held, in pixels, until it
     /// adds up to a zoom step.
@@ -145,6 +160,7 @@ impl<E: Engine> BrowserWindow<E> {
             resize_edge: None,
             content_top_px: 0.0,
             content_is_egui: false,
+            panel: None,
             pointer_in_content: false,
             page_cursor: CursorIcon::Default,
             capture: PointerCapture::default(),
@@ -238,6 +254,22 @@ impl<E: Engine> BrowserWindow<E> {
         if let Some(texture) = self.textures.remove(&tab) {
             let _ = self.surface.make_current();
             texture.destroy(&self.surface.gl(), &mut self.egui.painter);
+        }
+        self.window.request_redraw();
+    }
+
+    /// Close a side panel's view in the engine and drop its texture: its
+    /// panel left the model.
+    pub fn close_view(&mut self, view: TabId) {
+        self.host.close_view(view);
+        if let Some(texture) = self.textures.remove(&view) {
+            let _ = self.surface.make_current();
+            texture.destroy(&self.surface.gl(), &mut self.egui.painter);
+        }
+        // Not drawn any more, so nothing is routed to it before the next
+        // frame either.
+        if self.panel.is_some_and(|panel| panel.view == view) {
+            self.panel = None;
         }
         self.window.request_redraw();
     }
@@ -864,20 +896,30 @@ impl<E: Engine> BrowserWindow<E> {
         });
     }
 
-    /// Tell the engine where the page area sits on screen (logical
-    /// pixels), for engines that place menus and widgets themselves.
-    fn update_content_origin(&self) {
+    /// Tell the engine where the page area, and the side panel's view
+    /// when one is drawn, sit on screen (logical pixels), for engines
+    /// that place menus and widgets themselves.
+    fn update_content_origin(&mut self) {
         let Ok(origin) = self.window.inner_position() else {
             return;
         };
         let scale = self.window.scale_factor();
+        let logical = |px: f64| (px / scale).round() as i32;
         self.host.set_content_origin(
-            (f64::from(origin.x) / scale).round() as i32,
-            ((f64::from(origin.y) + f64::from(self.content_top_px)) / scale).round() as i32,
+            logical(f64::from(origin.x)),
+            logical(f64::from(origin.y) + f64::from(self.content_top_px)),
         );
+        if let Some(panel) = self.panel {
+            self.host.set_view_origin(
+                panel.view,
+                logical(f64::from(origin.x) + f64::from(panel.px.left)),
+                logical(f64::from(origin.y) + f64::from(panel.px.top)),
+            );
+        }
     }
 
-    /// Drop the textures of tabs that left this window.
+    /// Drop the textures of tabs that left this window and of side panel
+    /// views that closed: the host answers `has_tab` for both.
     fn drop_stale_textures(&mut self) {
         let gone: Vec<TabId> = self
             .textures
@@ -896,7 +938,7 @@ impl<E: Engine> BrowserWindow<E> {
         }
     }
 
-    /// Draw the chrome and the active tab under it, and present.
+    /// Draw the chrome, the active tab under it and the side panel beside it, and present.
     fn frame(
         &mut self,
         browser: &Browser,
@@ -921,6 +963,15 @@ impl<E: Engine> BrowserWindow<E> {
         let history = &browser.history;
         let mut commands = Vec::new();
         let mut content_top_px = 0.0;
+        // The panel's view, when one is to be drawn: never for an engine
+        // without side panels, never in full screen. `panel_shown` is the
+        // one predicate; `shown` is `Some` exactly when it is true.
+        let shown = model
+            .shown_panel()
+            .filter(|_| panel_shown(model, engine_info.extensions.as_ref()))
+            .map(|panel| panel.view);
+        let previous = self.panel.map(|panel| panel.view);
+        let mut panel_now: Option<ShownPanel> = None;
 
         self.drop_stale_textures();
         // The GL context is current for the uploads and paints the host
@@ -962,10 +1013,30 @@ impl<E: Engine> BrowserWindow<E> {
                 search: &browser.settings.search,
             };
             commands = chrome::draw(ui, model, &context, chrome_state, keymap);
-            let rect = ui.available_rect_before_wrap();
-            let (top, size) = content_pixels(rect, ui.pixels_per_point());
+            let ppp = ui.pixels_per_point();
+            let split = split_content(ui.available_rect_before_wrap(), shown.is_some());
+            let rect = split.page;
+            let (top, size) = content_pixels(rect, ppp);
             content_top_px = top;
             host.resize_content(active, size);
+            // The panel, when the window is wide enough for one. The
+            // engine hears of a view that came or went before it is
+            // sized and painted.
+            let panel = split.panel.zip(shown);
+            let transition = panel_transition(previous, panel.map(|(_, view)| view));
+            if let Some(view) = transition.hide
+                && host.has_tab(view)
+            {
+                host.hide(view);
+            }
+            if let Some(view) = transition.show {
+                host.show(view);
+            }
+            if let Some((rects, view)) = panel {
+                let px = view_pixels(rects.view, ppp);
+                host.resize_content(view, px.size);
+                panel_now = Some(ShownPanel { view, px });
+            }
             match (&crashed, &blocked) {
                 (Some(reason), _) => {
                     if chrome::draw_crash_panel(ui, rect, reason) {
@@ -978,83 +1049,24 @@ impl<E: Engine> BrowserWindow<E> {
                 (None, Some(page)) => {
                     chrome::draw_blocked_page(ui, rect, chrome_color, page);
                 }
-                (None, None) => {
-                    let ui: &egui::Ui = ui;
-                    let mut painted = false;
-                    host.paint_page(active, &mut |paint| match paint {
-                        PagePaint::Blit(blit) => {
-                            // Runs in egui's paint pass, after this frame's
-                            // resize recreated the engine's framebuffer.
-                            ui.ctx()
-                                .layer_painter(LayerId::background())
-                                .add(PaintCallback {
-                                    rect,
-                                    callback: Arc::new(CallbackFn::new(move |info, painter| {
-                                        let v = info.viewport_in_pixels();
-                                        blit(
-                                            painter.gl(),
-                                            BlitRect {
-                                                x: v.left_px,
-                                                y_from_bottom: v.from_bottom_px,
-                                                width: v.width_px,
-                                                height: v.height_px,
-                                            },
-                                        );
-                                    })),
-                                });
-                            painted = true;
-                        }
-                        PagePaint::Frame(frame) => {
-                            if let Some(texture) = textures.get_mut(&active) {
-                                if frame.fresh || texture.size() != (frame.width, frame.height) {
-                                    texture.update(
-                                        &gl,
-                                        frame.width,
-                                        frame.height,
-                                        frame.bgra,
-                                        frame.dirty,
-                                    );
-                                }
-                            } else if let Some(texture) =
-                                PageTexture::new(&gl, frame.width, frame.height, frame.bgra)
-                            {
-                                textures.insert(active, texture);
-                            }
-                            // Registered with egui after this pass; until
-                            // then the page stays blank for one frame.
-                            let Some(texture) = textures.get(&active) else {
-                                return;
-                            };
-                            let Some(id) = texture.id() else {
-                                return;
-                            };
-                            let (width, height) = texture.size();
-                            // Paint the frame at its own pixel size from the
-                            // page area's top-left, so a frame from before a
-                            // resize is neither stretched nor misplaced; the
-                            // next paint fills the new size.
-                            let ppp = ui.pixels_per_point();
-                            let frame_rect = EguiRect::from_min_size(
-                                rect.min,
-                                egui::vec2(width as f32 / ppp, height as f32 / ppp),
-                            );
-                            ui.painter().with_clip_rect(rect).image(
-                                id,
-                                frame_rect,
-                                EguiRect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                                Color32::WHITE,
-                            );
-                            painted = true;
-                        }
-                    });
-                    if !painted {
-                        ui.painter().rect_filled(rect, 0.0, Color32::WHITE);
-                    }
-                }
+                (None, None) => paint_view(ui, &*host, textures, &gl, active, rect),
+            }
+            // The panel's view, after the page, and its header after the
+            // view: what is drawn over the view's edge lies on top.
+            if let Some((rects, view)) = panel {
+                paint_view(ui, &*host, textures, &gl, view, rects.view);
+            }
+            // The header: a plain strip in the toolbar's fill until the
+            // chrome draws the extension's name and the close control
+            // here (Phase 4 replaces this statement).
+            if let Some(rects) = &split.panel {
+                let fill = chrome::Palette::new(chrome_color, ui.visuals().dark_mode).toolbar;
+                ui.painter().rect_filled(rects.header, 0.0, fill);
             }
         });
         self.content_top_px = content_top_px;
         self.content_is_egui = crashed.is_some() || blocked.is_some();
+        self.panel = panel_now;
         self.update_content_origin();
 
         let mut registered = false;
@@ -1216,6 +1228,85 @@ impl<E: Engine> Drop for BrowserWindow<E> {
             texture.destroy(&gl, &mut self.egui.painter);
         }
         self.egui.destroy();
+    }
+}
+
+/// Paint `view` (a tab's page, or a side panel's) into `rect`, whichever
+/// way the engine hands it over: a blit from its own framebuffer, or a
+/// frame of pixels kept in `textures`. White while the engine has nothing
+/// for it yet. Called inside the UI pass, after `resize_content` for the
+/// same view.
+fn paint_view<H: TabHost>(
+    ui: &egui::Ui,
+    host: &H,
+    textures: &mut HashMap<TabId, PageTexture>,
+    gl: &glow::Context,
+    view: TabId,
+    rect: EguiRect,
+) {
+    let mut painted = false;
+    host.paint_page(view, &mut |paint| match paint {
+        PagePaint::Blit(blit) => {
+            // Runs in egui's paint pass, after this frame's
+            // resize recreated the engine's framebuffer.
+            ui.ctx()
+                .layer_painter(LayerId::background())
+                .add(PaintCallback {
+                    rect,
+                    callback: Arc::new(CallbackFn::new(move |info, painter| {
+                        let v = info.viewport_in_pixels();
+                        blit(
+                            painter.gl(),
+                            BlitRect {
+                                x: v.left_px,
+                                y_from_bottom: v.from_bottom_px,
+                                width: v.width_px,
+                                height: v.height_px,
+                            },
+                        );
+                    })),
+                });
+            painted = true;
+        }
+        PagePaint::Frame(frame) => {
+            if let Some(texture) = textures.get_mut(&view) {
+                if frame.fresh || texture.size() != (frame.width, frame.height) {
+                    texture.update(gl, frame.width, frame.height, frame.bgra, frame.dirty);
+                }
+            } else if let Some(texture) =
+                PageTexture::new(gl, frame.width, frame.height, frame.bgra)
+            {
+                textures.insert(view, texture);
+            }
+            // Registered with egui after this pass; until
+            // then the view stays blank for one frame.
+            let Some(texture) = textures.get(&view) else {
+                return;
+            };
+            let Some(id) = texture.id() else {
+                return;
+            };
+            let (width, height) = texture.size();
+            // Paint the frame at its own pixel size from the
+            // rectangle's top-left, so a frame from before a
+            // resize is neither stretched nor misplaced; the
+            // next paint fills the new size.
+            let ppp = ui.pixels_per_point();
+            let frame_rect = EguiRect::from_min_size(
+                rect.min,
+                egui::vec2(width as f32 / ppp, height as f32 / ppp),
+            );
+            ui.painter().with_clip_rect(rect).image(
+                id,
+                frame_rect,
+                EguiRect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            painted = true;
+        }
+    });
+    if !painted {
+        ui.painter().rect_filled(rect, 0.0, Color32::WHITE);
     }
 }
 
