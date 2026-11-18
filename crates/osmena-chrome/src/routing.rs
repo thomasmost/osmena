@@ -310,6 +310,15 @@ pub fn keyboard_view(
     }
 }
 
+/// The side panel's view that input may reach: `drawn`, the view the window
+/// drew in its last frame, unless `is_live` says the model no longer has it
+/// (its page closed or crashed, and the frame that drops it is not yet
+/// drawn). Pass the result to [`keyboard_view`] as its `shown` and use it
+/// for the pointer.
+pub fn drawn_panel_view(drawn: Option<TabId>, is_live: impl Fn(TabId) -> bool) -> Option<TabId> {
+    drawn.filter(|&view| is_live(view))
+}
+
 /// What to tell the engine when the side panel a window draws changes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PanelTransition {
@@ -1268,6 +1277,21 @@ mod tests {
         assert_eq!(keyboard_view(Some(TAB_A), Some(PANEL), None), Some(TAB_A));
         // A window with no model has nobody to type to.
         assert_eq!(keyboard_view(None, None, None), None);
+    }
+
+    /// A panel the model has dropped (its page closed or crashed) is still
+    /// the one the window drew, until the next frame; no input may reach it
+    /// in that interval, and the keyboard it had goes back to the tab.
+    #[test]
+    fn a_drawn_panel_view_the_model_no_longer_has_is_routed_to_by_nothing() {
+        assert_eq!(
+            drawn_panel_view(Some(PANEL), |view| view == PANEL),
+            Some(PANEL)
+        );
+        assert_eq!(drawn_panel_view(Some(PANEL), |_| false), None);
+        assert_eq!(drawn_panel_view(None, |_| true), None);
+        let shown = drawn_panel_view(Some(PANEL), |_| false);
+        assert_eq!(keyboard_view(Some(TAB_A), Some(PANEL), shown), Some(TAB_A));
     }
 
     #[test]

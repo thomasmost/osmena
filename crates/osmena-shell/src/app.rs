@@ -12,7 +12,7 @@ use osmena_core::{
     Bookmarks, BookmarksFile, Brand, Browser, Command, CommandKind, DownloadPolicy, EngineAction,
     EngineEvent, EngineInfo, ExtensionSource, InstalledExtensions, Keymap, LoadState, PageCommand,
     Profile, Session, TabId, UpdateStatus, WindowGeometry, WindowId, apply, bookmarks_html,
-    dispatch,
+    dispatch, window_losing_panel,
 };
 use osmena_engine::{Engine, StripSnapshot, TabHost, Waker};
 use url::Url;
@@ -1488,6 +1488,14 @@ impl<E: Engine> App<E> {
         };
         engine.spin();
         for event in engine.drain_events() {
+            // A side panel's view that closed or crashed is gone from the
+            // engine, so no window hosts it, and `apply` drops its panel:
+            // the window is found through the model first, before that.
+            if let Some(id) = window_losing_panel(&self.browser, &event)
+                && let Some(w) = self.window_for_core_id(id)
+            {
+                w.request_redraw();
+            }
             if let Some(tab) = tab_of(&event)
                 && let Some(w) = self.window_for_tab(tab)
             {

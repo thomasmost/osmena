@@ -14,8 +14,8 @@ use osmena_chrome::chrome::{self, ChromeState, WindowRequest};
 use osmena_chrome::input::extension_chords;
 use osmena_chrome::routing::{
     ContentRegion, KeyRouter, KeyStroke, KeyTarget, PointerCapture, PointerContext, PointerTarget,
-    ViewPixels, content_pixels, content_region, keyboard_view, panel_shown, panel_transition,
-    resize_edge, route_pointer, split_content, view_pixels,
+    ViewPixels, content_pixels, content_region, drawn_panel_view, keyboard_view, panel_shown,
+    panel_transition, resize_edge, route_pointer, split_content, view_pixels,
 };
 use osmena_chrome::{icon, input, keyutils, menus, native_menu, theme};
 use osmena_core::{
@@ -276,15 +276,19 @@ impl<E: Engine> BrowserWindow<E> {
         }
     }
 
+    /// The side panel's view drawn in the last frame, unless the model has
+    /// dropped it since (its page closed): input never goes to a dead view.
+    fn drawn_panel(&self, browser: &Browser) -> Option<TabId> {
+        drawn_panel_view(self.panel.map(|panel| panel.view), |view| {
+            view_is_live(browser, self.id, view)
+        })
+    }
+
     /// The view that has the keyboard: the drawn side panel's after a
     /// click in it, else the active tab.
     fn keyboard_view(&self, browser: &Browser) -> Option<TabId> {
         let active = browser.window(self.id).map(|w| w.active);
-        keyboard_view(
-            active,
-            self.keyboard_in_panel,
-            self.panel.map(|panel| panel.view),
-        )
+        keyboard_view(active, self.keyboard_in_panel, self.drawn_panel(browser))
     }
 
     /// A button press landed on `target`, in `view`: the keyboard goes
@@ -630,9 +634,9 @@ impl<E: Engine> BrowserWindow<E> {
     /// The view a pointer event for `side` goes to: the view holding the
     /// capture while one is held (even if another tab is active or
     /// another panel shown now), otherwise the active tab for the page
-    /// and the drawn panel's view for the panel. Nothing while the
-    /// capturing view is gone: its release ends the capture without
-    /// reaching anyone.
+    /// and the drawn panel's view for the panel, unless the model has
+    /// dropped that view. Nothing while the capturing view is gone: its
+    /// release ends the capture without reaching anyone.
     fn pointer_view(
         &self,
         browser: &Browser,
@@ -643,7 +647,7 @@ impl<E: Engine> BrowserWindow<E> {
             Some(view) => view_is_live(browser, self.id, view).then_some(view),
             None => match side {
                 PointerTarget::Page => active,
-                PointerTarget::Panel => self.panel.map(|panel| panel.view),
+                PointerTarget::Panel => self.drawn_panel(browser),
                 PointerTarget::Egui => None,
             },
         }

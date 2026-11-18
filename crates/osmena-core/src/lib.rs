@@ -44,6 +44,7 @@ pub use download::{
 };
 pub use event::{
     Cursor, EditState, EngineEvent, Media, MediaKind, Misspelling, PageContext, PendingTab, apply,
+    window_losing_panel,
 };
 pub use extension::{
     Extension, ExtensionCommand, ExtensionReply, ExtensionRequest, ExtensionSource,

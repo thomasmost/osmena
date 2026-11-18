@@ -8,7 +8,7 @@ use crate::command::{EngineAction, close_tab, drop_panel_view, extension_request
 use crate::download::DownloadReport;
 use crate::extension::{Extension, ExtensionRequest};
 use crate::media::MediaRequest;
-use crate::model::{Browser, Favicon, LoadState, RgbaImage, Tab, TabId, about_blank};
+use crate::model::{Browser, Favicon, LoadState, RgbaImage, Tab, TabId, WindowId, about_blank};
 
 /// Handle to an engine tab that page content created (`window.open`) and
 /// that the engine is holding until the model adopts it with
@@ -242,6 +242,20 @@ pub enum EngineEvent {
         extension: String,
         request: ExtensionRequest,
     },
+}
+
+/// The window whose side panel `event` takes away: the window that has the
+/// panel whose view a `TabClosed` or `TabCrashed` names. `apply` drops that
+/// panel from the model, so a shell that must redraw the window (the panel
+/// is no longer drawn, and the view no longer has input) asks before it
+/// applies the event.
+pub fn window_losing_panel(browser: &Browser, event: &EngineEvent) -> Option<WindowId> {
+    match event {
+        EngineEvent::TabClosed(view) | EngineEvent::TabCrashed { tab: view, .. } => {
+            browser.window_of_panel_view(*view)
+        }
+        _ => None,
+    }
 }
 
 /// Fold an engine event into the model. Returns follow-up actions; only
@@ -1460,6 +1474,34 @@ mod tests {
         let before = b.windows.clone();
         assert!(apply(&mut b, &EngineEvent::TabClosed(view)).is_empty());
         assert_eq!(b.windows, before);
+    }
+
+    #[test]
+    fn the_window_whose_panel_closed_or_crashed_is_found_before_apply_drops_it() {
+        let (mut b, window, tab) = one_window();
+        let for_window = open_panel(&mut b, window, None, "window.html");
+        let for_tab = open_panel(&mut b, window, Some(tab), "tab.html");
+        let closed = EngineEvent::TabClosed(for_tab);
+        let crashed = EngineEvent::TabCrashed {
+            tab: for_window,
+            reason: "gone".to_string(),
+        };
+        // Asked while the model still has the panels.
+        assert_eq!(window_losing_panel(&b, &closed), Some(window));
+        assert_eq!(window_losing_panel(&b, &crashed), Some(window));
+        // A tab, a view no panel has, and other events name no panel.
+        assert_eq!(window_losing_panel(&b, &EngineEvent::TabClosed(tab)), None);
+        assert_eq!(
+            window_losing_panel(&b, &EngineEvent::TabClosed(TabId(999))),
+            None
+        );
+        assert_eq!(
+            window_losing_panel(&b, &EngineEvent::FrameReady(for_window)),
+            None
+        );
+        // Once applied, the panel is gone and so is the answer.
+        assert!(apply(&mut b, &closed).is_empty());
+        assert_eq!(window_losing_panel(&b, &closed), None);
     }
 
     #[test]
