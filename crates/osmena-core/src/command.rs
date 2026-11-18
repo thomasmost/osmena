@@ -10,7 +10,7 @@ use crate::bookmarks_html;
 use crate::default_browser::DefaultBrowser;
 use crate::download::{Download, DownloadId, DownloadState};
 use crate::event::PendingTab;
-use crate::extension::ExtensionSource;
+use crate::extension::{ExtensionReply, ExtensionSource};
 use crate::history::unix_now;
 use crate::launch::{
     DRIVE_LIFETIME, DriveState, Fetched, LOCATION_LIFETIME, Place, Units, WEATHER_LIFETIME,
@@ -414,6 +414,19 @@ pub enum Command {
         tab: TabId,
         request: MediaRequest,
         allow: bool,
+    },
+    /// Close the side panel `window` shows: the active tab's, else the
+    /// window's (the panel's close control).
+    CloseSidePanel {
+        window: WindowId,
+    },
+    /// Run `extension`'s keyboard command `name` for `window`'s active
+    /// tab (a chord the extension declared and the keymap does not
+    /// hold).
+    ExtensionCommand {
+        window: WindowId,
+        extension: String,
+        name: String,
     },
     Quit,
 }
@@ -829,6 +842,34 @@ pub enum EngineAction {
     /// Fetch the Drive files the user opened last; answered with
     /// `LaunchUpdate::DriveFiles`.
     FetchDriveRecent,
+    /// Tell `extension` its keyboard command `name` ran, with
+    /// `window`'s active tab.
+    ExtensionCommand {
+        window: WindowId,
+        extension: String,
+        name: String,
+    },
+    /// The answer to the `EngineEvent::ExtensionRequest` that carried
+    /// `token`. Always the last action of that request.
+    ExtensionReply {
+        token: u64,
+        reply: ExtensionReply,
+    },
+    /// Create the engine view `view` in `window` for a side panel:
+    /// `extension`'s `page`. The view is no tab; it is sized, painted
+    /// and given input under its id like one.
+    CreateView {
+        window: WindowId,
+        view: TabId,
+        extension: String,
+        page: String,
+    },
+    /// Close the engine view `view` of `window`: its side panel is no
+    /// longer in the model.
+    CloseView {
+        window: WindowId,
+        view: TabId,
+    },
     Quit,
 }
 
@@ -1694,6 +1735,7 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
                 allow: *allow,
             }]
         }
+        Command::CloseSidePanel { .. } | Command::ExtensionCommand { .. } => Vec::new(),
         Command::Quit => quit_guard(browser, None).unwrap_or_else(|| vec![EngineAction::Quit]),
     }
 }

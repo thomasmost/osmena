@@ -6,7 +6,7 @@ use url::Url;
 use crate::blocked::{BlockedPage, line_seed};
 use crate::command::{EngineAction, close_tab, open_window};
 use crate::download::DownloadReport;
-use crate::extension::Extension;
+use crate::extension::{Extension, ExtensionRequest};
 use crate::media::MediaRequest;
 use crate::model::{Browser, Favicon, LoadState, RgbaImage, Tab, TabId, about_blank};
 
@@ -232,6 +232,15 @@ pub enum EngineEvent {
     DownloadUpdated {
         id: u32,
         report: DownloadReport,
+    },
+    /// The extension with id `extension` asks the browser for
+    /// `request`. `apply` answers every request with exactly one
+    /// `EngineAction::ExtensionReply` carrying `token`, after whatever
+    /// else the request takes.
+    ExtensionRequest {
+        token: u64,
+        extension: String,
+        request: ExtensionRequest,
     },
 }
 
@@ -486,6 +495,7 @@ pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
             browser.extensions = extensions.clone();
             Vec::new()
         }
+        EngineEvent::ExtensionRequest { .. } => Vec::new(),
     }
 }
 

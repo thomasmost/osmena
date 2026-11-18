@@ -1401,6 +1401,12 @@ impl<E: Engine> App<E> {
                     self.perform_all(actions, event_loop);
                 }
             }
+            // The side panel's and the extensions' actions: forwarded to the
+            // engine in Phase 3 of the side panel plan; until then nothing.
+            EngineAction::ExtensionCommand { .. }
+            | EngineAction::ExtensionReply { .. }
+            | EngineAction::CreateView { .. }
+            | EngineAction::CloseView { .. } => {}
             EngineAction::Quit => {
                 self.save_session_for_exit(None);
                 self.exiting = true;
@@ -1747,6 +1753,7 @@ fn tab_of(event: &EngineEvent) -> Option<TabId> {
         | EngineEvent::ClipboardImage(_)
         | EngineEvent::EngineError(_)
         | EngineEvent::ExtensionsChanged(_)
+        | EngineEvent::ExtensionRequest { .. }
         | EngineEvent::DownloadUpdated { .. } => None,
     }
 }
