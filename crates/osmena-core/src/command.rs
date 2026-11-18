@@ -2815,6 +2815,25 @@ fn no_window(window: WindowId) -> String {
     format!("No window with id: {}.", window.0)
 }
 
+/// A new tab at `url` at the end of `window`'s strip, outside any
+/// folder, that does not become active: the engine creates it hidden.
+/// The window must exist.
+fn new_hidden_tab(browser: &mut Browser, window: WindowId, url: Url) -> (TabId, EngineAction) {
+    let tab = browser.allocate_tab_id();
+    let (t, load) = tab_at(browser, tab, url);
+    browser
+        .window_mut(window)
+        .expect("the caller checked the window")
+        .tabs
+        .push(t);
+    let action = EngineAction::CreateHiddenTab {
+        window,
+        tab,
+        url: load,
+    };
+    (tab, action)
+}
+
 /// Answer an extension's request (`EngineEvent::ExtensionRequest`):
 /// what the request takes, then exactly one `ExtensionReply` carrying
 /// `token`. A request that names a tab, folder or window the model lacks
@@ -2842,6 +2861,37 @@ fn answer_request(
     request: &ExtensionRequest,
 ) -> Result<(Vec<EngineAction>, ExtensionReply), String> {
     match request {
+        ExtensionRequest::OpenTab {
+            window,
+            url,
+            active,
+        } => {
+            let window = match window {
+                Some(window) if browser.window(*window).is_some() => *window,
+                Some(window) => return Err(no_window(*window)),
+                None => browser
+                    .focused_window()
+                    .ok_or_else(|| "No current window.".to_string())?,
+            };
+            if *active {
+                let actions = new_tab(browser, window, url.clone());
+                let tab = browser.window(window).expect("checked above").active;
+                Ok((actions, ExtensionReply::Tab(tab)))
+            } else {
+                let (tab, action) = new_hidden_tab(browser, window, url.clone());
+                Ok((vec![action], ExtensionReply::Tab(tab)))
+            }
+        }
+        ExtensionRequest::OpenWindow { url } => {
+            let url = url.clone().unwrap_or_else(|| browser.new_tab_url());
+            let actions = open_window(browser, url);
+            let window = browser
+                .windows
+                .last()
+                .expect("open_window pushed a window")
+                .id;
+            Ok((actions, ExtensionReply::Window(window)))
+        }
         ExtensionRequest::OpenSidePanel { window, tab, page } => {
             let actions = open_side_panel(browser, extension, *window, *tab, page)?;
             Ok((actions, ExtensionReply::Done))
@@ -6901,5 +6951,167 @@ mod tests {
         let hidden = open_panel(&mut b, window, Some(t[0]), "hidden.html");
         assert!(dispatch(&mut b, &close).is_empty());
         assert!(b.window(window).unwrap().has_panel_view(hidden));
+    }
+
+    #[test]
+    fn an_extension_opens_a_tab_active_or_behind_and_is_told_its_id() {
+        // side-panel.AC3.3 at the model level
+        let (mut b, window, t) = window_with_tabs(2);
+        dispatch(&mut b, &Command::ActivateTab(t[0]));
+        let actions = ask(
+            &mut b,
+            1,
+            ExtensionRequest::OpenTab {
+                window: Some(window),
+                url: url("https://new.example/"),
+                active: true,
+            },
+        );
+        let opened = b.window(window).unwrap().active;
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::Hide(t[0]),
+                EngineAction::CreateTab {
+                    window,
+                    tab: opened,
+                    url: url("https://new.example/"),
+                },
+                reply(1, ExtensionReply::Tab(opened)),
+            ]
+        );
+        assert_eq!(order(&b, window), vec![t[0], t[1], opened]);
+        // Not active: created hidden at the end, the active tab kept.
+        let actions = ask(
+            &mut b,
+            2,
+            ExtensionRequest::OpenTab {
+                window: Some(window),
+                url: url("https://behind.example/"),
+                active: false,
+            },
+        );
+        let behind = *order(&b, window).last().unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::CreateHiddenTab {
+                    window,
+                    tab: behind,
+                    url: url("https://behind.example/"),
+                },
+                reply(2, ExtensionReply::Tab(behind)),
+            ]
+        );
+        let w = b.window(window).unwrap();
+        assert_eq!(w.active, opened);
+        assert_eq!(w.selected, vec![opened]);
+        assert_eq!(order(&b, window), vec![t[0], t[1], opened, behind]);
+        assert_eq!(b.tab(behind).unwrap().folder, None);
+    }
+
+    #[test]
+    fn a_tab_an_extension_opens_on_a_blocked_site_shows_the_block_page() {
+        let (mut b, window, tab) = one_window();
+        b.blocked.add("b.example");
+        for (token, active) in [(1, true), (2, false)] {
+            let actions = ask(
+                &mut b,
+                token,
+                ExtensionRequest::OpenTab {
+                    window: Some(window),
+                    url: url("https://www.b.example/x"),
+                    active,
+                },
+            );
+            let opened = *order(&b, window).last().unwrap();
+            // The engine loads the blank page; the tab keeps the address.
+            let created = actions
+                .iter()
+                .find_map(|a| match a {
+                    EngineAction::CreateTab { tab, url, .. }
+                    | EngineAction::CreateHiddenTab { tab, url, .. } => Some((*tab, url.as_str())),
+                    _ => None,
+                })
+                .expect("a tab is created");
+            assert_eq!(created, (opened, "about:blank"));
+            assert_eq!(
+                actions.last(),
+                Some(&reply(token, ExtensionReply::Tab(opened)))
+            );
+            let t = b.tab(opened).unwrap();
+            assert_eq!(t.url.as_str(), "https://www.b.example/x");
+            assert_eq!(t.blocked.as_ref().unwrap().site, "b.example");
+        }
+        assert_eq!(order(&b, window).len(), 3);
+        assert!(b.tab(tab).unwrap().blocked.is_none());
+    }
+
+    #[test]
+    fn a_tab_without_a_window_opens_in_the_focused_one_and_an_unknown_window_is_refused() {
+        let (mut b, w1, _) = one_window();
+        let other = dispatch(&mut b, &Command::NewWindow);
+        let EngineAction::OpenWindow { window: w2, .. } = other[0].clone() else {
+            panic!("NewWindow returns OpenWindow");
+        };
+        let open = |window| ExtensionRequest::OpenTab {
+            window,
+            url: url("https://new.example/"),
+            active: false,
+        };
+        // Nobody has said which window is focused: the first.
+        ask(&mut b, 1, open(None));
+        assert_eq!(order(&b, w1).len(), 2);
+        b.focused = Some(w2);
+        ask(&mut b, 2, open(None));
+        assert_eq!(order(&b, w2).len(), 2);
+        let before = b.windows.clone();
+        assert_eq!(
+            ask(&mut b, 3, open(Some(WindowId(99)))),
+            vec![refused(3, "No window with id: 99.")]
+        );
+        assert_eq!(b.windows, before);
+    }
+
+    #[test]
+    fn an_extension_opens_a_window_on_a_url_or_the_new_window_page() {
+        let (mut b, _, _) = one_window();
+        b.settings.new_tab_url = "https://start.example/".to_string();
+        b.blocked.add("b.example");
+        let actions = ask(&mut b, 1, ExtensionRequest::OpenWindow { url: None });
+        let opened = b.windows.last().unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::OpenWindow {
+                    window: opened.id,
+                    tab: opened.active,
+                    url: url("https://start.example/"),
+                },
+                reply(1, ExtensionReply::Window(opened.id)),
+            ]
+        );
+        // A blocked site opens on its block page, as the user's would.
+        let actions = ask(
+            &mut b,
+            2,
+            ExtensionRequest::OpenWindow {
+                url: Some(url("https://b.example/")),
+            },
+        );
+        let opened = b.windows.last().unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::OpenWindow {
+                    window: opened.id,
+                    tab: opened.active,
+                    url: url("about:blank"),
+                },
+                reply(2, ExtensionReply::Window(opened.id)),
+            ]
+        );
+        assert!(opened.active_tab().blocked.is_some());
+        assert_eq!(b.windows.len(), 3);
     }
 }
