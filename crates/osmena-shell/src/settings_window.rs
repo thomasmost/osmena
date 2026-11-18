@@ -1223,10 +1223,13 @@ fn free_shortcut_note(
             .map_or(taker.name, command_what);
         Some(format!("Not active: {keys} is the shortcut for {other}"))
     } else {
+        // A blank name falls back to the id, as the side panel's header does.
         let name = extensions
             .iter()
             .find(|other| other.id == taker.extension)
-            .map_or(taker.extension, |other| other.name.as_str());
+            .map(|other| other.name.trim())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(taker.extension);
         Some(format!("Not active: {keys} is {name}'s shortcut"))
     }
 }
@@ -1806,6 +1809,33 @@ mod tests {
     }
 
     #[test]
+    fn a_blank_name_on_the_taker_falls_back_to_its_id() {
+        let keymap = Keymap::defaults(Platform::Windows);
+        let ctrl_e = KeyChord::new(Modifiers::CONTROL, Code::KeyE);
+        let extensions = [
+            extension_named(
+                "reader",
+                "  ",
+                true,
+                vec![extension_command("open", "Open the reader", Some(ctrl_e))],
+            ),
+            extension_named(
+                "notes",
+                "Notes",
+                true,
+                vec![extension_command("save", "Save a note", Some(ctrl_e))],
+            ),
+        ];
+        assert_eq!(
+            row_of(&keymap, &extensions, 1, 0),
+            (
+                "Save a note: Ctrl+E".to_string(),
+                Some("Not active: Ctrl+E is reader's shortcut".to_string())
+            )
+        );
+    }
+
+    #[test]
     fn a_later_extension_is_not_active_where_an_earlier_one_holds_the_chord() {
         let keymap = Keymap::defaults(Platform::Windows);
         let ctrl_e = KeyChord::new(Modifiers::CONTROL, Code::KeyE);
@@ -1860,6 +1890,42 @@ mod tests {
             (
                 "Close the reader: Ctrl+E".to_string(),
                 Some("Not active: Ctrl+E is the shortcut for Open the reader".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn a_later_extension_declaring_a_chord_with_a_lock_key_is_not_active_either() {
+        let keymap = Keymap::defaults(Platform::Windows);
+        let ctrl_e = KeyChord::new(Modifiers::CONTROL, Code::KeyE);
+        // The same chord, with Caps Lock held in the manifest's struct.
+        let ctrl_e_locked = KeyChord {
+            modifiers: Modifiers::CONTROL | Modifiers::CAPS_LOCK,
+            code: Code::KeyE,
+        };
+        let extensions = [
+            extension_named(
+                "reader",
+                "Reader",
+                true,
+                vec![extension_command("open", "Open the reader", Some(ctrl_e))],
+            ),
+            extension_named(
+                "notes",
+                "Notes",
+                true,
+                vec![extension_command(
+                    "save",
+                    "Save a note",
+                    Some(ctrl_e_locked),
+                )],
+            ),
+        ];
+        assert_eq!(
+            row_of(&keymap, &extensions, 1, 0),
+            (
+                "Save a note: Ctrl+E".to_string(),
+                Some("Not active: Ctrl+E is Reader's shortcut".to_string())
             )
         );
     }

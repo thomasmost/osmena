@@ -79,6 +79,7 @@ pub fn extension_chords(extensions: &[Extension]) -> Vec<ExtensionChord<'_>> {
 /// [`route_key`] applies. `None` when no entry declares it. The settings
 /// window asks the same question to say who holds a shortcut.
 pub fn extension_taking(extensions: &[ExtensionChord<'_>], chord: KeyChord) -> Option<usize> {
+    let chord = KeyChord::new(chord.modifiers, chord.code);
     extensions
         .iter()
         .position(|e| KeyChord::new(e.chord.modifiers, e.chord.code) == chord)
@@ -525,6 +526,18 @@ mod tests {
         let chords = extension_chords(&extensions);
         assert_eq!(extension_taking(&chords, cmd_e()), Some(0));
         assert_eq!(chords[0].name, "open");
+    }
+
+    #[test]
+    fn extension_taking_ignores_a_lock_modifier_on_the_chord_asked_about() {
+        let extensions = [extension("aaa", true, &[("open", Some(cmd_e()))])];
+        let chords = extension_chords(&extensions);
+        // A struct literal, as a caller may build it: Cmd+E with Caps Lock held.
+        let locked = KeyChord {
+            modifiers: Modifiers::META | Modifiers::CAPS_LOCK,
+            code: Code::KeyE,
+        };
+        assert_eq!(extension_taking(&chords, locked), Some(0));
     }
 
     #[test]
