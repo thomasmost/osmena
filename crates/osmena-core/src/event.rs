@@ -204,6 +204,14 @@ pub enum EngineEvent {
         tab: TabId,
         request: MediaRequest,
     },
+    /// The page in `tab` started or stopped using the microphone or
+    /// the camera: `capture` is what it has open now. An engine reports
+    /// every change, the last one with nothing in use; the strip marks
+    /// the tab while anything is.
+    MediaCaptureChanged {
+        tab: TabId,
+        capture: crate::media::MediaCapture,
+    },
     /// The engine painted a new frame for this tab; the window showing it
     /// should redraw.
     FrameReady(TabId),
@@ -452,7 +460,13 @@ pub fn apply(browser: &mut Browser, event: &EngineEvent) -> Vec<EngineAction> {
             with_tab(browser, *tab, |t| {
                 t.crashed = Some(reason.clone());
                 t.load = LoadState::Idle;
+                // The page is gone, and its hold on any device with it.
+                t.capture = crate::media::MediaCapture::default();
             });
+            Vec::new()
+        }
+        EngineEvent::MediaCaptureChanged { tab, capture } => {
+            with_tab(browser, *tab, |t| t.capture = *capture);
             Vec::new()
         }
         // A page wants the microphone or the camera: allowed at once
@@ -553,6 +567,42 @@ mod tests {
             panic!("open_window returns OpenWindow");
         };
         (b, window, tab)
+    }
+
+    #[test]
+    fn a_tab_is_marked_while_its_page_uses_a_device_and_a_crash_lets_go() {
+        use crate::media::MediaCapture;
+        let (mut b, _, tab) = one_window();
+        let microphone = MediaCapture {
+            microphone: true,
+            camera: false,
+        };
+        let using = |capture| EngineEvent::MediaCaptureChanged { tab, capture };
+        assert!(apply(&mut b, &using(microphone)).is_empty());
+        assert_eq!(b.tab(tab).unwrap().capture, microphone);
+        assert!(apply(&mut b, &using(MediaCapture::default())).is_empty());
+        assert!(!b.tab(tab).unwrap().capture.any());
+        // A crash ends the capture without the engine saying so.
+        apply(&mut b, &using(microphone));
+        apply(
+            &mut b,
+            &EngineEvent::TabCrashed {
+                tab,
+                reason: "gone".to_string(),
+            },
+        );
+        assert!(!b.tab(tab).unwrap().capture.any());
+        // A tab that is gone is nobody's to mark.
+        assert!(
+            apply(
+                &mut b,
+                &EngineEvent::MediaCaptureChanged {
+                    tab: TabId(999),
+                    capture: microphone
+                }
+            )
+            .is_empty()
+        );
     }
 
     #[test]

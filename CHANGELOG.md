@@ -6,6 +6,20 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- A tab whose page is using the microphone or the camera carries a
+  recording mark: a red dot at the left of its icon, fading out and
+  back in every 2.4 seconds, with "Using the microphone" (or the
+  camera, or both) under the pointer after the title. The mark is
+  never left out as tabs narrow: it takes its room before the icon,
+  the two are centred together on a tab that shows nothing else, and
+  on a tab too narrow for both the mark stays. A collapsed folder's
+  chip carries the mark for the tabs it hides. For an engine crate:
+  report `EngineEvent::MediaCaptureChanged { tab, capture }` with a
+  `MediaCapture { microphone, camera }` (re-exported from
+  `osmena-core`) each time what the page has open changes, the last
+  time with both `false`; `apply` keeps it in the new `Tab::capture`
+  and clears it when the tab crashes. An engine that never reports it
+  shows no mark, and nothing else changes for it.
 - The icon at the left end of the Launch Panel's field says what
   Enter will do: the site's own favicon while the field stands for a
   page (the completed page, a typed address, or the match picked with

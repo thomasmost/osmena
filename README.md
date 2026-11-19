@@ -185,6 +185,13 @@ The engine contract, in `osmena-engine`:
   setting "Use the system title bar and borders" (`system_title_bar` in
   `settings.toml`) restores the system frame; on macOS it applies to
   windows opened afterwards.
+- **A tab that is recording says so.** While a page uses the
+  microphone or the camera its tab carries a red dot left of the
+  icon, slowly fading out and in; the pointer over the tab says which
+  device. The dot stays however narrow the tab gets, and a collapsed
+  folder's chip carries it for its tabs. The engine reports the use
+  (`EngineEvent::MediaCaptureChanged`); an engine that does not shows
+  no dot.
 - **A new tab asks first: the Launch Panel.** Ctrl+T and the "+"
   button open a wide panel over the window instead of a blank page.
   At its top, a large field: type an address or a search and press

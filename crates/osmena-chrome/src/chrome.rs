@@ -64,6 +64,14 @@ const TAB_ICON_GAP: f32 = 6.0;
 const TAB_TITLE_MIN: f32 = 24.0;
 /// How far a title that does not fit fades out before its room ends.
 const TAB_TITLE_FADE: f32 = 20.0;
+/// The recording mark on a tab whose page is using the microphone or
+/// the camera: a red dot left of the icon, its diameter, the gap to
+/// the icon, and how long one fade out and back in takes.
+const REC_DOT: f32 = 8.0;
+const REC_GAP: f32 = 5.0;
+const REC_PERIOD_SECS: f64 = 2.4;
+/// A red that reads on every swatch's tabs, light or dark.
+const REC_RED: Color32 = Color32::from_rgb(226, 54, 54);
 /// The "+" button on the strip.
 const MENU_WIDTH: f32 = 28.0;
 /// Between the last tab and the "+".
@@ -1531,7 +1539,17 @@ fn strip_row(
                 let Some(f) = window.folder(*folder) else {
                     continue;
                 };
-                let chip = Chip::measure(ui, f, tabs.clone(), look.palette, window.active);
+                // A collapsed folder hides its tabs, not what they are
+                // doing: the chip carries the mark for them.
+                let recording = !f.expanded
+                    && tabs
+                        .iter()
+                        .any(|id| window.tab(*id).is_some_and(|t| t.capture.any()));
+                let mut chip = Chip::measure(ui, f, tabs.clone(), look.palette, window.active);
+                if recording {
+                    chip.recording = true;
+                    chip.width += REC_DOT + REC_GAP;
+                }
                 let hidden = if f.expanded {
                     0
                 } else {
@@ -1693,6 +1711,7 @@ fn strip_tab(
             favicon,
             loading: tab.load == LoadState::Loading && !tab.deferred,
             deferred: tab.deferred,
+            recording: tab.capture.describe(),
         },
         tab.display_title(),
         late,
@@ -1788,6 +1807,9 @@ struct Chip {
     galley: Arc<egui::Galley>,
     width: f32,
     palette: Palette,
+    /// A tab hidden in the collapsed folder is using the microphone or
+    /// the camera: the recording mark leads the chip.
+    recording: bool,
 }
 
 impl Chip {
@@ -1821,6 +1843,7 @@ impl Chip {
             galley,
             width,
             palette: *palette,
+            recording: false,
         }
     }
 }
@@ -1911,9 +1934,19 @@ fn strip_folder(
             };
             shapes.extend(inactive_tab_body(rect, fill, Some(palette.tab_outline), px));
         }
+        let lead = if chip.recording {
+            shapes.push(recording_dot(
+                ui,
+                rect.left() + TAB_PADDING_X,
+                rect.center().y,
+            ));
+            REC_DOT + REC_GAP
+        } else {
+            0.0
+        };
         // The disclosure triangle, drawn (the fonts lack the glyphs):
         // pointing right when collapsed, down when expanded.
-        let c = Pos2::new(rect.left() + TAB_PADDING_X + 4.0, rect.center().y);
+        let c = Pos2::new(rect.left() + TAB_PADDING_X + lead + 4.0, rect.center().y);
         let h = 4.0;
         let points = if expanded {
             vec![
@@ -1936,7 +1969,7 @@ fn strip_folder(
         let font = egui::FontId::new(TAB_FONT_SIZE, FontFamily::Proportional);
         shapes.push(egui::Shape::galley(
             Pos2::new(
-                rect.left() + TAB_PADDING_X + CHIP_GLYPH_WIDTH,
+                rect.left() + TAB_PADDING_X + lead + CHIP_GLYPH_WIDTH,
                 text_top_centered(ui.painter(), &font, rect.center().y),
             )
             .round_to_pixels(ppp),
@@ -4093,6 +4126,9 @@ struct TabState {
     loading: bool,
     /// A restored tab not loaded yet: drawn faint.
     deferred: bool,
+    /// The page is using the microphone or the camera: the recording
+    /// mark is drawn, and says this under the pointer.
+    recording: Option<&'static str>,
 }
 
 /// Where a tab's parts go at `width`, by Chromium's rules. The close
@@ -4102,9 +4138,15 @@ struct TabState {
 /// narrow for both keeps the icon instead), and is centred when neither
 /// the control nor the title is drawn. The title takes the room between,
 /// or nothing when that is under `TAB_TITLE_MIN`. Everything is measured
-/// from the tab's left edge.
+/// from the tab's left edge. The recording mark, when the page is using
+/// a device, comes before the icon and is never left out: it takes its
+/// room first, and the icon and it are centred together when they are
+/// all the tab shows.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TabLayout {
+    /// The left edge of the recording mark; `None` when the page uses
+    /// no device.
+    dot_left: Option<f32>,
     /// The left edge of the icon slot; `None` when it is not drawn.
     icon_left: Option<f32>,
     /// The title's left edge and the room it has; `None` when it is not
@@ -4114,22 +4156,25 @@ struct TabLayout {
     close: bool,
 }
 
-fn tab_layout(width: f32, is_active: bool, hovered: bool) -> TabLayout {
+fn tab_layout(width: f32, is_active: bool, hovered: bool, recording: bool) -> TabLayout {
     let close_left = width - TAB_PADDING_X + CLOSE_INSET - CLOSE_SIZE;
     let mut close = is_active || width >= TAB_CLOSE_MIN_WIDTH || hovered;
+    // What the recording mark takes ahead of the icon.
+    let lead = if recording { REC_DOT + REC_GAP } else { 0.0 };
     // The right end of what the icon and the title may use.
     let mut right = if close {
         close_left - TAB_ICON_GAP
     } else {
         width - TAB_PADDING_X
     };
-    let mut icon = right - TAB_PADDING_X >= FAVICON_SIZE;
+    let mut icon = right - TAB_PADDING_X - lead >= FAVICON_SIZE;
     if !icon && !is_active {
         close = false;
         right = width - TAB_PADDING_X;
-        icon = right - TAB_PADDING_X >= FAVICON_SIZE;
+        icon = right - TAB_PADDING_X - lead >= FAVICON_SIZE;
     }
     let text_left = TAB_PADDING_X
+        + lead
         + if icon {
             FAVICON_SIZE + TAB_ICON_GAP
         } else {
@@ -4137,18 +4182,41 @@ fn tab_layout(width: f32, is_active: bool, hovered: bool) -> TabLayout {
         };
     let room = right - text_left;
     let title = (room >= TAB_TITLE_MIN).then_some((text_left, room));
-    let icon_left = icon.then(|| {
-        if title.is_none() && !close {
-            (width - FAVICON_SIZE) / 2.0
-        } else {
-            TAB_PADDING_X
-        }
-    });
+    // The mark and the icon as one group: at the left padding, or in
+    // the middle when the tab shows nothing else.
+    let group = lead + if icon { FAVICON_SIZE } else { 0.0 };
+    let group_left = if title.is_none() && !close {
+        (width - group) / 2.0
+    } else {
+        TAB_PADDING_X
+    };
     TabLayout {
-        icon_left,
+        dot_left: recording.then_some(group_left),
+        icon_left: icon.then_some(group_left + lead),
         title,
         close,
     }
+}
+
+/// How solid the recording mark is at `time` seconds: a slow fade from
+/// solid down to a quarter and back, once every `REC_PERIOD_SECS`, as
+/// a cosine so it lingers at both ends and never snaps.
+fn recording_alpha(time: f64) -> f32 {
+    let phase = (time / REC_PERIOD_SECS).fract() * std::f64::consts::TAU;
+    (0.625 + 0.375 * phase.cos()) as f32
+}
+
+/// The recording mark in the slot starting at `left` on the centre
+/// line `y`: a red dot fading out and in. Asks for the next frame, so
+/// the fade runs while the mark is on screen.
+fn recording_dot(ui: &Ui, left: f32, y: f32) -> egui::Shape {
+    ui.ctx().request_repaint_after(Duration::from_millis(40));
+    let alpha = recording_alpha(ui.input(|i| i.time));
+    egui::Shape::circle_filled(
+        Pos2::new(left + REC_DOT / 2.0, y),
+        REC_DOT / 2.0,
+        REC_RED.gamma_multiply(alpha),
+    )
 }
 
 /// `ink` at `alpha`.
@@ -4181,6 +4249,7 @@ fn tab_widget(
         favicon,
         loading,
         deferred,
+        recording,
     } = tab;
     let ppp = ui.painter().pixels_per_point();
     let px = 1.0 / ppp;
@@ -4198,7 +4267,12 @@ fn tab_widget(
     let ink = palette.ink_on(fill);
     let alpha: u8 = if deferred { 140 } else { 255 };
     let text_color = faded(ink, alpha);
-    let layout = tab_layout(rect.width(), is_active, response.hovered());
+    let layout = tab_layout(
+        rect.width(),
+        is_active,
+        response.hovered(),
+        recording.is_some(),
+    );
     let close_rect = Rect::from_center_size(
         Pos2::new(
             rect.right() - TAB_PADDING_X + CLOSE_INSET - CLOSE_SIZE / 2.0,
@@ -4234,6 +4308,9 @@ fn tab_widget(
             shapes.extend(inactive_tab_body(rect, fill, outline, px));
         }
 
+        if let Some(left) = layout.dot_left {
+            shapes.push(recording_dot(ui, rect.left() + left, rect.center().y));
+        }
         if let Some(left) = layout.icon_left {
             let slot = Rect::from_min_size(
                 Pos2::new(rect.left() + left, rect.center().y - FAVICON_SIZE / 2.0),
@@ -4292,9 +4369,16 @@ fn tab_widget(
         }
     }
     let close_clicked = close.is_some_and(|close| close.on_hover_text("Close tab").clicked());
-    // The whole title, where the tab shows less of it.
-    if cut || layout.title.is_none() {
-        response.clone().on_hover_text(title);
+    // The whole title, where the tab shows less of it; and what the
+    // recording mark stands for.
+    match recording {
+        Some(using) => {
+            response.clone().on_hover_text(format!("{title}\n{using}"));
+        }
+        None if cut || layout.title.is_none() => {
+            response.clone().on_hover_text(title);
+        }
+        None => {}
     }
     (response, close_clicked)
 }
@@ -5571,6 +5655,46 @@ mod tests {
     }
 
     #[test]
+    fn the_recording_mark_leads_the_icon_and_is_never_left_out() {
+        let lead = REC_DOT + REC_GAP;
+        // A wide tab: the mark at the padding, the icon and the title
+        // moved over by it.
+        let plain = tab_layout(TAB_WIDTH, false, false, false);
+        let marked = tab_layout(TAB_WIDTH, false, false, true);
+        assert_eq!(plain.dot_left, None);
+        assert_eq!(marked.dot_left, Some(TAB_PADDING_X));
+        assert_eq!(marked.icon_left, Some(TAB_PADDING_X + lead));
+        assert_eq!(marked.title.unwrap().0, plain.title.unwrap().0 + lead);
+        // A narrow tab with nothing else to show: the mark and the icon
+        // centred together, the mark first.
+        let narrow = tab_layout(TAB_MIN_WIDTH, false, false, true);
+        assert_eq!(narrow.title, None);
+        let group = lead + FAVICON_SIZE;
+        assert_eq!(narrow.dot_left, Some((TAB_MIN_WIDTH - group) / 2.0));
+        assert_eq!(narrow.icon_left, Some((TAB_MIN_WIDTH - group) / 2.0 + lead));
+        // Too narrow for both: the mark stays, the icon goes.
+        let tight = tab_layout(lead + 2.0 * TAB_PADDING_X + 4.0, false, false, true);
+        assert!(tight.dot_left.is_some());
+        assert_eq!(tight.icon_left, None);
+    }
+
+    #[test]
+    fn the_recording_mark_fades_slowly_and_never_goes_out() {
+        // Solid at the start of a period, faintest half way, and back.
+        assert!((recording_alpha(0.0) - 1.0).abs() < 1e-6);
+        assert!((recording_alpha(REC_PERIOD_SECS / 2.0) - 0.25).abs() < 1e-6);
+        assert!((recording_alpha(REC_PERIOD_SECS) - 1.0).abs() < 1e-4);
+        // Slow: a twentieth of a second moves it by less than a tenth.
+        let mut t = 0.0;
+        while t < 2.0 * REC_PERIOD_SECS {
+            let (a, b) = (recording_alpha(t), recording_alpha(t + 0.05));
+            assert!((0.25..=1.0).contains(&a), "{a} at {t}");
+            assert!((a - b).abs() < 0.1, "{a} to {b} at {t}");
+            t += 0.05;
+        }
+    }
+
+    #[test]
     fn the_plus_and_the_drag_area_are_never_the_tabs_room() {
         // A frameless strip keeps the "+" and the least drag area
         // whatever the tabs want; a framed one keeps the "+" alone.
@@ -5606,21 +5730,22 @@ mod tests {
 
     #[test]
     fn a_narrow_inactive_tab_centres_its_icon_and_shows_the_close_control_hovered() {
-        let idle = tab_layout(TAB_MIN_WIDTH, false, false);
+        let idle = tab_layout(TAB_MIN_WIDTH, false, false, false);
         assert_eq!(
             idle,
             TabLayout {
+                dot_left: None,
                 icon_left: Some((TAB_MIN_WIDTH - FAVICON_SIZE) / 2.0),
                 title: None,
                 close: false,
             }
         );
-        let hovered = tab_layout(TAB_MIN_WIDTH, false, true);
+        let hovered = tab_layout(TAB_MIN_WIDTH, false, true, false);
         assert_eq!(hovered.icon_left, Some(TAB_PADDING_X));
         assert_eq!(hovered.title, None);
         assert!(hovered.close);
         // Narrower than both: the icon stays, the control goes.
-        let tight = tab_layout(40.0, false, true);
+        let tight = tab_layout(40.0, false, true, false);
         assert_eq!(tight.icon_left, Some((40.0 - FAVICON_SIZE) / 2.0));
         assert!(!tight.close);
     }
@@ -5628,21 +5753,22 @@ mod tests {
     #[test]
     fn a_narrow_active_tab_keeps_its_close_control_before_its_icon() {
         assert_eq!(
-            tab_layout(TAB_MIN_WIDTH, true, false),
+            tab_layout(TAB_MIN_WIDTH, true, false, false),
             TabLayout {
+                dot_left: None,
                 icon_left: Some(TAB_PADDING_X),
                 title: None,
                 close: true,
             }
         );
-        let tight = tab_layout(40.0, true, false);
+        let tight = tab_layout(40.0, true, false, false);
         assert_eq!(tight.icon_left, None);
         assert!(tight.close);
     }
 
     #[test]
     fn a_wide_tab_shows_everything_with_the_title_between() {
-        let layout = tab_layout(TAB_WIDTH, false, false);
+        let layout = tab_layout(TAB_WIDTH, false, false, false);
         assert_eq!(layout.icon_left, Some(TAB_PADDING_X));
         assert!(layout.close);
         let (left, room) = layout.title.unwrap();
@@ -5653,7 +5779,7 @@ mod tests {
         );
         // Under the close threshold and not hovered, the title has the
         // control's room too.
-        let (_, wider) = tab_layout(100.0, false, false).title.unwrap();
+        let (_, wider) = tab_layout(100.0, false, false, false).title.unwrap();
         assert_eq!(
             wider,
             100.0 - 2.0 * TAB_PADDING_X - FAVICON_SIZE - TAB_ICON_GAP

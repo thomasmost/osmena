@@ -1819,6 +1819,7 @@ fn tab_of(event: &EngineEvent) -> Option<TabId> {
         | EngineEvent::TabCrashed { tab, .. }
         | EngineEvent::NavigationBlocked { tab, .. }
         | EngineEvent::MediaAccessRequested { tab, .. }
+        | EngineEvent::MediaCaptureChanged { tab, .. }
         | EngineEvent::FrameReady(tab)
         | EngineEvent::TabClosed(tab) => Some(*tab),
         EngineEvent::NewTabRequested { opener, .. }

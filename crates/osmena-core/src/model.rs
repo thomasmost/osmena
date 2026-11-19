@@ -125,6 +125,9 @@ pub struct Tab {
     /// The side panel an extension opened for this tab alone: shown
     /// while the tab is active, in place of the window's.
     pub panel: Option<SidePanel>,
+    /// The microphone and the camera, while the page is using them:
+    /// the strip marks the tab (`EngineEvent::MediaCaptureChanged`).
+    pub capture: crate::media::MediaCapture,
 }
 
 impl Tab {
@@ -145,6 +148,7 @@ impl Tab {
             warming: false,
             blocked: None,
             panel: None,
+            capture: crate::media::MediaCapture::default(),
         }
     }
 

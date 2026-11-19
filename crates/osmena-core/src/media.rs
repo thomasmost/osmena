@@ -83,9 +83,61 @@ impl MediaGrants {
     }
 }
 
+/// The devices a tab's page is using right now, as the engine reports
+/// them (`EngineEvent::MediaCaptureChanged`): what the strip's
+/// recording mark stands for. Not what the page was allowed
+/// ([`MediaGrants`]) but what it has open, so the mark goes when the
+/// page lets the device go.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MediaCapture {
+    pub microphone: bool,
+    pub camera: bool,
+}
+
+impl MediaCapture {
+    /// Whether the page is using either device.
+    pub fn any(self) -> bool {
+        self.microphone || self.camera
+    }
+
+    /// What the mark says under the pointer; `None` when nothing is in
+    /// use.
+    pub fn describe(self) -> Option<&'static str> {
+        match (self.microphone, self.camera) {
+            (true, true) => Some("Using the camera and the microphone"),
+            (true, false) => Some("Using the microphone"),
+            (false, true) => Some("Using the camera"),
+            (false, false) => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_capture_says_which_devices_are_in_use() {
+        let none = MediaCapture::default();
+        assert!(!none.any());
+        assert_eq!(none.describe(), None);
+        let microphone = MediaCapture {
+            microphone: true,
+            camera: false,
+        };
+        assert!(microphone.any());
+        assert_eq!(microphone.describe(), Some("Using the microphone"));
+        let camera = MediaCapture {
+            microphone: false,
+            camera: true,
+        };
+        assert_eq!(camera.describe(), Some("Using the camera"));
+        let both = MediaCapture {
+            microphone: true,
+            camera: true,
+        };
+        assert_eq!(both.describe(), Some("Using the camera and the microphone"));
+    }
 
     fn request(origin: &str, microphone: bool, camera: bool) -> MediaRequest {
         MediaRequest {
