@@ -145,6 +145,13 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- The Launch Panel's completion leaves off an address's `?query` and
+  `#fragment`: `sho` completes to `shop.example/list`, not to
+  `shop.example/list?page=2&sid=…`, and Enter opens the bare page.
+  Addresses that differ only there count as one page, their visits
+  together; the row carries a title only when the bare page itself
+  was visited or bookmarked. The matches under the field are
+  unchanged and still list the full addresses.
 - The Launch Panel opens a typed address as typed. A typing that
   already reads as an address (`docs.rs`, `https://example.com/a`)
   was completed to the most visited page starting with it, often one

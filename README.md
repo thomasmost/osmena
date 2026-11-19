@@ -195,7 +195,9 @@ The engine contract, in `osmena-engine`:
   rest selected after the caret, so typing on replaces it and Enter
   opens the page); Backspace drops the completion and leaves the
   typing, and a space makes the text a phrase, so Enter then searches.
-  A typing that is an address already (`docs.rs`, a whole URL) opens
+  The completion is always a page, without the `?query` and
+  `#fragment` an address in the history may carry. A typing that is
+  an address already (`docs.rs`, a whole URL) opens
   as typed: the completion may finish its host but never carries it to
   a page deeper in the site.
   The first row of the dropdown is always what Enter opens (the

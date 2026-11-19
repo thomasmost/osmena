@@ -6,6 +6,7 @@
 //! the first space makes the text a search.
 
 use std::cmp::Reverse;
+use std::collections::HashMap;
 
 use url::Url;
 
@@ -162,8 +163,12 @@ pub struct Completion {
 /// matched without its scheme and `www.`, as it is typed, or with
 /// `www.` when the user typed that, or in full once the user has typed
 /// the scheme and its colon (so `h` never completes to `https://…`).
-/// A site's front page is shown without its trailing slash. `None`
-/// when nothing matches, when `typed` is empty, or once it holds a
+/// A site's front page is shown without its trailing slash. What is
+/// completed is a page, never a state of one: an address's query and
+/// fragment are left off ([`page_of`]), the addresses that differ only
+/// there count as one page with their visits together, and the title
+/// is the page's own when the bare page was visited or bookmarked.
+/// `None` when nothing matches, when `typed` is empty, or once it holds a
 /// space: a phrase is a search.
 ///
 /// `typed_is_address` says the typing already reads as an address of
@@ -182,61 +187,87 @@ pub fn completion(
         return None;
     }
     let query = typed.to_lowercase();
-    let mut best: Option<(CompletionRank, Completion)> = None;
-    let mut consider = |url: &Url, title: &str, source, visits: u32, last_visit: u64| {
-        let Some(form) = completing_form(url, typed, &query) else {
+    // The pages that complete the typing, each standing for every
+    // address that differs from it only past the path.
+    let mut pages: HashMap<Url, Page> = HashMap::new();
+    let mut consider = |url: &Url, title: &str, visits: u32, last_visit: u64| {
+        let page = page_of(url);
+        let Some(form) = completing_form(&page, typed, &query) else {
             return;
         };
         if typed_is_address && !stays_on_address(&form, typed) {
             return;
         }
-        let rank = (
-            visits,
-            Reverse(form.chars().count()),
-            last_visit,
-            Reverse(url.to_string()),
-        );
-        if best.as_ref().is_none_or(|(r, _)| rank > *r) {
-            let rest: String = form.chars().skip(typed.chars().count()).collect();
-            best = Some((
-                rank,
-                Completion {
-                    suggestion: Suggestion {
-                        url: url.clone(),
-                        title: title.to_string(),
-                        source,
-                    },
-                    text: format!("{typed}{rest}"),
-                },
-            ));
+        let exact = page == *url;
+        let found = pages.entry(page).or_insert_with(|| Page {
+            form,
+            title: String::new(),
+            visits: 0,
+            last_visit: 0,
+        });
+        found.visits = found.visits.saturating_add(visits);
+        found.last_visit = found.last_visit.max(last_visit);
+        if exact && !title.is_empty() {
+            found.title = title.to_string();
         }
     };
     for entry in history.entries() {
-        let bookmark = bookmarks.find(&entry.url).map(|(_, b)| b);
-        let title = bookmark
-            .filter(|b| !b.title.is_empty())
-            .map(|b| b.title.as_str())
-            .unwrap_or(&entry.title);
-        let source = if bookmark.is_some() {
-            SuggestionSource::Bookmark
-        } else {
-            SuggestionSource::History
-        };
-        consider(&entry.url, title, source, entry.visits, entry.last_visit);
+        consider(&entry.url, &entry.title, entry.visits, entry.last_visit);
     }
     for bookmark in bookmarks.all() {
-        if history.entries().iter().any(|e| e.url == bookmark.url) {
-            continue;
-        }
-        consider(
-            &bookmark.url,
-            &bookmark.title,
-            SuggestionSource::Bookmark,
-            0,
-            0,
-        );
+        consider(&bookmark.url, "", 0, 0);
     }
-    best.map(|(_, c)| c)
+    let (url, page) = pages.into_iter().max_by(|(a_url, a), (b_url, b)| {
+        let rank = |url: &Url, page: &Page| -> CompletionRank {
+            (
+                page.visits,
+                Reverse(page.form.chars().count()),
+                page.last_visit,
+                Reverse(url.to_string()),
+            )
+        };
+        rank(a_url, a).cmp(&rank(b_url, b))
+    })?;
+    // A bookmark of the page itself gives it its star and its title.
+    let bookmark = bookmarks.find(&url).map(|(_, b)| b);
+    let title = bookmark
+        .filter(|b| !b.title.is_empty())
+        .map_or(page.title, |b| b.title.clone());
+    let rest: String = page.form.chars().skip(typed.chars().count()).collect();
+    Some(Completion {
+        suggestion: Suggestion {
+            url,
+            title,
+            source: if bookmark.is_some() {
+                SuggestionSource::Bookmark
+            } else {
+                SuggestionSource::History
+            },
+        },
+        text: format!("{typed}{rest}"),
+    })
+}
+
+/// A page that completes the typing: how it is spelt for the field,
+/// its title when the page itself (and not only an address under it)
+/// is known, and the visits of every address that is this page.
+struct Page {
+    form: String,
+    title: String,
+    visits: u32,
+    last_visit: u64,
+}
+
+/// The page an address is of: the address without its query and its
+/// fragment. Those name a state of a page (a search's words, a place
+/// in a document, a session's tokens), which is not what a few typed
+/// letters of the address ask for, and they are what makes a
+/// remembered address long and stale.
+fn page_of(url: &Url) -> Url {
+    let mut page = url.clone();
+    page.set_query(None);
+    page.set_fragment(None);
+    page
 }
 
 /// Whether completing `typed`, an address already, to `form` keeps the
@@ -363,6 +394,45 @@ mod tests {
         typed: &str,
     ) -> Option<(String, String)> {
         completion(history, bookmarks, typed, false).map(|c| (c.text, c.suggestion.url.to_string()))
+    }
+
+    #[test]
+    fn a_completion_leaves_off_the_query_and_the_fragment() {
+        let mut history = History::default();
+        // One page under three addresses, and a rival visited twice.
+        history.record(
+            &url("https://shop.example/list?page=2&sid=abc"),
+            "Page 2",
+            10,
+        );
+        history.record(&url("https://shop.example/list#reviews"), "Reviews", 20);
+        history.record(&url("https://shop.example/list?page=3"), "Page 3", 30);
+        history.record(&url("https://shop.example/about"), "About", 40);
+        history.record(&url("https://shop.example/about"), "About", 50);
+        let bookmarks = Bookmarks::default();
+        // Three visits between them beat two, and the page is opened
+        // bare; no title, since the bare page was never seen.
+        let found = completion(&history, &bookmarks, "sho", false).unwrap();
+        assert_eq!(found.text, "shop.example/list");
+        assert_eq!(found.suggestion.url.as_str(), "https://shop.example/list");
+        assert_eq!(found.suggestion.title, "");
+        // Once the bare page is known, its own title is the row's.
+        history.record(&url("https://shop.example/list"), "The list", 60);
+        let found = completion(&history, &bookmarks, "sho", false).unwrap();
+        assert_eq!(found.suggestion.title, "The list");
+        // A query alone on a front page leaves the site.
+        let mut history = History::default();
+        history.record(
+            &url("https://find.example/?q=rust+egui#top"),
+            "rust egui",
+            10,
+        );
+        assert_eq!(
+            completes_to(&history, &bookmarks, "fin"),
+            Some(("find.example".into(), "https://find.example/".into()))
+        );
+        // A typed query is the user's own: nothing completes it.
+        assert_eq!(completes_to(&history, &bookmarks, "find.example/?q"), None);
     }
 
     #[test]
