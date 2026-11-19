@@ -331,6 +331,18 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Fixed
 
+- Two fingers spread or pinched on a touchpad did not zoom the page.
+  On Windows the system turns the gesture into the wheel with Ctrl,
+  in the wheel message's own key state and with no key held; winit
+  takes the modifiers from the keyboard, so the shell saw a plain
+  wheel and scrolled. The event loop's message hook now notes the
+  message's Ctrl flag (`pinch.rs`) and the window zooms on it as it
+  does for Ctrl and a real wheel. On macOS the gesture is winit's
+  `PinchGesture`, which the shell ignored: it now zooms the page under
+  the pointer a step for every 15 per cent of magnification. Both are
+  the model's per-site zoom in steps (`ZoomIn`, `ZoomOut`), not a
+  smooth magnification of the picture, and an engine needs nothing
+  new for it.
 - A site's icon drawn at two sizes in one frame (on the bookmarks bar
   and on the Launch Panel's shelf) was fitted and uploaded to the GPU
   anew for each, every frame: the chrome kept one texture per site.

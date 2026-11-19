@@ -185,6 +185,9 @@ The engine contract, in `osmena-engine`:
   setting "Use the system title bar and borders" (`system_title_bar` in
   `settings.toml`) restores the system frame; on macOS it applies to
   windows opened afterwards.
+- **A pinch zooms.** Two fingers spread or pinched on a touchpad
+  over the page step its zoom in and out, as Ctrl (Cmd) and the wheel
+  do: the same per-site level, shown in the address bar's chip.
 - **A tab that is recording says so.** While a page uses the
   microphone or the camera its tab carries a red dot left of the
   icon, slowly fading out and in; the pointer over the tab says which

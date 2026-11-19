@@ -27,13 +27,14 @@ use osmena_engine::{
 };
 use url::Url;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
-use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+use winit::event::{DeviceId, ElementState, MouseButton, TouchPhase, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::ModifiersState;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::{CursorIcon, Fullscreen, ResizeDirection, Window, WindowAttributes};
 
 use crate::page::PageTexture;
+use crate::pinch::ZoomSteps;
 use crate::repaint::RepaintSchedule;
 
 /// How close to a frameless window's edge (physical pixels at 1x) the
@@ -97,9 +98,12 @@ pub struct BrowserWindow<E: Engine> {
     page_presses: HashMap<keyboard_types::Code, KeyInput>,
     /// The uploaded frame of each view (a tab, or a side panel's) that handed the shell pixels.
     textures: HashMap<TabId, PageTexture>,
-    /// Wheel travel with the primary modifier held, in pixels, until it
-    /// adds up to a zoom step.
-    zoom_wheel: f64,
+    /// Wheel travel with the primary modifier held (or from a
+    /// touchpad's pinch), in pixels, until it adds up to a zoom step.
+    zoom_wheel: ZoomSteps,
+    /// Magnification from a touchpad's pinch gesture, until it adds up
+    /// to a zoom step.
+    zoom_pinch: ZoomSteps,
     /// When egui wants the next frame.
     repaints: RepaintSchedule,
     egui: EguiGlow,
@@ -164,7 +168,8 @@ impl<E: Engine> BrowserWindow<E> {
             brand,
             engine_info,
             chrome: ChromeState::default(),
-            zoom_wheel: 0.0,
+            zoom_wheel: ZoomSteps::default(),
+            zoom_pinch: ZoomSteps::default(),
             modifiers: ModifiersState::default(),
             cursor: None,
             frameless,
@@ -859,6 +864,26 @@ impl<E: Engine> BrowserWindow<E> {
                     }
                 }
             }
+            // Two fingers spread or pinched on a macOS touchpad: the
+            // page under the pointer zooms a step for every
+            // `PINCH_STEP` of magnification. Never egui's: it would
+            // scale the whole chrome.
+            WindowEvent::PinchGesture { delta, phase, .. } => {
+                forward_to_egui = false;
+                if matches!(phase, TouchPhase::Started) {
+                    self.zoom_pinch.reset();
+                }
+                let target = self.pointer_target();
+                if target == PointerTarget::Page
+                    && let Some(tab) = self.pointer_view(browser, active, target)
+                {
+                    let steps = self.zoom_pinch.add(*delta, crate::pinch::PINCH_STEP);
+                    push_zoom(&mut commands, tab, steps);
+                }
+                if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                    self.zoom_pinch.reset();
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 let target = self.pointer_target();
                 if target != PointerTarget::Egui {
@@ -871,26 +896,22 @@ impl<E: Engine> BrowserWindow<E> {
                         let modifiers = self.modifiers();
                         // Ctrl (Cmd) and the wheel zoom the page a step per
                         // notch instead of scrolling it. A side panel has no
-                        // zoom of its own: there the wheel scrolls.
+                        // zoom of its own: there the wheel scrolls. A pinch
+                        // on a Windows touchpad is the wheel with Ctrl in
+                        // the message alone, the key not held (pinch.rs).
                         let primary = if cfg!(target_os = "macos") {
                             Modifiers::META
                         } else {
                             Modifiers::CONTROL
                         };
-                        if target == PointerTarget::Page && modifiers.contains(primary) {
-                            self.zoom_wheel += dy;
+                        let zooming =
+                            modifiers.contains(primary) || crate::pinch::wheel_has_control();
+                        if target == PointerTarget::Page && zooming {
                             let notch = f64::from(self.engine_info.wheel_line_px).max(1.0);
-                            while self.zoom_wheel >= notch {
-                                self.zoom_wheel -= notch;
-                                commands.push(Command::ZoomIn(tab));
-                            }
-                            while self.zoom_wheel <= -notch {
-                                self.zoom_wheel += notch;
-                                commands.push(Command::ZoomOut(tab));
-                            }
+                            push_zoom(&mut commands, tab, self.zoom_wheel.add(dy, notch));
                             return commands;
                         }
-                        self.zoom_wheel = 0.0;
+                        self.zoom_wheel.reset();
                         self.host.input(
                             tab,
                             EngineInput::Wheel {
@@ -1398,6 +1419,18 @@ impl<E: Engine> Drop for BrowserWindow<E> {
 /// window, or the view of one of its side panels. Held keys, a pointer
 /// capture and the hover all name a view and are dropped once this is
 /// false.
+/// `steps` zoom steps for `tab`: in for a positive count, out for a
+/// negative one.
+fn push_zoom(commands: &mut Vec<Command>, tab: TabId, steps: i32) {
+    for _ in 0..steps.unsigned_abs() {
+        commands.push(if steps > 0 {
+            Command::ZoomIn(tab)
+        } else {
+            Command::ZoomOut(tab)
+        });
+    }
+}
+
 fn view_is_live(browser: &Browser, window: WindowId, view: TabId) -> bool {
     browser
         .window(window)

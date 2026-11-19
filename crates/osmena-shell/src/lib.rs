@@ -25,6 +25,7 @@ mod launch;
 mod locale;
 mod media_prompt;
 mod page;
+mod pinch;
 pub mod process;
 mod profiles;
 mod repaint;

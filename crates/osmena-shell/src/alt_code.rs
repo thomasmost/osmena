@@ -72,6 +72,9 @@ pub(crate) fn install(
         // SAFETY: winit calls the hook with a pointer to the `MSG` it
         // just retrieved, valid for the call.
         let msg = unsafe { &*msg.cast::<MSG>() };
+        // The wheel's own Ctrl flag, which is how a touchpad's pinch
+        // arrives (pinch.rs).
+        crate::pinch::wheel_message(msg.message, msg.wParam);
         if let Some(character) = codes.message(msg.message, msg.wParam)
             && let Some(proxy) = for_hook.get()
             && let Err(e) = proxy.send_event(crate::app::AppEvent::Typed(character.to_string()))
