@@ -12,9 +12,9 @@ use osmena_core::{
     Bookmarks, BookmarksFile, Brand, Browser, Command, CommandKind, DownloadPolicy, EngineAction,
     EngineEvent, EngineInfo, ExtensionSource, InstalledExtensions, Keymap, LoadState, PageCommand,
     Profile, Session, TabId, UpdateStatus, WindowGeometry, WindowId, apply, bookmarks_html,
-    dispatch,
+    dispatch, window_losing_panel,
 };
-use osmena_engine::{Engine, TabHost, Waker};
+use osmena_engine::{Engine, StripSnapshot, TabHost, Waker};
 use url::Url;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
@@ -125,6 +125,10 @@ pub struct App<E: Engine> {
     /// The application's menu bar (macOS), rebuilt from the model after
     /// every event when its entries change.
     menu_bar: native_menu::MenuBar,
+    /// The strip as the engine was last told it (`Engine::strip_changed`):
+    /// the next is sent only when it differs. `None` until the first, and
+    /// always for an engine that runs no extensions.
+    last_strip: Option<StripSnapshot>,
     /// The user deleted the profile this browser runs: its directory
     /// goes once the engine has let go of it, on the way out.
     delete_on_exit: Option<Profile>,
@@ -249,6 +253,7 @@ impl<E: Engine> App<E> {
             window_failed: false,
             history_dirty: None,
             menu_bar: native_menu::MenuBar::default(),
+            last_strip: None,
             delete_on_exit,
             updater,
             update_check_due: None,
@@ -806,6 +811,37 @@ impl<E: Engine> App<E> {
         self.menu_bar.sync(entries);
     }
 
+    /// Tell the engine the strip, if it differs from the one it has: the
+    /// tabs, folders, shown panel and focus of every window. Called once
+    /// the windows first open and then before every wait, by which time
+    /// the commands and engine events of this turn have been applied, so
+    /// a reply to an extension's request always precedes the strip that
+    /// shows its effect. Only an engine that runs extensions
+    /// (`EngineInfo::extensions` is `Some`) is told, whether or not it
+    /// has side panels: its extensions ask about tabs and windows either
+    /// way.
+    ///
+    /// Building the snapshot clones each tab's address and title, a few
+    /// microseconds for a hundred tabs, and no engine without extensions
+    /// pays it.
+    fn sync_strip(&mut self) {
+        if self.engine_info.extensions.is_none() {
+            return;
+        }
+        let Some(engine) = self.engine.as_ref() else {
+            return;
+        };
+        // The focused window is the model's (`Browser::focused`, set in
+        // `window_event`): the same one a request that names no window
+        // lands in.
+        let snapshot = StripSnapshot::of(&self.browser, self.browser.focused);
+        if self.last_strip.as_ref() == Some(&snapshot) {
+            return;
+        }
+        snapshot.lend(|windows| engine.strip_changed(windows));
+        self.last_strip = Some(snapshot);
+    }
+
     /// Run the commands of the menu bar items picked since the last
     /// time. An editing command goes to whatever has the keyboard: a
     /// text field of the chrome or of the settings window gets it as the
@@ -1270,6 +1306,12 @@ impl<E: Engine> App<E> {
                     w.open_extension_action(tab, &extension);
                 }
             }
+            EngineAction::CloseView { window, view } => {
+                let active = self.browser.window(window).map(|w| w.active);
+                if let Some(w) = self.window_for_core_id(window) {
+                    w.close_view(view, active);
+                }
+            }
             EngineAction::SetExtensionEnabled { extension, enabled } => {
                 engine.set_extension_enabled(&extension, enabled);
             }
@@ -1401,6 +1443,34 @@ impl<E: Engine> App<E> {
                     self.perform_all(actions, event_loop);
                 }
             }
+            EngineAction::ExtensionCommand {
+                window,
+                extension,
+                name,
+            } => {
+                // An extension's shortcut is delivered with the window's
+                // active tab, like a click on its action.
+                let tab = self.browser.window(window).map(|w| w.active);
+                if let (Some(tab), Some(w)) = (tab, self.window_for_core_id(window)) {
+                    w.host_mut().extension_command(tab, &extension, &name);
+                }
+            }
+            EngineAction::ExtensionReply { token, reply } => {
+                engine.extension_reply(token, reply);
+            }
+            EngineAction::CreateView {
+                window,
+                view,
+                extension,
+                page,
+            } => {
+                // The view starts hidden; the window shows it in the
+                // first frame that draws its panel.
+                if let Some(w) = self.window_for_core_id(window) {
+                    w.host_mut().create_view(view, &extension, &page);
+                    w.request_redraw();
+                }
+            }
             EngineAction::Quit => {
                 self.save_session_for_exit(None);
                 self.exiting = true;
@@ -1418,6 +1488,14 @@ impl<E: Engine> App<E> {
         };
         engine.spin();
         for event in engine.drain_events() {
+            // A side panel's view that closed or crashed is gone from the
+            // engine, so no window hosts it, and `apply` drops its panel:
+            // the window is found through the model first, before that.
+            if let Some(id) = window_losing_panel(&self.browser, &event)
+                && let Some(w) = self.window_for_core_id(id)
+            {
+                w.request_redraw();
+            }
             if let Some(tab) = tab_of(&event)
                 && let Some(w) = self.window_for_tab(tab)
             {
@@ -1456,6 +1534,9 @@ impl<E: Engine> App<E> {
                     }
                 }
                 EngineEvent::ClipboardImage(image) => clipboard::set_image(image),
+                // An extension changed the strip, a folder or a panel, in
+                // whichever window: all of them show it.
+                EngineEvent::ExtensionRequest { .. } => self.redraw_all(),
                 _ => {}
             }
             let actions = apply(&mut self.browser, &event);
@@ -1466,6 +1547,7 @@ impl<E: Engine> App<E> {
                     | EngineEvent::TabClosed(_)
                     | EngineEvent::NavigationBlocked { .. }
                     | EngineEvent::NewTabRequested { .. }
+                    | EngineEvent::ExtensionRequest { .. }
             ) {
                 self.session_changed();
             }
@@ -1743,11 +1825,13 @@ fn tab_of(event: &EngineEvent) -> Option<TabId> {
         | EngineEvent::NewWindowRequested { opener, .. } => Some(*opener),
         EngineEvent::ContextMenuRequested { tab, .. } => Some(*tab),
         // The cursor and the clipboard are handled directly; no redraw.
+        // An extension's request names no tab; `pump` redraws for it.
         EngineEvent::CursorChanged { .. }
         | EngineEvent::ClipboardImage(_)
         | EngineEvent::EngineError(_)
         | EngineEvent::ExtensionsChanged(_)
-        | EngineEvent::DownloadUpdated { .. } => None,
+        | EngineEvent::DownloadUpdated { .. }
+        | EngineEvent::ExtensionRequest { .. } => None,
     }
 }
 
@@ -1810,6 +1894,9 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
             if !urls.is_empty() {
                 self.open_urls(urls, event_loop);
             }
+            // The first windows are open: the engine learns the strip
+            // before any extension can ask about it.
+            self.sync_strip();
             self.schedule_update_check(update::FIRST_CHECK_DELAY);
         }
     }
@@ -1867,6 +1954,19 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
         } else if self.windows.contains_key(&window_id) {
             if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_)) {
                 self.session_changed();
+            }
+            if let WindowEvent::Focused(focused) = &event {
+                // The model's focused window: where an extension's
+                // request that names no window lands, and the window
+                // the strip flags. A window that loses the focus to
+                // something that is no browser window (the settings
+                // window, another application) leaves none focused.
+                let id = self.windows[&window_id].core_id();
+                if *focused {
+                    self.browser.focused = Some(id);
+                } else if self.browser.focused == Some(id) {
+                    self.browser.focused = None;
+                }
             }
             if matches!(event, WindowEvent::Focused(true)) {
                 // Another browser may have made or deleted a profile, or
@@ -1984,6 +2084,10 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
         if self.exiting {
             return;
         }
+        // Last, so the strip carries the turn's changes, a warm's completion
+        // among them: the update check and the warms run commands above, and
+        // nothing below changes the model.
+        self.sync_strip();
         for w in self.windows.values_mut() {
             next = repaint::earliest(next, w.redraw_deadline());
         }

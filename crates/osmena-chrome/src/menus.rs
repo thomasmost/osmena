@@ -789,12 +789,16 @@ pub fn folder_menu(window: &Window, folder: FolderId) -> Vec<MenuEntry> {
 }
 
 /// The menu behind the toolbar's puzzle-piece button. Every installed
-/// extension is listed: clicking one opens its action's popup (disabled
-/// when it has none, or the extension is off). "Pin to toolbar" holds a
-/// check item per extension. Then the ways to add one: load an unpacked
-/// directory, install the extension the active tab's store page shows
-/// (`store_url` is the page the user is on), visit the store, and manage
-/// them in the settings window.
+/// extension is listed: clicking one clicks its toolbar action, which
+/// opens its popup or, without one, goes to the extension itself
+/// (disabled when it has no action, or the extension is off). "Pin to
+/// toolbar" holds a check item per extension. On an engine that shows
+/// side panels (`ExtensionSupport::side_panels`), "Close side panel"
+/// follows, enabled while the window has a panel in the model (the active
+/// tab's, else the window's, even one too narrow to draw). Then the ways to
+/// add an extension: load an unpacked directory, install the extension the
+/// active tab's store page shows (`active_url` is the page the user is on),
+/// visit the store, and manage them in the settings window.
 pub fn extensions_menu(
     window: &Window,
     extensions: &[Extension],
@@ -839,6 +843,16 @@ pub fn extensions_menu(
             })
             .collect(),
     });
+    // Kept and disabled while the window has no panel in the model, like
+    // Find on an engine that cannot search; absent on an engine that shows
+    // none.
+    if support.side_panels {
+        entries.push(MenuEntry::item(
+            "Close side panel",
+            window.shown_panel().is_some(),
+            Command::CloseSidePanel { window: window.id },
+        ));
+    }
     entries.push(MenuEntry::Separator);
     let store_item = (support.store_item_id)(active_url);
     entries.push(MenuEntry::item(
@@ -1370,6 +1384,13 @@ mod tests {
         store_name: "Test Store",
         store_url: "https://store.example/",
         store_item_id: store_id,
+        side_panels: false,
+    };
+
+    /// An engine that also shows side panels.
+    const PANELS: ExtensionSupport = ExtensionSupport {
+        side_panels: true,
+        ..SUPPORT
     };
 
     fn extension(id: &str, name: &str, enabled: bool, popup: bool) -> Extension {
@@ -1381,6 +1402,8 @@ mod tests {
             enabled,
             icon: None,
             action_title: popup.then(|| "Act".to_string()),
+            side_panel: false,
+            commands: Vec::new(),
         }
     }
 
@@ -1410,8 +1433,8 @@ mod tests {
                 "Manage extensions…",
             ]
         );
-        // Only an enabled extension with a popup opens; the store page
-        // on the active tab makes the install entry live.
+        // Only an enabled extension with an action can be clicked; the
+        // store page on the active tab makes the install entry live.
         assert_eq!(
             enabled(&entries),
             vec![true, false, false, true, true, true, true, true, true, true]
@@ -1471,6 +1494,103 @@ mod tests {
         assert_eq!(
             enabled(&entries),
             vec![false, false, true, false, true, true, true, true]
+        );
+    }
+
+    #[test]
+    fn extensions_menu_runs_an_action_without_a_popup_and_leaves_an_extension_with_no_action_disabled()
+     {
+        let w = window_with(1);
+        // An action that opens no popup still has a title: the click
+        // goes to the extension. An extension with no action has none.
+        let installed = [
+            Extension {
+                action_title: Some("Open the panel".to_string()),
+                side_panel: true,
+                ..extension("p", "Panel", true, false)
+            },
+            extension("n", "No action", true, false),
+        ];
+        let url = Url::parse("https://a.example/").unwrap();
+        let entries = extensions_menu(&w, &installed, &[], &SUPPORT, &url);
+        assert_eq!(
+            labels(&entries)[..3].to_vec(),
+            vec!["Panel", "No action", "Pin to toolbar"]
+        );
+        assert_eq!(enabled(&entries)[..2].to_vec(), vec![true, false]);
+        assert_eq!(
+            entries[0],
+            MenuEntry::item(
+                "Panel",
+                true,
+                Command::OpenExtensionAction {
+                    window: WindowId(1),
+                    extension: "p".to_string(),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn extensions_menu_offers_to_close_the_side_panel_only_where_there_are_panels() {
+        let mut w = window_with(1);
+        let installed = [extension("a", "Alpha", true, true)];
+        let url = Url::parse("https://a.example/").unwrap();
+        // An engine without side panels: no entry at all.
+        let without = extensions_menu(&w, &installed, &[], &SUPPORT, &url);
+        assert!(!labels(&without).contains(&"Close side panel".to_string()));
+        // With them and none shown: the entry stays, disabled, as Find
+        // does on an engine that cannot search.
+        let idle = extensions_menu(&w, &installed, &[], &PANELS, &url);
+        assert_eq!(
+            labels(&idle),
+            vec![
+                "Alpha",
+                "Pin to toolbar",
+                "Close side panel",
+                "-",
+                "Install the extension on this page",
+                "Visit the Test Store",
+                "Load unpacked extension…",
+                "-",
+                "Manage extensions…",
+            ]
+        );
+        assert!(!enabled(&idle)[2]);
+        // A panel on the window: the entry closes it.
+        w.panel = Some(osmena_core::extension::SidePanel {
+            extension: "a".to_string(),
+            page: "panel.html".to_string(),
+            view: TabId(90),
+        });
+        let shown = extensions_menu(&w, &installed, &[], &PANELS, &url);
+        assert_eq!(
+            shown[2],
+            MenuEntry::item(
+                "Close side panel",
+                true,
+                Command::CloseSidePanel {
+                    window: WindowId(1)
+                }
+            )
+        );
+        // A panel on the active tab alone counts too.
+        w.panel = None;
+        w.tabs[0].panel = Some(osmena_core::extension::SidePanel {
+            extension: "a".to_string(),
+            page: "panel.html".to_string(),
+            view: TabId(91),
+        });
+        assert!(enabled(&extensions_menu(&w, &installed, &[], &PANELS, &url))[2]);
+        // Nothing installed: the entry keeps its place under the pins.
+        let empty = extensions_menu(&w, &[], &[], &PANELS, &url);
+        assert_eq!(
+            labels(&empty)[..3].to_vec(),
+            vec![
+                "No extensions installed",
+                "Pin to toolbar",
+                "Close side panel"
+            ]
         );
     }
 

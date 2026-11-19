@@ -6,6 +6,44 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- The model knows extension side panels, extension keyboard commands
+  and what an extension asks of the browser (this is `osmena-core`; the
+  shell's half is the entry below). For an engine crate: `Extension` gains
+  `side_panel: bool` and `commands: Vec<ExtensionCommand>` (a name, a
+  description and the `KeyChord` the extension suggests), and
+  `ExtensionSupport` gains `side_panels: bool` (`false` keeps today's
+  behaviour; the struct literals are under Changed). A side panel is a
+  `SidePanel` (the extension, its page, the engine view that renders
+  it) on `Window::panel` or `Tab::panel`;
+  `Window::shown_panel` is the active tab's, else the window's, and a
+  panel's view has an id of the tabs' kind that is in no strip
+  (`Window::has_panel_view`, `Browser::window_of_panel_view`). An
+  engine asks on an extension's behalf with
+  `EngineEvent::ExtensionRequest { token, extension, request }`, where
+  `ExtensionRequest` is `OpenTab`, `CloseTabs`, `ActivateTab`,
+  `MoveTab`, `GroupTabs`, `UngroupTabs`, `UpdateFolder`, `OpenWindow`,
+  `OpenSidePanel` or `CloseSidePanel`; `apply` answers each with the
+  ordinary actions and then exactly one `EngineAction::ExtensionReply`
+  carrying the token (`Done`, `Tab`, `Folder`, `Window`, or `Refused`
+  with the extension API's own sentence, such as "No tab with id: 7.",
+  when a tab, folder or window is not in the model, in which case
+  nothing changed). A new tab or window passes the blocked-sites guard.
+  A group made without a folder is a new folder, expanded, named
+  "<Extension name> Session", and an empty title puts that name back.
+  The model picks a panel view's id and asks for it with
+  `EngineAction::CreateView`; `EngineAction::CloseView` follows when
+  the panel is replaced or closed, or its tab or window closes, and a
+  `TabClosed` or `TabCrashed` naming the view removes the panel with
+  nothing asked; `osmena_core::window_losing_panel` names the window
+  that panel was in, for a shell that redraws it before `apply` drops
+  the panel. `Command::CloseSidePanel` closes the panel a window
+  shows; `Command::ExtensionCommand` becomes
+  `EngineAction::ExtensionCommand` for an enabled extension that
+  declares the command (`Extension::has_command` says whether it does).
+  `Browser::focused_window` is the window a request that names none
+  lands in: `Browser::focused` while that window exists, else the first
+  window. The shell sets `Browser::focused` when a browser window gains
+  focus (see the engine contract entry below).
 - A page that asks for the microphone or the camera (`getUserMedia`)
   is answered by the user. An engine reports the request as
   `EngineEvent::MediaAccessRequested` (a `MediaRequest`: an id of the
@@ -20,6 +58,45 @@ All notable changes to the osmena crates. The crates version together.
   restored tab loading out of sight is refused without a question. An
   engine that reports no such requests needs nothing.
 
+- The engine contract and the shell for a side panel and for extension
+  shortcuts. An engine that sets `ExtensionSupport::side_panels` gets a
+  second view in a window: `TabHost::{create_view, close_view,
+  set_view_origin}` for the panel's page, which then answers
+  `resize_content`, `paint_page`, `input`, `set_focused`, `show` and
+  `hide` under its own id; `Engine::strip_changed` with every window's
+  strip (`WindowStrip`, `StripTab`; `StripSnapshot` is the owned form)
+  whenever it changes; `Engine::extension_reply` for each
+  `EngineEvent::ExtensionRequest`; and `TabHost::extension_command` for
+  an extension's shortcut. All six are defaulted, so an engine without
+  side panels needs no change. `strip_changed` goes to every engine
+  that runs extensions (`EngineInfo::extensions` is `Some`), whatever
+  `side_panels` says, and the shell now sets `Browser::focused` to the
+  browser window with the focus. The shell carves the panel from the
+  right of the page area (`routing::panel_shown` says whether a window
+  draws one: the engine has `side_panels`, the window is not in full
+  screen, the model has a panel; `routing::split_content` says where,
+  360 points wide under a 36-point header, absent when the page would
+  get under 320 points), sizes and paints the view there, sends the pointer
+  over it to the view in its own coordinates (`PointerTarget::Panel`; a
+  drag across the boundary stays with the side that got the press) and
+  gives it the keyboard on a click, until a click in the page or a tab
+  switch. A shortcut an enabled extension declares fires as
+  `Command::ExtensionCommand` when the keymap holds no such chord
+  (`input::extension_chords`, `KeyTarget::ExtensionCommand`); a chord in
+  the keymap always runs the keymap's command. `input::route_key` and
+  `routing::KeyRouter::route` take the extensions' chords as a last
+  argument; `input::KeyRoute` gains `Extension(usize)` (the index of
+  the chord an extension declared); `KeyTarget` gains `ExtensionCommand`
+  and is no longer `Copy`; `PointerTarget` gains `Panel`;
+  `PointerContext` gains `over_panel`. Also new in `osmena-chrome`:
+  `input::{ExtensionChord, extension_chords}`,
+  `routing::{ContentRegion, ContentSplit, PanelRects, PanelTransition,
+  ViewPixels, content_region, drawn_panel_view, keyboard_view,
+  panel_shown, panel_transition, split_content, view_pixels}`, and
+  `theme::{SIDE_PANEL_WIDTH, SIDE_PANEL_HEADER, SIDE_PANEL_MIN_PAGE}`.
+  `osmena-engine` gains `WindowStrip`, `StripTab`, `StripSnapshot` (with
+  `of` and `lend`), `WindowSnapshot` and `TabSnapshot`. `osmena-shell`
+  gains no public item: its window and app modules are private.
 - The Launch Panel's field completes an address ahead of the typist.
   Before the first space, the most visited page whose address starts
   with the typing stands in the field, the rest of its address after
@@ -39,9 +116,41 @@ All notable changes to the osmena crates. The crates version together.
   `osmena_core::completion`: visits, then the shorter address, then the
   later visit; a never-visited bookmark completes only what nothing in
   the history does.
+- The side panel's chrome. A panel an extension opens has a header
+  over it: the extension's icon and name (cut with an ellipsis when
+  long; an extension no longer installed is named by its id) and a
+  close control, with a hairline under the header and between page and
+  panel (`chrome::draw_side_panel_header`, which answers
+  `Command::CloseSidePanel`). Its sizes are `theme::SIDE_PANEL_PADDING`,
+  `theme::SIDE_PANEL_GAP` and `theme::SIDE_PANEL_CLOSE`. It is drawn wherever
+  `routing::panel_shown` and `routing::split_content` give the panel
+  its rectangles: the engine has `ExtensionSupport::side_panels`, the
+  window is not in full screen, the model has a panel for the active
+  tab or the window, and the window is wide enough. On such an engine
+  the extensions menu gains "Close side panel", enabled while the
+  window has a panel in the model; the "☰" menu and the macOS menu bar
+  are unchanged. A pinned toolbar action without a popup is a live
+  button, and a live row of that menu. The settings window lists each
+  extension's shortcuts under it. One that will not run its command is
+  marked "Not active" with the reason: the keymap holds its keys (the
+  action that has them is named), an earlier enabled command holds them
+  (another extension's, or this extension's own earlier command), or the
+  extension is off. Who holds a chord is `osmena_chrome::input::extension_taking`,
+  the rule `route_key` applies too. `osmena_core::extension::shortcut_verdict`
+  and `ShortcutVerdict` (both re-exported from `osmena_core`) give the
+  keymap's answer alone: unassigned, free, or overridden by the
+  `CommandKind` that holds the chord. The header, the "Close
+  side panel" entry and the panel need `side_panels`; the pinned-action
+  button and the shortcut list show on any engine that runs extensions.
 
 ### Changed
 
+- `Extension`'s `action_title` is now set for any toolbar action, with
+  or without a popup; before, an action without a popup read as `None`.
+  `Extension` and `ExtensionSupport` have new fields (`side_panel` and
+  `commands`, and `side_panels`), so an engine's struct literals must
+  name them (`false` and an empty list keep today's behaviour).
+  `ExtensionSupport`'s `PartialEq` now compares `side_panels` too.
 - The chrome's look, after Thorium with Zen's softness: the toolbar's
   Back, Forward, Reload and Stop are painted glyphs (an arrow, an arc
   with an arrowhead, a cross) in round 28-pt buttons that fill only

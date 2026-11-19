@@ -15,7 +15,11 @@
 use std::fmt;
 use std::sync::Arc;
 
-use osmena_core::{EngineEvent, EngineInput, ExtensionSource, PageCommand, PendingTab, TabId};
+use osmena_core::extension::{ExtensionReply, SidePanel};
+use osmena_core::{
+    Browser, EngineEvent, EngineInput, ExtensionSource, Folder, FolderId, LoadState, PageCommand,
+    PendingTab, TabId, WindowId,
+};
 use raw_window_handle::{DisplayHandle, WindowHandle};
 use url::Url;
 
@@ -126,8 +130,154 @@ pub enum PagePaint<'a> {
     Frame(FrameRef<'a>),
 }
 
-/// The engine side of one browser window: its tabs. Positions in
-/// [`EngineInput`] are physical pixels from the top left of the page area.
+/// One window's strip as an engine that runs extensions needs it: the
+/// tabs in strip order, the folders, and the side panel the window shows
+/// now. Read-only; the engine changes the model only through
+/// [`EngineEvent`]s. Handed out by [`Engine::strip_changed`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowStrip<'a> {
+    pub window: WindowId,
+    /// This is the browser window with the keyboard focus. False for
+    /// every window while none has it.
+    pub focused: bool,
+    /// The tabs, in strip order.
+    pub tabs: &'a [StripTab<'a>],
+    /// The window's folders, in the order they were made.
+    pub folders: &'a [Folder],
+    /// The panel the window shows: the active tab's, else the window's.
+    pub shown_panel: Option<&'a SidePanel>,
+}
+
+/// One tab of a [`WindowStrip`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StripTab<'a> {
+    pub id: TabId,
+    pub url: &'a Url,
+    /// The page's title as reported; empty until it has one.
+    pub title: &'a str,
+    pub active: bool,
+    /// The folder the tab is in, when the window has that folder.
+    pub folder: Option<FolderId>,
+    pub load: LoadState,
+    /// A restored tab the engine has not been asked for yet: it has an
+    /// address and a title but no engine tab until it is first shown.
+    pub deferred: bool,
+}
+
+/// Every window's strip, owned: what [`Engine::strip_changed`] hands out
+/// borrowed. The shell builds one after each turn of the event loop and
+/// sends it only when it differs from the last one sent; an engine may
+/// keep one to compare the next against.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StripSnapshot {
+    /// The windows, in the model's order.
+    pub windows: Vec<WindowSnapshot>,
+}
+
+/// One window of a [`StripSnapshot`]; [`WindowStrip`] is the same, lent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowSnapshot {
+    pub window: WindowId,
+    pub focused: bool,
+    pub tabs: Vec<TabSnapshot>,
+    pub folders: Vec<Folder>,
+    pub shown_panel: Option<SidePanel>,
+}
+
+/// One tab of a [`WindowSnapshot`]; [`StripTab`] is the same, lent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabSnapshot {
+    pub id: TabId,
+    pub url: Url,
+    pub title: String,
+    pub active: bool,
+    pub folder: Option<FolderId>,
+    pub load: LoadState,
+    pub deferred: bool,
+}
+
+impl StripSnapshot {
+    /// The strips of `browser`'s windows as they are now. `focused` is
+    /// the browser window with the keyboard focus, if one has it.
+    pub fn of(browser: &Browser, focused: Option<WindowId>) -> StripSnapshot {
+        let windows = browser
+            .windows
+            .iter()
+            .map(|window| WindowSnapshot {
+                window: window.id,
+                focused: focused == Some(window.id),
+                tabs: window
+                    .tabs
+                    .iter()
+                    .map(|tab| TabSnapshot {
+                        id: tab.id,
+                        url: tab.url.clone(),
+                        title: tab.title.clone(),
+                        active: tab.id == window.active,
+                        // As the strip draws it: a folder the window does
+                        // not hold is no folder.
+                        folder: tab.folder.filter(|id| window.folder(*id).is_some()),
+                        load: tab.load,
+                        deferred: tab.deferred,
+                    })
+                    .collect(),
+                folders: window.folders.clone(),
+                shown_panel: window.shown_panel().cloned(),
+            })
+            .collect();
+        StripSnapshot { windows }
+    }
+
+    /// Lend the snapshot as the slices [`Engine::strip_changed`] takes.
+    pub fn lend<R>(&self, f: impl FnOnce(&[WindowStrip<'_>]) -> R) -> R {
+        let tabs: Vec<Vec<StripTab<'_>>> = self
+            .windows
+            .iter()
+            .map(|window| {
+                window
+                    .tabs
+                    .iter()
+                    .map(|tab| StripTab {
+                        id: tab.id,
+                        url: &tab.url,
+                        title: &tab.title,
+                        active: tab.active,
+                        folder: tab.folder,
+                        load: tab.load,
+                        deferred: tab.deferred,
+                    })
+                    .collect()
+            })
+            .collect();
+        let windows: Vec<WindowStrip<'_>> = self
+            .windows
+            .iter()
+            .zip(&tabs)
+            .map(|(window, tabs)| WindowStrip {
+                window: window.window,
+                focused: window.focused,
+                tabs,
+                folders: &window.folders,
+                shown_panel: window.shown_panel.as_ref(),
+            })
+            .collect();
+        f(&windows)
+    }
+}
+
+/// The engine side of one browser window: its tabs and, for an engine
+/// with side panels, the panels' views. Positions in [`EngineInput`] are
+/// physical pixels from the top left of the page area, or of the view's
+/// own rectangle for a panel's view.
+///
+/// A side panel's view is addressed by a [`TabId`] the model allocates,
+/// in no strip. It is made by [`TabHost::create_view`] and from then
+/// until [`TabHost::close_view`] answers [`TabHost::has_tab`],
+/// [`TabHost::resize_content`], [`TabHost::paint_page`],
+/// [`TabHost::input`], [`TabHost::set_focused`], [`TabHost::show`] and
+/// [`TabHost::hide`] under that id exactly as a tab does, with a size of
+/// its own. Only engines whose `ExtensionSupport::side_panels` is true
+/// ever see one.
 pub trait TabHost {
     /// Create a visible tab loading `url`.
     fn create_tab(&mut self, tab: TabId, url: Url);
@@ -211,6 +361,28 @@ pub trait TabHost {
     fn replace_with_blank(&self, tab: TabId) {
         self.navigate(tab, osmena_core::about_blank());
     }
+    /// Run `extension`'s keyboard command `name` (its
+    /// `commands.onCommand` listeners), for `tab`, the window's active
+    /// tab. The chord was not in the keymap; the model checked that the
+    /// extension is enabled and declares the command. Default: nothing.
+    fn extension_command(&mut self, _tab: TabId, _extension: &str, _name: &str) {}
+    /// Create the view of a side panel under `view`, showing `page` (the
+    /// engine's own address for it, as it gave it in
+    /// `ExtensionRequest::OpenSidePanel`) of `extension`. The view starts
+    /// hidden and without focus; the shell sizes it, places it and calls
+    /// [`TabHost::show`] in the first frame that draws it. A view that
+    /// ends on its own reports `EngineEvent::TabClosed` or `TabCrashed`
+    /// with this id. Default: nothing.
+    fn create_view(&mut self, _view: TabId, _extension: &str, _page: &str) {}
+    /// Close a view made by [`TabHost::create_view`]: its panel is shown
+    /// nowhere any more. [`TabHost::has_tab`] is false for it afterwards.
+    /// Default: nothing.
+    fn close_view(&mut self, _view: TabId) {}
+    /// Where `view`'s rectangle sits on screen, in logical pixels, as
+    /// [`TabHost::set_content_origin`] says it for the page area. Sent
+    /// after every frame that draws the view and when the window moves.
+    /// Default: ignored.
+    fn set_view_origin(&mut self, _view: TabId, _x: i32, _y: i32) {}
 }
 
 /// One engine instance, one per process. The shell builds it through a
@@ -273,4 +445,235 @@ pub trait Engine: 'static {
     /// `TabHost::navigate`: after an unblock the shell sends it just ahead
     /// of the navigations that return tabs to their pages. Default: nothing.
     fn configure_blocked_sites(&self, _sites: BlockedSites) {}
+    /// Every window's strip, sent whenever it differs from the last one
+    /// sent (a tab opened, closed, moved, activated, renamed or loading;
+    /// a folder made or renamed; a panel shown; the focus moved), once the
+    /// commands and events of a turn of the event loop are done, and once
+    /// after the first windows open. The engine answers extensions' read
+    /// calls from it and compares it with the one before to fire their
+    /// events; [`StripSnapshot`] is the same data owned, to keep. Only an
+    /// engine that runs extensions (`EngineInfo::extensions` is `Some`)
+    /// receives it, with or without side panels. Default: nothing.
+    fn strip_changed(&self, _windows: &[WindowStrip<'_>]) {}
+    /// The model's answer to the `EngineEvent::ExtensionRequest` that
+    /// carried `token`: exactly one per request, sent before the
+    /// [`Engine::strip_changed`] that shows the request's effect.
+    /// Default: nothing.
+    fn extension_reply(&self, _token: u64, _reply: ExtensionReply) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use osmena_core::{Profile, Settings, Tab, Window};
+
+    use super::*;
+
+    fn url(s: &str) -> Url {
+        Url::parse(s).expect("test URL parses")
+    }
+
+    /// A browser with no windows, a throwaway profile, and default settings.
+    fn browser() -> Browser {
+        let dir = PathBuf::from("/nonexistent/osmena-test-profile");
+        let profile = Profile {
+            name: "test".to_string(),
+            engine_dir: dir.join("engine"),
+            dir,
+            guest: false,
+        };
+        Browser::new(profile, Settings::default())
+    }
+
+    /// A window whose tabs have the ids in `tabs`, each at
+    /// `https://<id>.example/`, the first one active.
+    fn window(id: u64, tabs: &[u64]) -> Window {
+        let tab = |n: &u64| Tab::new(TabId(*n), url(&format!("https://{n}.example/")));
+        let mut window = Window::with_tab(WindowId(id), tab(&tabs[0]));
+        window.tabs.extend(tabs[1..].iter().map(tab));
+        window
+    }
+
+    fn panel(view: u64) -> SidePanel {
+        SidePanel {
+            extension: "ext".to_string(),
+            page: format!("panel-{view}.html"),
+            view: TabId(view),
+        }
+    }
+
+    #[test]
+    fn the_snapshot_lists_every_window_and_its_tabs_in_strip_order() {
+        let mut b = browser();
+        b.windows.push(window(1, &[3, 1, 2]));
+        b.windows.push(window(2, &[4]));
+        let snapshot = StripSnapshot::of(&b, None);
+        let ids: Vec<(WindowId, Vec<TabId>)> = snapshot
+            .windows
+            .iter()
+            .map(|w| (w.window, w.tabs.iter().map(|t| t.id).collect()))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                (WindowId(1), vec![TabId(3), TabId(1), TabId(2)]),
+                (WindowId(2), vec![TabId(4)]),
+            ]
+        );
+        assert_eq!(
+            snapshot.windows[0].tabs[0],
+            TabSnapshot {
+                id: TabId(3),
+                url: url("https://3.example/"),
+                title: String::new(),
+                active: true,
+                folder: None,
+                load: LoadState::Idle,
+                deferred: false,
+            }
+        );
+    }
+
+    #[test]
+    fn only_the_active_tab_and_the_focused_window_are_flagged() {
+        let mut b = browser();
+        let mut first = window(1, &[1, 2, 3]);
+        first.active = TabId(2);
+        b.windows.push(first);
+        b.windows.push(window(2, &[4]));
+        let snapshot = StripSnapshot::of(&b, Some(WindowId(2)));
+        let active: Vec<bool> = snapshot.windows[0].tabs.iter().map(|t| t.active).collect();
+        assert_eq!(active, [false, true, false]);
+        let focused: Vec<bool> = snapshot.windows.iter().map(|w| w.focused).collect();
+        assert_eq!(focused, [false, true]);
+        // No browser window has the focus (the settings window, another app).
+        let nobody = StripSnapshot::of(&b, None);
+        assert!(nobody.windows.iter().all(|w| !w.focused));
+    }
+
+    #[test]
+    fn a_tab_names_its_folder_only_while_the_window_has_that_folder() {
+        let mut b = browser();
+        let mut w = window(1, &[1, 2, 3]);
+        w.folders.push(Folder {
+            id: FolderId(7),
+            name: "Work".to_string(),
+            expanded: true,
+        });
+        w.tabs[1].folder = Some(FolderId(7));
+        // A folder id the window does not hold: the strip draws the tab
+        // outside any folder, and so does the snapshot.
+        w.tabs[2].folder = Some(FolderId(99));
+        b.windows.push(w);
+        let snapshot = StripSnapshot::of(&b, None);
+        let folders: Vec<Option<FolderId>> =
+            snapshot.windows[0].tabs.iter().map(|t| t.folder).collect();
+        assert_eq!(folders, [None, Some(FolderId(7)), None]);
+        assert_eq!(
+            snapshot.windows[0].folders,
+            [Folder {
+                id: FolderId(7),
+                name: "Work".to_string(),
+                expanded: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_deferred_tab_is_listed_with_its_address_and_title() {
+        let mut b = browser();
+        let mut w = window(1, &[1, 2]);
+        w.tabs[1].deferred = true;
+        w.tabs[1].title = "Restored".to_string();
+        w.tabs[1].load = LoadState::Complete;
+        b.windows.push(w);
+        let snapshot = StripSnapshot::of(&b, None);
+        assert_eq!(
+            snapshot.windows[0].tabs[1],
+            TabSnapshot {
+                id: TabId(2),
+                url: url("https://2.example/"),
+                title: "Restored".to_string(),
+                active: false,
+                folder: None,
+                load: LoadState::Complete,
+                deferred: true,
+            }
+        );
+    }
+
+    #[test]
+    fn the_active_tabs_panel_is_shown_before_the_windows() {
+        let mut b = browser();
+        let mut w = window(1, &[1, 2]);
+        w.panel = Some(panel(50));
+        w.tabs[0].panel = Some(panel(51));
+        b.windows.push(w);
+        // Tab 1 is active and has its own panel.
+        assert_eq!(
+            StripSnapshot::of(&b, None).windows[0].shown_panel,
+            Some(panel(51))
+        );
+        // Tab 2 has none: the window's shows.
+        b.windows[0].active = TabId(2);
+        assert_eq!(
+            StripSnapshot::of(&b, None).windows[0].shown_panel,
+            Some(panel(50))
+        );
+        b.windows[0].panel = None;
+        assert_eq!(StripSnapshot::of(&b, None).windows[0].shown_panel, None);
+    }
+
+    #[test]
+    fn a_snapshot_equals_the_next_until_the_model_or_the_focus_changes() {
+        let mut b = browser();
+        b.windows.push(window(1, &[1, 2]));
+        let before = StripSnapshot::of(&b, Some(WindowId(1)));
+        assert_eq!(before, StripSnapshot::of(&b, Some(WindowId(1))));
+        assert_ne!(before, StripSnapshot::of(&b, None));
+        b.windows[0].tabs[1].title = "Loaded".to_string();
+        assert_ne!(before, StripSnapshot::of(&b, Some(WindowId(1))));
+    }
+
+    #[test]
+    fn lending_hands_out_the_same_values_borrowed() {
+        let mut b = browser();
+        let mut w = window(1, &[1, 2]);
+        w.panel = Some(panel(50));
+        w.tabs[1].title = "Two".to_string();
+        b.windows.push(w);
+        let snapshot = StripSnapshot::of(&b, Some(WindowId(1)));
+        let mut seen = Vec::new();
+        snapshot.lend(|windows| {
+            for w in windows {
+                seen.push((
+                    w.window,
+                    w.focused,
+                    w.tabs
+                        .iter()
+                        .map(|t| (t.id, t.url.clone(), t.title.to_string(), t.active))
+                        .collect::<Vec<_>>(),
+                    w.shown_panel.cloned(),
+                ));
+            }
+        });
+        assert_eq!(
+            seen,
+            [(
+                WindowId(1),
+                true,
+                vec![
+                    (TabId(1), url("https://1.example/"), String::new(), true),
+                    (
+                        TabId(2),
+                        url("https://2.example/"),
+                        "Two".to_string(),
+                        false
+                    ),
+                ],
+                Some(panel(50)),
+            )]
+        );
+    }
 }

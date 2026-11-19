@@ -10,7 +10,7 @@ use crate::blocked::{BlockedPage, BlockedSites};
 use crate::bookmarks::Bookmarks;
 use crate::default_browser::DefaultBrowser;
 use crate::download::Downloads;
-use crate::extension::Extension;
+use crate::extension::{Extension, SidePanel};
 use crate::history::History;
 use crate::launch::LaunchData;
 use crate::media::MediaGrants;
@@ -122,6 +122,9 @@ pub struct Tab {
     /// address bar says where the user tried to go; the engine shows
     /// `about:blank` behind the chrome's page.
     pub blocked: Option<BlockedPage>,
+    /// The side panel an extension opened for this tab alone: shown
+    /// while the tab is active, in place of the window's.
+    pub panel: Option<SidePanel>,
 }
 
 impl Tab {
@@ -141,6 +144,7 @@ impl Tab {
             deferred: false,
             warming: false,
             blocked: None,
+            panel: None,
         }
     }
 
@@ -193,6 +197,10 @@ pub struct Window {
     pub folders: Vec<Folder>,
     /// The find bar, while it is open.
     pub find: Option<FindState>,
+    /// The side panel an extension opened for the whole window: shown on
+    /// every tab that has none of its own. Like the find bar it is not
+    /// part of the session.
+    pub panel: Option<SidePanel>,
 }
 
 impl Window {
@@ -207,7 +215,43 @@ impl Window {
             fullscreen: false,
             folders: Vec::new(),
             find: None,
+            panel: None,
         }
+    }
+
+    /// The side panel this window shows: the active tab's, else the
+    /// window's.
+    pub fn shown_panel(&self) -> Option<&SidePanel> {
+        self.tab(self.active)
+            .and_then(|t| t.panel.as_ref())
+            .or(self.panel.as_ref())
+    }
+
+    /// Whether `view` is the view of any panel in this window, shown or
+    /// not.
+    pub fn has_panel_view(&self, view: TabId) -> bool {
+        self.panels().any(|p| p.view == view)
+    }
+
+    /// Every panel in this window: its tabs' in strip order, then its
+    /// own.
+    pub(crate) fn panels(&self) -> impl Iterator<Item = &SidePanel> {
+        self.tabs
+            .iter()
+            .filter_map(|t| t.panel.as_ref())
+            .chain(self.panel.as_ref())
+    }
+
+    /// Take the panel whose view is `view` out of this window, wherever
+    /// it is.
+    pub(crate) fn take_panel_view(&mut self, view: TabId) -> Option<SidePanel> {
+        if self.panel.as_ref().is_some_and(|p| p.view == view) {
+            return self.panel.take();
+        }
+        self.tabs
+            .iter_mut()
+            .find(|t| t.panel.as_ref().is_some_and(|p| p.view == view))
+            .and_then(|t| t.panel.take())
     }
 
     pub fn folder(&self, id: FolderId) -> Option<&Folder> {
@@ -409,6 +453,11 @@ pub struct Browser {
     /// The offer to become the default was answered "Not now" (or taken)
     /// in this run; it comes back at the next start.
     pub default_browser_dismissed: bool,
+    /// The browser window that has the system's focus now, as the shell
+    /// last said; `None` until it says, and while no browser window has
+    /// it. A request that names no window lands in
+    /// [`Browser::focused_window`].
+    pub focused: Option<WindowId>,
     next_window_id: u64,
     next_tab_id: u64,
     next_folder_id: u64,
@@ -439,6 +488,7 @@ impl Browser {
             launch: LaunchData::default(),
             default_browser: DefaultBrowser::default(),
             default_browser_dismissed: false,
+            focused: None,
             next_window_id: 1,
             next_tab_id: 1,
             next_folder_id: 1,
@@ -519,6 +569,24 @@ impl Browser {
             .iter()
             .find(|w| w.index_of(tab).is_some())
             .map(|w| w.id)
+    }
+
+    /// The window one of whose side panels is rendered by `view`. A
+    /// panel's view is no tab: [`Browser::tab`] and
+    /// [`Browser::window_of_tab`] do not know it.
+    pub fn window_of_panel_view(&self, view: TabId) -> Option<WindowId> {
+        self.windows
+            .iter()
+            .find(|w| w.has_panel_view(view))
+            .map(|w| w.id)
+    }
+
+    /// The window a request that names none lands in: the focused one
+    /// while it exists, else the first.
+    pub fn focused_window(&self) -> Option<WindowId> {
+        self.focused
+            .filter(|id| self.window(*id).is_some())
+            .or_else(|| self.windows.first().map(|w| w.id))
     }
 
     pub fn tab(&self, tab: TabId) -> Option<&Tab> {
@@ -642,6 +710,8 @@ mod tests {
             enabled,
             icon: None,
             action_title: Some("Act".to_string()),
+            side_panel: false,
+            commands: Vec::new(),
         };
         b.extensions = vec![ext("a", true), ext("b", false), ext("c", true)];
         b.settings.pinned_extensions = vec!["c".into(), "zz".into(), "b".into(), "a".into()];
@@ -726,6 +796,80 @@ mod tests {
         }
         w.prune_folders();
         assert!(w.folders.is_empty(), "an empty folder goes");
+    }
+
+    fn panel(extension: &str, view: u64) -> SidePanel {
+        SidePanel {
+            extension: extension.to_string(),
+            page: "panel.html".to_string(),
+            view: TabId(view),
+        }
+    }
+
+    #[test]
+    fn a_tabs_panel_shows_over_the_windows_and_only_while_that_tab_is_active() {
+        // side-panel.AC1.4
+        let mut w = window_with_tabs(3);
+        assert_eq!(w.shown_panel(), None);
+        w.panel = Some(panel("win", 10));
+        w.tabs[1].panel = Some(panel("tab", 11));
+        // Tab 1 is active and has none of its own: the window's shows.
+        assert_eq!(w.shown_panel(), Some(&panel("win", 10)));
+        // On the tab that has one, its own shows instead.
+        w.active = TabId(2);
+        assert_eq!(w.shown_panel(), Some(&panel("tab", 11)));
+        // On any other tab the window's is back.
+        w.active = TabId(3);
+        assert_eq!(w.shown_panel(), Some(&panel("win", 10)));
+        // Without a window panel, a tab's shows on that tab alone.
+        w.panel = None;
+        assert_eq!(w.shown_panel(), None);
+        w.active = TabId(2);
+        assert_eq!(w.shown_panel(), Some(&panel("tab", 11)));
+    }
+
+    #[test]
+    fn a_panel_view_is_found_by_its_window_and_is_never_a_tab() {
+        let mut b = browser();
+        let mut one = window_with_tabs(2);
+        one.panel = Some(panel("win", 10));
+        one.tabs[1].panel = Some(panel("tab", 11));
+        let mut two = Window::with_tab(WindowId(2), Tab::new(TabId(5), url("https://5.example/")));
+        two.tabs[0].panel = Some(panel("other", 12));
+        b.windows = vec![one, two];
+        let w = b.window(WindowId(1)).unwrap();
+        // Shown or not, a panel's view is the window's.
+        assert!(w.has_panel_view(TabId(10)));
+        assert!(w.has_panel_view(TabId(11)));
+        assert!(!w.has_panel_view(TabId(12)));
+        assert!(!w.has_panel_view(TabId(1)), "a tab is no panel view");
+        assert_eq!(b.window_of_panel_view(TabId(11)), Some(WindowId(1)));
+        assert_eq!(b.window_of_panel_view(TabId(12)), Some(WindowId(2)));
+        assert_eq!(b.window_of_panel_view(TabId(1)), None);
+        assert_eq!(b.window_of_panel_view(TabId(99)), None);
+        // The lookups by tab id do not know a view.
+        for view in [TabId(10), TabId(11), TabId(12)] {
+            assert!(b.tab(view).is_none());
+            assert!(b.tab_mut(view).is_none());
+            assert_eq!(b.window_of_tab(view), None);
+        }
+        assert_eq!(b.window(WindowId(1)).unwrap().tabs.len(), 2);
+    }
+
+    #[test]
+    fn a_request_without_a_window_lands_in_the_focused_window_else_the_first() {
+        let mut b = browser();
+        assert_eq!(b.focused_window(), None);
+        b.windows = vec![
+            Window::with_tab(WindowId(1), Tab::new(TabId(1), url("https://1.example/"))),
+            Window::with_tab(WindowId(2), Tab::new(TabId(2), url("https://2.example/"))),
+        ];
+        assert_eq!(b.focused_window(), Some(WindowId(1)));
+        b.focused = Some(WindowId(2));
+        assert_eq!(b.focused_window(), Some(WindowId(2)));
+        // A focused window that has closed since is no window.
+        b.focused = Some(WindowId(9));
+        assert_eq!(b.focused_window(), Some(WindowId(1)));
     }
 
     #[test]

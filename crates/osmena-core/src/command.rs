@@ -10,7 +10,7 @@ use crate::bookmarks_html;
 use crate::default_browser::DefaultBrowser;
 use crate::download::{Download, DownloadId, DownloadState};
 use crate::event::PendingTab;
-use crate::extension::ExtensionSource;
+use crate::extension::{ExtensionReply, ExtensionRequest, ExtensionSource, SidePanel};
 use crate::history::unix_now;
 use crate::launch::{
     DRIVE_LIFETIME, DriveState, Fetched, LOCATION_LIFETIME, Place, Units, WEATHER_LIFETIME,
@@ -28,7 +28,7 @@ use crate::update::{AvailableUpdate, UpdateStatus};
 use crate::zoom::{ZOOM_MAX, ZOOM_MIN, next_step};
 
 /// Every user action in the browser is one of these. The chrome, the keymap,
-/// and (in Phase 2) remappable hotkeys all produce `Command`s; nothing else
+/// and remappable hotkeys all produce `Command`s; nothing else
 /// mutates the model from the UI side.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -414,6 +414,19 @@ pub enum Command {
         tab: TabId,
         request: MediaRequest,
         allow: bool,
+    },
+    /// Close the side panel `window` shows: the active tab's, else the
+    /// window's (the panel's close control).
+    CloseSidePanel {
+        window: WindowId,
+    },
+    /// Run `extension`'s keyboard command `name` for `window`'s active
+    /// tab (a chord the extension declared and the keymap does not
+    /// hold).
+    ExtensionCommand {
+        window: WindowId,
+        extension: String,
+        name: String,
     },
     Quit,
 }
@@ -829,6 +842,34 @@ pub enum EngineAction {
     /// Fetch the Drive files the user opened last; answered with
     /// `LaunchUpdate::DriveFiles`.
     FetchDriveRecent,
+    /// Tell `extension` its keyboard command `name` ran, with
+    /// `window`'s active tab.
+    ExtensionCommand {
+        window: WindowId,
+        extension: String,
+        name: String,
+    },
+    /// The answer to the `EngineEvent::ExtensionRequest` that carried
+    /// `token`. Always the last action of that request.
+    ExtensionReply {
+        token: u64,
+        reply: ExtensionReply,
+    },
+    /// Create the engine view `view` in `window` for a side panel:
+    /// `extension`'s `page`. The view is no tab; it is sized, painted
+    /// and given input under its id like one.
+    CreateView {
+        window: WindowId,
+        view: TabId,
+        extension: String,
+        page: String,
+    },
+    /// Close the engine view `view` of `window`: its side panel is no
+    /// longer in the model.
+    CloseView {
+        window: WindowId,
+        view: TabId,
+    },
     Quit,
 }
 
@@ -1694,6 +1735,26 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
                 allow: *allow,
             }]
         }
+        Command::CloseSidePanel { window } => close_shown_panel(browser, *window),
+        Command::ExtensionCommand {
+            window,
+            extension,
+            name,
+        } => {
+            let declared = browser.window(*window).is_some()
+                && browser
+                    .extension(extension)
+                    .is_some_and(|e| e.has_command(name));
+            if declared {
+                vec![EngineAction::ExtensionCommand {
+                    window: *window,
+                    extension: extension.clone(),
+                    name: name.clone(),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
         Command::Quit => quit_guard(browser, None).unwrap_or_else(|| vec![EngineAction::Quit]),
     }
 }
@@ -1969,15 +2030,18 @@ fn folder_mut(browser: &mut Browser, folder: FolderId) -> Option<&mut Folder> {
 /// Put the tabs (those in the window of the first) in the folder, which
 /// is made if `target` names a new one, and gather the folder's tabs
 /// where its first tab is. A tab leaves the folder it was in; a folder
-/// left empty goes.
-fn move_tabs_to_folder(browser: &mut Browser, tabs: &[TabId], target: &FolderTarget) {
-    let Some(window) = tabs.iter().find_map(|t| browser.window_of_tab(*t)) else {
-        return;
-    };
+/// left empty goes. Returns the folder, or `None` when nothing was done
+/// (no such tab, or a folder of another window).
+fn move_tabs_to_folder(
+    browser: &mut Browser,
+    tabs: &[TabId],
+    target: &FolderTarget,
+) -> Option<FolderId> {
+    let window = tabs.iter().find_map(|t| browser.window_of_tab(*t))?;
     let folder = match target {
         FolderTarget::Existing(id) => {
             if browser.window_of_folder(*id) != Some(window) {
-                return;
+                return None;
             }
             *id
         }
@@ -2004,6 +2068,7 @@ fn move_tabs_to_folder(browser: &mut Browser, tabs: &[TabId], target: &FolderTar
     }
     w.gather_folder(folder);
     w.prune_folders();
+    Some(folder)
 }
 
 /// The star's command: bookmark `tab`'s page in the last-used group
@@ -2407,7 +2472,14 @@ pub(crate) fn close_tab(browser: &mut Browser, tab: TabId) -> Vec<EngineAction> 
             .window_mut(window_id)
             .expect("window_of_tab returned an existing window");
         let index = w.index_of(tab).expect("tab is in this window");
-        w.tabs.remove(index);
+        let removed = w.tabs.remove(index);
+        // The tab's own side panel goes with it.
+        if let Some(panel) = removed.panel {
+            actions.push(EngineAction::CloseView {
+                window: window_id,
+                view: panel.view,
+            });
+        }
         w.prune_folders();
         w.selected.retain(|t| *t != tab);
         if w.tabs.is_empty() {
@@ -2431,6 +2503,14 @@ pub(crate) fn close_tab(browser: &mut Browser, tab: TabId) -> Vec<EngineAction> 
             actions.push(show_tab(w, next, mark));
         }
         None => {
+            // The window's side panel goes with the window.
+            let panel = browser.window_mut(window_id).and_then(|w| w.panel.take());
+            if let Some(panel) = panel {
+                actions.push(EngineAction::CloseView {
+                    window: window_id,
+                    view: panel.view,
+                });
+            }
             browser.windows.retain(|w| w.id != window_id);
             actions.push(EngineAction::CloseWindow(window_id));
             if browser.windows.is_empty() {
@@ -2655,11 +2735,340 @@ fn close_window(browser: &mut Browser, window: WindowId) -> Vec<EngineAction> {
         .filter(|t| !t.deferred || t.warming)
         .map(|t| EngineAction::CloseTab(t.id))
         .collect();
+    // Its side panels go with it: the tabs' in strip order, then its own.
+    actions.extend(removed.panels().map(|panel| EngineAction::CloseView {
+        window,
+        view: panel.view,
+    }));
     actions.push(EngineAction::CloseWindow(window));
     if browser.windows.is_empty() {
         actions.push(EngineAction::Quit);
     }
     actions
+}
+
+/// The place a side panel request names: `tab`'s own panel, or
+/// `window`'s when `tab` is `None`. Refused when the window is not in
+/// the model or the tab is not one of its tabs.
+fn panel_slot(
+    browser: &mut Browser,
+    window: WindowId,
+    tab: Option<TabId>,
+) -> Result<&mut Option<SidePanel>, String> {
+    let w = browser
+        .window_mut(window)
+        .ok_or_else(|| no_window(window))?;
+    match tab {
+        Some(tab) => w
+            .tab_mut(tab)
+            .map(|t| &mut t.panel)
+            .ok_or_else(|| no_tab(tab)),
+        None => Ok(&mut w.panel),
+    }
+}
+
+/// Show `extension`'s `page` in the side panel of `tab`, or of `window`.
+/// The model picks the view's id (no engine allocates a `TabId`) and
+/// asks the engine for the view. The same page already there changes
+/// nothing; another panel there is replaced, its view closed first.
+fn open_side_panel(
+    browser: &mut Browser,
+    extension: &str,
+    window: WindowId,
+    tab: Option<TabId>,
+    page: &str,
+) -> Result<Vec<EngineAction>, String> {
+    let slot = panel_slot(browser, window, tab)?;
+    if slot
+        .as_ref()
+        .is_some_and(|p| p.extension == extension && p.page == page)
+    {
+        return Ok(Vec::new());
+    }
+    let mut actions = Vec::new();
+    if let Some(old) = slot.take() {
+        actions.push(EngineAction::CloseView {
+            window,
+            view: old.view,
+        });
+    }
+    let view = browser.allocate_tab_id();
+    *panel_slot(browser, window, tab)? = Some(SidePanel {
+        extension: extension.to_string(),
+        page: page.to_string(),
+        view,
+    });
+    actions.push(EngineAction::CreateView {
+        window,
+        view,
+        extension: extension.to_string(),
+        page: page.to_string(),
+    });
+    Ok(actions)
+}
+
+/// Close `extension`'s side panel of `tab`, or of `window`. Nothing
+/// when that place has no panel, or another extension's.
+fn close_side_panel(
+    browser: &mut Browser,
+    extension: &str,
+    window: WindowId,
+    tab: Option<TabId>,
+) -> Result<Vec<EngineAction>, String> {
+    let slot = panel_slot(browser, window, tab)?;
+    if slot.as_ref().is_none_or(|p| p.extension != extension) {
+        return Ok(Vec::new());
+    }
+    let panel = slot.take().expect("checked above");
+    Ok(vec![EngineAction::CloseView {
+        window,
+        view: panel.view,
+    }])
+}
+
+/// The words the extension API itself has for a tab, a group and a
+/// window that do not exist, which an extension's own error handling
+/// already knows.
+fn no_tab(tab: TabId) -> String {
+    format!("No tab with id: {}.", tab.0)
+}
+
+fn no_window(window: WindowId) -> String {
+    format!("No window with id: {}.", window.0)
+}
+
+fn no_group(folder: FolderId) -> String {
+    format!("No group with id: {}.", folder.0)
+}
+
+/// The first of `tabs` the model does not have, as a refusal. A request
+/// naming several tabs is refused whole when one is unknown, as the
+/// extension API refuses it.
+fn known_tabs(browser: &Browser, tabs: &[TabId]) -> Result<(), String> {
+    match tabs.iter().find(|tab| browser.tab(**tab).is_none()) {
+        Some(tab) => Err(no_tab(*tab)),
+        None => Ok(()),
+    }
+}
+
+/// The name a folder made for `extension` has until the extension names
+/// it: "<Extension name> Session", with the id standing in for an
+/// extension the model does not list.
+fn session_folder_name(browser: &Browser, extension: &str) -> String {
+    let name = browser.extension(extension).map_or(extension, |e| &e.name);
+    format!("{name} Session")
+}
+
+/// A new tab at `url` at the end of `window`'s strip, outside any
+/// folder, that does not become active: the engine creates it hidden.
+/// The window must exist.
+fn new_hidden_tab(browser: &mut Browser, window: WindowId, url: Url) -> (TabId, EngineAction) {
+    let tab = browser.allocate_tab_id();
+    let (t, load) = tab_at(browser, tab, url);
+    browser
+        .window_mut(window)
+        .expect("the caller checked the window")
+        .tabs
+        .push(t);
+    let action = EngineAction::CreateHiddenTab {
+        window,
+        tab,
+        url: load,
+    };
+    (tab, action)
+}
+
+/// Take `tabs` out of their folders. A folder left empty goes, and one
+/// left in two parts is gathered where its first tab is.
+fn ungroup_tabs(browser: &mut Browser, tabs: &[TabId]) {
+    for w in &mut browser.windows {
+        let mut changed = false;
+        for tab in &mut w.tabs {
+            if tabs.contains(&tab.id) && tab.folder.take().is_some() {
+                changed = true;
+            }
+        }
+        if changed {
+            w.prune_folders();
+            let folders: Vec<FolderId> = w.folders.iter().map(|f| f.id).collect();
+            for folder in folders {
+                w.gather_folder(folder);
+            }
+        }
+    }
+}
+
+/// Answer an extension's request (`EngineEvent::ExtensionRequest`):
+/// what the request takes, then exactly one `ExtensionReply` carrying
+/// `token`. A request that names a tab, folder or window the model lacks
+/// changes nothing and is `Refused`.
+pub(crate) fn extension_request(
+    browser: &mut Browser,
+    token: u64,
+    extension: &str,
+    request: &ExtensionRequest,
+) -> Vec<EngineAction> {
+    let (mut actions, reply) = match answer_request(browser, extension, request) {
+        Ok(answer) => answer,
+        Err(why) => (Vec::new(), ExtensionReply::Refused(why)),
+    };
+    actions.push(EngineAction::ExtensionReply { token, reply });
+    actions
+}
+
+/// The work of [`extension_request`]: the actions and the reply, or why
+/// the request is refused. Everything is checked before anything
+/// changes.
+fn answer_request(
+    browser: &mut Browser,
+    extension: &str,
+    request: &ExtensionRequest,
+) -> Result<(Vec<EngineAction>, ExtensionReply), String> {
+    match request {
+        ExtensionRequest::OpenTab {
+            window,
+            url,
+            active,
+        } => {
+            let window = match window {
+                Some(window) if browser.window(*window).is_some() => *window,
+                Some(window) => return Err(no_window(*window)),
+                None => browser
+                    .focused_window()
+                    .ok_or_else(|| "No current window".to_string())?,
+            };
+            if *active {
+                let actions = new_tab(browser, window, url.clone());
+                let tab = browser.window(window).expect("checked above").active;
+                Ok((actions, ExtensionReply::Tab(tab)))
+            } else {
+                let (tab, action) = new_hidden_tab(browser, window, url.clone());
+                Ok((vec![action], ExtensionReply::Tab(tab)))
+            }
+        }
+        ExtensionRequest::CloseTabs(tabs) => {
+            known_tabs(browser, tabs)?;
+            remember_closed(browser, tabs);
+            Ok((close_tabs(browser, tabs), ExtensionReply::Done))
+        }
+        ExtensionRequest::ActivateTab(tab) => {
+            known_tabs(browser, &[*tab])?;
+            Ok((activate_tab(browser, *tab), ExtensionReply::Done))
+        }
+        ExtensionRequest::MoveTab { tab, index } => {
+            known_tabs(browser, &[*tab])?;
+            move_tabs(browser, &[*tab], *index);
+            Ok((Vec::new(), ExtensionReply::Done))
+        }
+        ExtensionRequest::GroupTabs { tabs, folder } => {
+            known_tabs(browser, tabs)?;
+            let window = match folder {
+                Some(folder) => browser
+                    .window_of_folder(*folder)
+                    .ok_or_else(|| no_group(*folder))?,
+                None => tabs
+                    .first()
+                    .and_then(|tab| browser.window_of_tab(*tab))
+                    .ok_or_else(|| "No tabs to group.".to_string())?,
+            };
+            if tabs
+                .iter()
+                .any(|tab| browser.window_of_tab(*tab) != Some(window))
+            {
+                return Err("Tabs of another window cannot join this group.".to_string());
+            }
+            let target = match folder {
+                Some(folder) => FolderTarget::Existing(*folder),
+                None => FolderTarget::New {
+                    name: session_folder_name(browser, extension),
+                },
+            };
+            let folder = move_tabs_to_folder(browser, tabs, &target)
+                .ok_or_else(|| "No tabs to group.".to_string())?;
+            // A folder an extension makes starts open: the extension
+            // works in its tabs and the user watches.
+            if matches!(target, FolderTarget::New { .. })
+                && let Some(f) = folder_mut(browser, folder)
+            {
+                f.expanded = true;
+            }
+            Ok((Vec::new(), ExtensionReply::Folder(folder)))
+        }
+        ExtensionRequest::UngroupTabs(tabs) => {
+            known_tabs(browser, tabs)?;
+            ungroup_tabs(browser, tabs);
+            Ok((Vec::new(), ExtensionReply::Done))
+        }
+        ExtensionRequest::UpdateFolder {
+            folder,
+            name,
+            expanded,
+        } => {
+            if browser.window_of_folder(*folder).is_none() {
+                return Err(no_group(*folder));
+            }
+            let name = name.as_deref().map(|name| match name.trim() {
+                "" => session_folder_name(browser, extension),
+                name => name.to_string(),
+            });
+            let f = folder_mut(browser, *folder).expect("checked above");
+            if let Some(name) = name {
+                f.name = name;
+            }
+            if let Some(expanded) = expanded {
+                f.expanded = *expanded;
+            }
+            Ok((Vec::new(), ExtensionReply::Done))
+        }
+        ExtensionRequest::OpenWindow { url } => {
+            let url = url.clone().unwrap_or_else(|| browser.new_tab_url());
+            let actions = open_window(browser, url);
+            let window = browser
+                .windows
+                .last()
+                .expect("open_window pushed a window")
+                .id;
+            Ok((actions, ExtensionReply::Window(window)))
+        }
+        ExtensionRequest::OpenSidePanel { window, tab, page } => {
+            let actions = open_side_panel(browser, extension, *window, *tab, page)?;
+            Ok((actions, ExtensionReply::Done))
+        }
+        ExtensionRequest::CloseSidePanel { window, tab } => {
+            let actions = close_side_panel(browser, extension, *window, *tab)?;
+            Ok((actions, ExtensionReply::Done))
+        }
+    }
+}
+
+/// Close the side panel `window` shows: the active tab's, else the
+/// window's own. With both open, the window's shows next.
+fn close_shown_panel(browser: &mut Browser, window: WindowId) -> Vec<EngineAction> {
+    let Some(w) = browser.window_mut(window) else {
+        return Vec::new();
+    };
+    let active = w.active;
+    let panel = match w.tab_mut(active).and_then(|t| t.panel.take()) {
+        Some(panel) => Some(panel),
+        None => w.panel.take(),
+    };
+    match panel {
+        Some(panel) => vec![EngineAction::CloseView {
+            window,
+            view: panel.view,
+        }],
+        None => Vec::new(),
+    }
+}
+
+/// The engine says the view `view` is gone (its page closed itself, or
+/// crashed): the side panel it rendered leaves the model. Whether `view`
+/// was a panel's view at all.
+pub(crate) fn drop_panel_view(browser: &mut Browser, view: TabId) -> bool {
+    browser
+        .windows
+        .iter_mut()
+        .any(|w| w.take_panel_view(view).is_some())
 }
 
 /// `SaveSettings` when a setting changed, nothing otherwise.
@@ -3892,7 +4301,9 @@ mod tests {
         assert!(dispatch(&mut b, &Command::ToggleFullscreen(WindowId(99))).is_empty());
     }
 
-    fn installed(b: &mut Browser, id: &str, enabled: bool, popup: bool) {
+    /// Install an extension called `id`, with a toolbar action or
+    /// without one.
+    fn installed(b: &mut Browser, id: &str, enabled: bool, action: bool) {
         b.extensions.push(crate::extension::Extension {
             id: id.to_string(),
             name: id.to_uppercase(),
@@ -3900,16 +4311,23 @@ mod tests {
             description: String::new(),
             enabled,
             icon: None,
-            action_title: popup.then(|| "Act".to_string()),
+            action_title: action.then(|| "Act".to_string()),
+            side_panel: false,
+            commands: Vec::new(),
         });
     }
 
     #[test]
-    fn open_extension_action_needs_a_window_and_an_enabled_extension_with_a_popup() {
+    fn open_extension_action_needs_a_window_and_an_enabled_extension_with_an_action() {
         let (mut b, window, _) = one_window();
         installed(&mut b, "a", true, true);
         installed(&mut b, "off", false, true);
-        installed(&mut b, "nopopup", true, false);
+        installed(&mut b, "noaction", true, false);
+        // An action that opens a side panel instead of a popup is an
+        // action like any other: the model keeps no popup flag, and the
+        // engine decides what the click does.
+        installed(&mut b, "panel", true, true);
+        b.extensions.last_mut().unwrap().side_panel = true;
         let open = |b: &mut Browser, w, id: &str| {
             dispatch(
                 b,
@@ -3926,8 +4344,15 @@ mod tests {
                 extension: "a".to_string()
             }]
         );
+        assert_eq!(
+            open(&mut b, window, "panel"),
+            vec![EngineAction::OpenExtensionAction {
+                window,
+                extension: "panel".to_string()
+            }]
+        );
         assert!(open(&mut b, window, "off").is_empty());
-        assert!(open(&mut b, window, "nopopup").is_empty());
+        assert!(open(&mut b, window, "noaction").is_empty());
         assert!(open(&mut b, window, "missing").is_empty());
         assert!(open(&mut b, WindowId(99), "a").is_empty());
     }
@@ -6212,5 +6637,1236 @@ mod tests {
         assert!(b.tab(deferred_id).unwrap().deferred);
 
         assert!(dispatch(&mut b, &Command::UnblockSite("a.example".to_string())).is_empty());
+    }
+
+    /// Send `request` from the extension "ext" through `apply`, as the
+    /// engine does.
+    fn ask(b: &mut Browser, token: u64, request: ExtensionRequest) -> Vec<EngineAction> {
+        crate::event::apply(
+            b,
+            &crate::event::EngineEvent::ExtensionRequest {
+                token,
+                extension: "ext".to_string(),
+                request,
+            },
+        )
+    }
+
+    fn reply(token: u64, reply: ExtensionReply) -> EngineAction {
+        EngineAction::ExtensionReply { token, reply }
+    }
+
+    fn refused(token: u64, why: &str) -> EngineAction {
+        reply(token, ExtensionReply::Refused(why.to_string()))
+    }
+
+    /// Open "ext"'s `page` in the panel of `tab`, or of `window`, and
+    /// return its view.
+    fn open_panel(b: &mut Browser, window: WindowId, tab: Option<TabId>, page: &str) -> TabId {
+        let actions = ask(
+            b,
+            0,
+            ExtensionRequest::OpenSidePanel {
+                window,
+                tab,
+                page: page.to_string(),
+            },
+        );
+        let Some(EngineAction::CreateView { view, .. }) = actions.iter().rev().nth(1) else {
+            panic!("OpenSidePanel returns CreateView before its reply: {actions:?}");
+        };
+        *view
+    }
+
+    #[test]
+    fn opening_a_side_panel_creates_a_view_the_model_names() {
+        let (mut b, window, tab) = one_window();
+        let actions = ask(
+            &mut b,
+            7,
+            ExtensionRequest::OpenSidePanel {
+                window,
+                tab: None,
+                page: "panel.html".to_string(),
+            },
+        );
+        let view = TabId(tab.0 + 1);
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::CreateView {
+                    window,
+                    view,
+                    extension: "ext".to_string(),
+                    page: "panel.html".to_string(),
+                },
+                reply(7, ExtensionReply::Done),
+            ]
+        );
+        let w = b.window(window).unwrap();
+        assert_eq!(
+            w.panel,
+            Some(SidePanel {
+                extension: "ext".to_string(),
+                page: "panel.html".to_string(),
+                view,
+            })
+        );
+        assert_eq!(w.shown_panel(), w.panel.as_ref());
+        // The view is no tab, and no tab is given its id afterwards.
+        assert_eq!(order(&b, window), vec![tab]);
+        assert!(b.tab(view).is_none());
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window,
+                url: Some(url("https://tab.example/")),
+            },
+        );
+        assert_eq!(b.window(window).unwrap().active, TabId(view.0 + 1));
+    }
+
+    #[test]
+    fn a_panel_opened_for_a_tab_shows_only_while_that_tab_is_active() {
+        // side-panel.AC1.4
+        let (mut b, window, t) = window_with_tabs(3);
+        let for_window = open_panel(&mut b, window, None, "window.html");
+        let for_tab = open_panel(&mut b, window, Some(t[0]), "tab.html");
+        assert_eq!(b.tab(t[0]).unwrap().panel.as_ref().unwrap().view, for_tab);
+        let shown = |b: &Browser| b.window(window).unwrap().shown_panel().map(|p| p.view);
+        // t[2] is active and has none of its own: the window's shows.
+        assert_eq!(shown(&b), Some(for_window));
+        dispatch(&mut b, &Command::ActivateTab(t[0]));
+        assert_eq!(shown(&b), Some(for_tab));
+        dispatch(&mut b, &Command::ActivateTab(t[1]));
+        assert_eq!(shown(&b), Some(for_window));
+        // Both stay in the model whichever shows.
+        let w = b.window(window).unwrap();
+        assert!(w.has_panel_view(for_window) && w.has_panel_view(for_tab));
+    }
+
+    #[test]
+    fn the_same_panel_opened_again_changes_nothing() {
+        let (mut b, window, tab) = one_window();
+        let view = open_panel(&mut b, window, Some(tab), "panel.html");
+        let before = b.windows.clone();
+        let actions = ask(
+            &mut b,
+            3,
+            ExtensionRequest::OpenSidePanel {
+                window,
+                tab: Some(tab),
+                page: "panel.html".to_string(),
+            },
+        );
+        assert_eq!(actions, vec![reply(3, ExtensionReply::Done)]);
+        assert_eq!(b.windows, before);
+        assert_eq!(b.tab(tab).unwrap().panel.as_ref().unwrap().view, view);
+    }
+
+    #[test]
+    fn another_page_replaces_the_panel_closing_the_old_view_first() {
+        let (mut b, window, tab) = one_window();
+        let old = open_panel(&mut b, window, None, "one.html");
+        let actions = ask(
+            &mut b,
+            4,
+            ExtensionRequest::OpenSidePanel {
+                window,
+                tab: None,
+                page: "two.html".to_string(),
+            },
+        );
+        let new = TabId(old.0 + 1);
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::CloseView { window, view: old },
+                EngineAction::CreateView {
+                    window,
+                    view: new,
+                    extension: "ext".to_string(),
+                    page: "two.html".to_string(),
+                },
+                reply(4, ExtensionReply::Done),
+            ]
+        );
+        let w = b.window(window).unwrap();
+        assert_eq!(w.panel.as_ref().unwrap().page, "two.html");
+        assert!(w.has_panel_view(new) && !w.has_panel_view(old));
+        // Another extension asking for the same place replaces it too.
+        let actions = crate::event::apply(
+            &mut b,
+            &crate::event::EngineEvent::ExtensionRequest {
+                token: 5,
+                extension: "other".to_string(),
+                request: ExtensionRequest::OpenSidePanel {
+                    window,
+                    tab: None,
+                    page: "two.html".to_string(),
+                },
+            },
+        );
+        assert_eq!(actions[0], EngineAction::CloseView { window, view: new });
+        assert_eq!(
+            b.window(window).unwrap().panel.as_ref().unwrap().extension,
+            "other"
+        );
+        assert_eq!(order(&b, window), vec![tab]);
+    }
+
+    #[test]
+    fn a_side_panel_for_an_unknown_window_or_tab_is_refused() {
+        // side-panel.AC5.3 at the model level
+        let (mut b, window, tab) = one_window();
+        let other = dispatch(&mut b, &Command::NewWindow);
+        let EngineAction::OpenWindow {
+            window: w2,
+            tab: t2,
+            ..
+        } = other[0].clone()
+        else {
+            panic!("NewWindow returns OpenWindow");
+        };
+        let before = b.windows.clone();
+        let open = |window, tab| ExtensionRequest::OpenSidePanel {
+            window,
+            tab,
+            page: "panel.html".to_string(),
+        };
+        assert_eq!(
+            ask(&mut b, 1, open(WindowId(99), None)),
+            vec![refused(1, "No window with id: 99.")]
+        );
+        assert_eq!(
+            ask(&mut b, 2, open(window, Some(TabId(98)))),
+            vec![refused(2, "No tab with id: 98.")]
+        );
+        // A tab of another window is no tab of this one.
+        assert_eq!(
+            ask(&mut b, 3, open(window, Some(t2))),
+            vec![refused(3, &format!("No tab with id: {}.", t2.0))]
+        );
+        assert_eq!(
+            ask(
+                &mut b,
+                4,
+                ExtensionRequest::CloseSidePanel {
+                    window: WindowId(99),
+                    tab: None
+                }
+            ),
+            vec![refused(4, "No window with id: 99.")]
+        );
+        assert_eq!(
+            ask(
+                &mut b,
+                5,
+                ExtensionRequest::CloseSidePanel {
+                    window: w2,
+                    tab: Some(tab)
+                }
+            ),
+            vec![refused(5, &format!("No tab with id: {}.", tab.0))]
+        );
+        assert_eq!(b.windows, before, "a refused request changes nothing");
+    }
+
+    #[test]
+    fn an_extension_closes_its_own_panel_and_no_other() {
+        let (mut b, window, tab) = one_window();
+        let for_window = open_panel(&mut b, window, None, "window.html");
+        let for_tab = open_panel(&mut b, window, Some(tab), "tab.html");
+        // Only the place named is closed.
+        assert_eq!(
+            ask(
+                &mut b,
+                1,
+                ExtensionRequest::CloseSidePanel {
+                    window,
+                    tab: Some(tab)
+                }
+            ),
+            vec![
+                EngineAction::CloseView {
+                    window,
+                    view: for_tab
+                },
+                reply(1, ExtensionReply::Done),
+            ]
+        );
+        assert!(b.tab(tab).unwrap().panel.is_none());
+        assert!(b.window(window).unwrap().panel.is_some());
+        // Closing what is not open is done, with nothing to do.
+        assert_eq!(
+            ask(
+                &mut b,
+                2,
+                ExtensionRequest::CloseSidePanel {
+                    window,
+                    tab: Some(tab)
+                }
+            ),
+            vec![reply(2, ExtensionReply::Done)]
+        );
+        // Another extension's panel stays.
+        let actions = crate::event::apply(
+            &mut b,
+            &crate::event::EngineEvent::ExtensionRequest {
+                token: 3,
+                extension: "other".to_string(),
+                request: ExtensionRequest::CloseSidePanel { window, tab: None },
+            },
+        );
+        assert_eq!(actions, vec![reply(3, ExtensionReply::Done)]);
+        assert_eq!(
+            b.window(window).unwrap().panel.as_ref().unwrap().view,
+            for_window
+        );
+        assert_eq!(
+            ask(
+                &mut b,
+                4,
+                ExtensionRequest::CloseSidePanel { window, tab: None }
+            ),
+            vec![
+                EngineAction::CloseView {
+                    window,
+                    view: for_window
+                },
+                reply(4, ExtensionReply::Done),
+            ]
+        );
+        assert_eq!(b.window(window).unwrap().shown_panel(), None);
+    }
+
+    #[test]
+    fn closing_a_tab_closes_its_panel() {
+        let (mut b, window, t) = window_with_tabs(3);
+        let on_first = open_panel(&mut b, window, Some(t[0]), "first.html");
+        let on_last = open_panel(&mut b, window, Some(t[2]), "last.html");
+        // An inactive tab: its engine tab, then its panel's view.
+        assert_eq!(
+            dispatch(&mut b, &Command::CloseTab(t[0])),
+            vec![
+                EngineAction::CloseTab(t[0]),
+                EngineAction::CloseView {
+                    window,
+                    view: on_first
+                },
+            ]
+        );
+        // The active tab: the same, then the tab that takes its place.
+        assert_eq!(
+            dispatch(&mut b, &Command::CloseTab(t[2])),
+            vec![
+                EngineAction::CloseTab(t[2]),
+                EngineAction::CloseView {
+                    window,
+                    view: on_last
+                },
+                EngineAction::Show(t[1]),
+            ]
+        );
+        let w = b.window(window).unwrap();
+        assert!(!w.has_panel_view(on_first) && !w.has_panel_view(on_last));
+        assert_eq!(w.shown_panel(), None);
+    }
+
+    #[test]
+    fn a_tab_the_page_closed_or_that_moved_away_takes_its_panel_too() {
+        let (mut b, window, t) = window_with_tabs(3);
+        let on_first = open_panel(&mut b, window, Some(t[0]), "first.html");
+        let on_second = open_panel(&mut b, window, Some(t[1]), "second.html");
+        // The page closed its own tab (`window.close()`).
+        assert_eq!(
+            crate::event::apply(&mut b, &crate::event::EngineEvent::TabClosed(t[0])),
+            vec![
+                EngineAction::CloseTab(t[0]),
+                EngineAction::CloseView {
+                    window,
+                    view: on_first
+                },
+            ]
+        );
+        // A tab moved to a new window is recreated there and closed
+        // here: its panel does not follow.
+        let actions = dispatch(&mut b, &Command::MoveTabsToNewWindow(vec![t[1]]));
+        assert!(
+            actions.contains(&EngineAction::CloseView {
+                window,
+                view: on_second
+            }),
+            "{actions:?}"
+        );
+        assert!(b.windows.iter().all(|w| w.panels().next().is_none()));
+    }
+
+    #[test]
+    fn closing_the_last_tab_closes_both_panels_before_the_window() {
+        let (mut b, window, tab) = one_window();
+        let for_window = open_panel(&mut b, window, None, "window.html");
+        let for_tab = open_panel(&mut b, window, Some(tab), "tab.html");
+        assert_eq!(
+            dispatch(&mut b, &Command::CloseTab(tab)),
+            vec![
+                EngineAction::CloseTab(tab),
+                EngineAction::CloseView {
+                    window,
+                    view: for_tab
+                },
+                EngineAction::CloseView {
+                    window,
+                    view: for_window
+                },
+                EngineAction::CloseWindow(window),
+                EngineAction::Quit,
+            ]
+        );
+        assert!(b.windows.is_empty());
+    }
+
+    #[test]
+    fn closing_a_window_closes_every_panel_in_it() {
+        let (mut b, window, t) = window_with_tabs(2);
+        let for_window = open_panel(&mut b, window, None, "window.html");
+        let on_second = open_panel(&mut b, window, Some(t[1]), "second.html");
+        let on_first = open_panel(&mut b, window, Some(t[0]), "first.html");
+        assert_eq!(
+            dispatch(&mut b, &Command::CloseWindow(window)),
+            vec![
+                EngineAction::CloseTab(t[0]),
+                EngineAction::CloseTab(t[1]),
+                // The tabs' panels in strip order, then the window's.
+                EngineAction::CloseView {
+                    window,
+                    view: on_first
+                },
+                EngineAction::CloseView {
+                    window,
+                    view: on_second
+                },
+                EngineAction::CloseView {
+                    window,
+                    view: for_window
+                },
+                EngineAction::CloseWindow(window),
+                EngineAction::Quit,
+            ]
+        );
+    }
+
+    #[test]
+    fn the_close_command_closes_the_shown_panel_the_tabs_before_the_windows() {
+        // side-panel.AC1.5
+        let (mut b, window, t) = window_with_tabs(2);
+        let for_window = open_panel(&mut b, window, None, "window.html");
+        let for_tab = open_panel(&mut b, window, Some(t[1]), "tab.html");
+        let close = Command::CloseSidePanel { window };
+        // t[1] is active: its own panel is the one shown, and goes.
+        assert_eq!(
+            dispatch(&mut b, &close),
+            vec![EngineAction::CloseView {
+                window,
+                view: for_tab
+            }]
+        );
+        assert!(b.tab(t[1]).unwrap().panel.is_none());
+        // The window's shows now, and goes next.
+        assert_eq!(
+            b.window(window).unwrap().shown_panel().map(|p| p.view),
+            Some(for_window)
+        );
+        assert_eq!(
+            dispatch(&mut b, &close),
+            vec![EngineAction::CloseView {
+                window,
+                view: for_window
+            }]
+        );
+        assert_eq!(b.window(window).unwrap().shown_panel(), None);
+        // Nothing shown, or no such window: nothing.
+        assert!(dispatch(&mut b, &close).is_empty());
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::CloseSidePanel {
+                    window: WindowId(99)
+                }
+            )
+            .is_empty()
+        );
+        // A panel of a tab that is not active is not the shown one.
+        let hidden = open_panel(&mut b, window, Some(t[0]), "hidden.html");
+        assert!(dispatch(&mut b, &close).is_empty());
+        assert!(b.window(window).unwrap().has_panel_view(hidden));
+    }
+
+    #[test]
+    fn an_extension_opens_a_tab_active_or_behind_and_is_told_its_id() {
+        // side-panel.AC3.3 at the model level
+        let (mut b, window, t) = window_with_tabs(2);
+        dispatch(&mut b, &Command::ActivateTab(t[0]));
+        let actions = ask(
+            &mut b,
+            1,
+            ExtensionRequest::OpenTab {
+                window: Some(window),
+                url: url("https://new.example/"),
+                active: true,
+            },
+        );
+        let opened = b.window(window).unwrap().active;
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::Hide(t[0]),
+                EngineAction::CreateTab {
+                    window,
+                    tab: opened,
+                    url: url("https://new.example/"),
+                },
+                reply(1, ExtensionReply::Tab(opened)),
+            ]
+        );
+        assert_eq!(order(&b, window), vec![t[0], t[1], opened]);
+        // Not active: created hidden at the end, the active tab kept.
+        let actions = ask(
+            &mut b,
+            2,
+            ExtensionRequest::OpenTab {
+                window: Some(window),
+                url: url("https://behind.example/"),
+                active: false,
+            },
+        );
+        let behind = *order(&b, window).last().unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::CreateHiddenTab {
+                    window,
+                    tab: behind,
+                    url: url("https://behind.example/"),
+                },
+                reply(2, ExtensionReply::Tab(behind)),
+            ]
+        );
+        let w = b.window(window).unwrap();
+        assert_eq!(w.active, opened);
+        assert_eq!(w.selected, vec![opened]);
+        assert_eq!(order(&b, window), vec![t[0], t[1], opened, behind]);
+        assert_eq!(b.tab(behind).unwrap().folder, None);
+    }
+
+    #[test]
+    fn a_tab_an_extension_opens_on_a_blocked_site_shows_the_block_page() {
+        let (mut b, window, tab) = one_window();
+        b.blocked.add("b.example");
+        for (token, active) in [(1, true), (2, false)] {
+            let actions = ask(
+                &mut b,
+                token,
+                ExtensionRequest::OpenTab {
+                    window: Some(window),
+                    url: url("https://www.b.example/x"),
+                    active,
+                },
+            );
+            let opened = *order(&b, window).last().unwrap();
+            // The engine loads the blank page; the tab keeps the address.
+            let created = actions
+                .iter()
+                .find_map(|a| match a {
+                    EngineAction::CreateTab { tab, url, .. }
+                    | EngineAction::CreateHiddenTab { tab, url, .. } => Some((*tab, url.as_str())),
+                    _ => None,
+                })
+                .expect("a tab is created");
+            assert_eq!(created, (opened, "about:blank"));
+            assert_eq!(
+                actions.last(),
+                Some(&reply(token, ExtensionReply::Tab(opened)))
+            );
+            let t = b.tab(opened).unwrap();
+            assert_eq!(t.url.as_str(), "https://www.b.example/x");
+            assert_eq!(t.blocked.as_ref().unwrap().site, "b.example");
+        }
+        assert_eq!(order(&b, window).len(), 3);
+        assert!(b.tab(tab).unwrap().blocked.is_none());
+    }
+
+    #[test]
+    fn a_tab_without_a_window_opens_in_the_focused_one_and_an_unknown_window_is_refused() {
+        let (mut b, w1, _) = one_window();
+        let other = dispatch(&mut b, &Command::NewWindow);
+        let EngineAction::OpenWindow { window: w2, .. } = other[0].clone() else {
+            panic!("NewWindow returns OpenWindow");
+        };
+        let open = |window| ExtensionRequest::OpenTab {
+            window,
+            url: url("https://new.example/"),
+            active: false,
+        };
+        // Nobody has said which window is focused: the first.
+        ask(&mut b, 1, open(None));
+        assert_eq!(order(&b, w1).len(), 2);
+        b.focused = Some(w2);
+        ask(&mut b, 2, open(None));
+        assert_eq!(order(&b, w2).len(), 2);
+        let before = b.windows.clone();
+        assert_eq!(
+            ask(&mut b, 3, open(Some(WindowId(99)))),
+            vec![refused(3, "No window with id: 99.")]
+        );
+        assert_eq!(b.windows, before);
+        // With no window at all there is nothing to land in: the extension
+        // API's words, which end with no full stop.
+        b.windows.clear();
+        assert_eq!(
+            ask(&mut b, 4, open(None)),
+            vec![refused(4, "No current window")]
+        );
+        assert!(b.windows.is_empty());
+    }
+
+    #[test]
+    fn an_extension_opens_a_window_on_a_url_or_the_new_window_page() {
+        let (mut b, _, _) = one_window();
+        b.settings.new_tab_url = "https://start.example/".to_string();
+        b.blocked.add("b.example");
+        let actions = ask(&mut b, 1, ExtensionRequest::OpenWindow { url: None });
+        let opened = b.windows.last().unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::OpenWindow {
+                    window: opened.id,
+                    tab: opened.active,
+                    url: url("https://start.example/"),
+                },
+                reply(1, ExtensionReply::Window(opened.id)),
+            ]
+        );
+        // A blocked site opens on its block page, as the user's would.
+        let actions = ask(
+            &mut b,
+            2,
+            ExtensionRequest::OpenWindow {
+                url: Some(url("https://b.example/")),
+            },
+        );
+        let opened = b.windows.last().unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::OpenWindow {
+                    window: opened.id,
+                    tab: opened.active,
+                    url: url("about:blank"),
+                },
+                reply(2, ExtensionReply::Window(opened.id)),
+            ]
+        );
+        assert!(opened.active_tab().blocked.is_some());
+        assert_eq!(b.windows.len(), 3);
+    }
+
+    #[test]
+    fn an_extension_closes_tabs_or_none_of_them_when_one_is_unknown() {
+        let (mut b, window, t) = window_with_tabs(4);
+        let before = b.windows.clone();
+        // One unknown id among known ones: nothing closes.
+        assert_eq!(
+            ask(
+                &mut b,
+                1,
+                ExtensionRequest::CloseTabs(vec![t[0], TabId(99), t[1]])
+            ),
+            vec![refused(1, "No tab with id: 99.")]
+        );
+        assert_eq!(b.windows, before);
+        assert!(b.closed_tabs.is_empty());
+        // All known: each closes as the user's close would, and can be
+        // reopened. t[3] is active, so the tab on its left is shown.
+        assert_eq!(
+            ask(&mut b, 2, ExtensionRequest::CloseTabs(vec![t[0], t[3]])),
+            vec![
+                EngineAction::CloseTab(t[0]),
+                EngineAction::CloseTab(t[3]),
+                EngineAction::Show(t[2]),
+                reply(2, ExtensionReply::Done),
+            ]
+        );
+        assert_eq!(order(&b, window), vec![t[1], t[2]]);
+        assert_eq!(b.closed_tabs.len(), 2);
+        // No tabs at all is done.
+        assert_eq!(
+            ask(&mut b, 3, ExtensionRequest::CloseTabs(Vec::new())),
+            vec![reply(3, ExtensionReply::Done)]
+        );
+    }
+
+    #[test]
+    fn an_extension_activates_a_tab_and_a_deferred_one_wakes() {
+        let mut b = browser();
+        restore_session(&mut b, &three_sites_session(1));
+        let w = &b.windows[0];
+        let (window, a, bb, c) = (w.id, w.tabs[0].id, w.tabs[1].id, w.tabs[2].id);
+        assert!(b.tab(a).unwrap().deferred);
+        // A restored tab the engine does not have yet is created now, as
+        // a click on it would.
+        assert_eq!(
+            ask(&mut b, 1, ExtensionRequest::ActivateTab(a)),
+            vec![
+                EngineAction::Hide(bb),
+                EngineAction::CreateTab {
+                    window,
+                    tab: a,
+                    url: url("https://a.example/"),
+                },
+                reply(1, ExtensionReply::Done),
+            ]
+        );
+        assert!(!b.tab(a).unwrap().deferred);
+        assert_eq!(b.window(window).unwrap().active, a);
+        // A live tab is shown; the active one is done with nothing to do.
+        assert_eq!(
+            ask(&mut b, 2, ExtensionRequest::ActivateTab(bb)),
+            vec![
+                EngineAction::Hide(a),
+                EngineAction::Show(bb),
+                reply(2, ExtensionReply::Done),
+            ]
+        );
+        assert_eq!(
+            ask(&mut b, 3, ExtensionRequest::ActivateTab(bb)),
+            vec![reply(3, ExtensionReply::Done)]
+        );
+        // A deferred tab on a site blocked meanwhile wakes on the block
+        // page.
+        b.blocked.add("c.example");
+        assert_eq!(
+            ask(&mut b, 4, ExtensionRequest::ActivateTab(c)),
+            vec![
+                EngineAction::Hide(bb),
+                EngineAction::CreateTab {
+                    window,
+                    tab: c,
+                    url: url("about:blank"),
+                },
+                reply(4, ExtensionReply::Done),
+            ]
+        );
+        assert!(b.tab(c).unwrap().blocked.is_some());
+        assert_eq!(
+            ask(&mut b, 5, ExtensionRequest::ActivateTab(TabId(99))),
+            vec![refused(5, "No tab with id: 99.")]
+        );
+        assert_eq!(b.window(window).unwrap().active, c);
+    }
+
+    #[test]
+    fn an_extension_moves_a_tab_to_an_index_of_its_strip() {
+        let (mut b, window, t) = window_with_tabs(4);
+        let moved = |b: &mut Browser, token, tab, index| {
+            ask(b, token, ExtensionRequest::MoveTab { tab, index })
+        };
+        assert_eq!(
+            moved(&mut b, 1, t[3], 0),
+            vec![reply(1, ExtensionReply::Done)]
+        );
+        assert_eq!(order(&b, window), vec![t[3], t[0], t[1], t[2]]);
+        moved(&mut b, 2, t[3], 2);
+        assert_eq!(order(&b, window), vec![t[0], t[1], t[3], t[2]]);
+        // Past the end is the end.
+        moved(&mut b, 3, t[0], usize::MAX);
+        assert_eq!(order(&b, window), vec![t[1], t[3], t[2], t[0]]);
+        // The active tab and the engine are left alone.
+        assert_eq!(b.window(window).unwrap().active, t[3]);
+        assert_eq!(
+            moved(&mut b, 4, TabId(99), 0),
+            vec![refused(4, "No tab with id: 99.")]
+        );
+        assert_eq!(order(&b, window), vec![t[1], t[3], t[2], t[0]]);
+    }
+
+    /// What an engine's `windows.remove` relies on: closing every tab of
+    /// a window closes the window, as the user's close of its last tab
+    /// does. (The last tab of the last window goes through the quit
+    /// guard instead: it quits, or asks first while downloads are going
+    /// and then closes nothing; the reply is `Done` either way.)
+    #[test]
+    fn an_extension_closing_every_tab_of_a_window_closes_the_window() {
+        let (mut b, first, t) = window_with_tabs(2);
+        ask(&mut b, 1, ExtensionRequest::OpenWindow { url: None });
+        assert_eq!(b.windows.len(), 2);
+        let actions = ask(&mut b, 2, ExtensionRequest::CloseTabs(t.clone()));
+        assert!(b.window(first).is_none());
+        assert_eq!(b.windows.len(), 1);
+        assert!(
+            actions.contains(&EngineAction::CloseWindow(first)),
+            "{actions:?}"
+        );
+        assert_eq!(actions.last(), Some(&reply(2, ExtensionReply::Done)));
+    }
+
+    #[test]
+    fn an_extension_closing_the_last_tab_while_downloads_go_asks_first_and_closes_nothing() {
+        let (mut b, window, tab) = one_window();
+        crate::apply(
+            &mut b,
+            &crate::EngineEvent::DownloadUpdated {
+                id: 42,
+                report: download_report("f.zip", DownloadState::InProgress),
+            },
+        );
+        let actions = ask(&mut b, 1, ExtensionRequest::CloseTabs(vec![tab]));
+        assert_eq!(
+            actions,
+            vec![
+                EngineAction::ShowPrompt {
+                    window,
+                    prompt: Prompt::QuitWithDownloads { count: 1 },
+                },
+                reply(1, ExtensionReply::Done),
+            ]
+        );
+        assert!(b.window(window).is_some());
+        assert_eq!(order(&b, window), vec![tab]);
+    }
+
+    #[test]
+    fn grouping_tabs_makes_an_expanded_folder_named_after_the_extension() {
+        // side-panel.AC4.1
+        let (mut b, window, t) = window_with_tabs(5);
+        installed(&mut b, "ext", true, true);
+        b.extensions[0].name = "Claude".to_string();
+        let actions = ask(
+            &mut b,
+            1,
+            ExtensionRequest::GroupTabs {
+                tabs: vec![t[3], t[1]],
+                folder: None,
+            },
+        );
+        let w = b.window(window).unwrap();
+        assert_eq!(w.folders.len(), 1);
+        let folder = w.folders[0].id;
+        assert_eq!(actions, vec![reply(1, ExtensionReply::Folder(folder))]);
+        assert_eq!(w.folders[0].name, "Claude Session");
+        assert!(w.folders[0].expanded, "an extension's folder starts open");
+        // Gathered where the first of them is, in strip order.
+        assert_eq!(w.folder_tabs(folder), vec![t[1], t[3]]);
+        assert_eq!(order(&b, window), vec![t[0], t[1], t[3], t[2], t[4]]);
+        // The user's own new folder still starts collapsed.
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToFolder {
+                tabs: vec![t[4]],
+                folder: FolderTarget::New {
+                    name: String::new(),
+                },
+            },
+        );
+        let w = b.window(window).unwrap();
+        assert_eq!(w.folders[1].name, "Folder A");
+        assert!(!w.folders[1].expanded);
+        // An extension the model does not list lends its id.
+        let actions = crate::event::apply(
+            &mut b,
+            &crate::event::EngineEvent::ExtensionRequest {
+                token: 2,
+                extension: "unlisted".to_string(),
+                request: ExtensionRequest::GroupTabs {
+                    tabs: vec![t[0]],
+                    folder: None,
+                },
+            },
+        );
+        let w = b.window(window).unwrap();
+        assert_eq!(
+            actions,
+            vec![reply(2, ExtensionReply::Folder(w.folders[2].id))]
+        );
+        assert_eq!(w.folders[2].name, "unlisted Session");
+    }
+
+    #[test]
+    fn grouping_into_an_existing_folder_adds_the_tabs_and_keeps_its_state() {
+        // side-panel.AC4.2
+        let (mut b, window, t) = window_with_tabs(5);
+        // A folder the user made, collapsed and named by them.
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToFolder {
+                tabs: vec![t[1]],
+                folder: FolderTarget::New {
+                    name: "Work".to_string(),
+                },
+            },
+        );
+        let folder = b.window(window).unwrap().folders[0].id;
+        let actions = ask(
+            &mut b,
+            1,
+            ExtensionRequest::GroupTabs {
+                tabs: vec![t[4], t[2]],
+                folder: Some(folder),
+            },
+        );
+        assert_eq!(actions, vec![reply(1, ExtensionReply::Folder(folder))]);
+        let w = b.window(window).unwrap();
+        assert_eq!(w.folders.len(), 1);
+        assert_eq!(w.folder_tabs(folder), vec![t[1], t[2], t[4]]);
+        assert_eq!(order(&b, window), vec![t[0], t[1], t[2], t[4], t[3]]);
+        assert_eq!(w.folders[0].name, "Work");
+        assert!(!w.folders[0].expanded, "an existing folder is not opened");
+    }
+
+    #[test]
+    fn grouping_is_refused_whole_for_an_unknown_tab_or_folder_or_another_windows_tab() {
+        let (mut b, window, t) = window_with_tabs(3);
+        let other = dispatch(&mut b, &Command::NewWindow);
+        let EngineAction::OpenWindow { tab: far, .. } = other[0].clone() else {
+            panic!("NewWindow returns OpenWindow");
+        };
+        ask(
+            &mut b,
+            0,
+            ExtensionRequest::GroupTabs {
+                tabs: vec![t[0]],
+                folder: None,
+            },
+        );
+        let folder = b.window(window).unwrap().folders[0].id;
+        let before = b.windows.clone();
+        let group = |tabs, folder| ExtensionRequest::GroupTabs { tabs, folder };
+        assert_eq!(
+            ask(&mut b, 1, group(vec![t[1], TabId(99)], None)),
+            vec![refused(1, "No tab with id: 99.")]
+        );
+        assert_eq!(
+            ask(&mut b, 2, group(vec![t[1]], Some(FolderId(98)))),
+            vec![refused(2, "No group with id: 98.")]
+        );
+        // A page cannot change windows, so neither can a tab join a
+        // group of another window, or a new group span two.
+        assert_eq!(
+            ask(&mut b, 3, group(vec![t[1], far], Some(folder))),
+            vec![refused(3, "Tabs of another window cannot join this group.")]
+        );
+        assert_eq!(
+            ask(&mut b, 4, group(vec![t[1], far], None)),
+            vec![refused(4, "Tabs of another window cannot join this group.")]
+        );
+        assert_eq!(
+            ask(&mut b, 5, group(Vec::new(), None)),
+            vec![refused(5, "No tabs to group.")]
+        );
+        assert_eq!(b.windows, before, "a refused request changes nothing");
+    }
+
+    #[test]
+    fn ungrouping_takes_tabs_out_and_an_emptied_folder_goes() {
+        // side-panel.AC4.2, side-panel.AC4.4
+        let (mut b, window, t) = window_with_tabs(5);
+        ask(
+            &mut b,
+            0,
+            ExtensionRequest::GroupTabs {
+                tabs: vec![t[1], t[2], t[3]],
+                folder: None,
+            },
+        );
+        let folder = b.window(window).unwrap().folders[0].id;
+        // The middle tab leaves: the folder's tabs stay together, the
+        // tab that left after them.
+        assert_eq!(
+            ask(&mut b, 1, ExtensionRequest::UngroupTabs(vec![t[2]])),
+            vec![reply(1, ExtensionReply::Done)]
+        );
+        let w = b.window(window).unwrap();
+        assert_eq!(w.folder_tabs(folder), vec![t[1], t[3]]);
+        assert_eq!(w.tab(t[2]).unwrap().folder, None);
+        assert_eq!(order(&b, window), vec![t[0], t[1], t[3], t[2], t[4]]);
+        // A tab in no folder is done with nothing to do.
+        assert_eq!(
+            ask(&mut b, 2, ExtensionRequest::UngroupTabs(vec![t[0]])),
+            vec![reply(2, ExtensionReply::Done)]
+        );
+        // One unknown tab: nobody leaves.
+        assert_eq!(
+            ask(
+                &mut b,
+                3,
+                ExtensionRequest::UngroupTabs(vec![t[1], TabId(99)])
+            ),
+            vec![refused(3, "No tab with id: 99.")]
+        );
+        assert_eq!(
+            b.window(window).unwrap().folder_tabs(folder),
+            vec![t[1], t[3]]
+        );
+        // The last tabs leave: the folder is removed.
+        ask(&mut b, 4, ExtensionRequest::UngroupTabs(vec![t[3], t[1]]));
+        let w = b.window(window).unwrap();
+        assert!(w.folders.is_empty());
+        assert!(w.tabs.iter().all(|t| t.folder.is_none()));
+        assert_eq!(b.window_of_folder(folder), None);
+        // So is a folder whose last tab an extension closes.
+        ask(
+            &mut b,
+            5,
+            ExtensionRequest::GroupTabs {
+                tabs: vec![t[4]],
+                folder: None,
+            },
+        );
+        assert_eq!(b.window(window).unwrap().folders.len(), 1);
+        ask(&mut b, 6, ExtensionRequest::CloseTabs(vec![t[4]]));
+        assert!(b.window(window).unwrap().folders.is_empty());
+    }
+
+    #[test]
+    fn an_extension_renames_collapses_and_expands_a_folder() {
+        // side-panel.AC4.1 (the rename), side-panel.AC4.2 (collapsed)
+        let (mut b, window, t) = window_with_tabs(3);
+        installed(&mut b, "ext", true, true);
+        b.extensions[0].name = "Claude".to_string();
+        ask(
+            &mut b,
+            0,
+            ExtensionRequest::GroupTabs {
+                tabs: vec![t[1]],
+                folder: None,
+            },
+        );
+        let folder = b.window(window).unwrap().folders[0].id;
+        let update = |b: &mut Browser, token, name: Option<&str>, expanded| {
+            ask(
+                b,
+                token,
+                ExtensionRequest::UpdateFolder {
+                    folder,
+                    name: name.map(str::to_string),
+                    expanded,
+                },
+            )
+        };
+        let state = |b: &Browser| {
+            let f = b.window(window).unwrap().folder(folder).unwrap();
+            (f.name.clone(), f.expanded)
+        };
+        assert_eq!(
+            update(&mut b, 1, Some("  Trip planning "), None),
+            vec![reply(1, ExtensionReply::Done)]
+        );
+        assert_eq!(state(&b), ("Trip planning".to_string(), true));
+        // Later renames follow.
+        update(&mut b, 2, Some("Flights"), None);
+        assert_eq!(state(&b), ("Flights".to_string(), true));
+        // Collapsing and expanding leave the name.
+        update(&mut b, 3, None, Some(false));
+        assert_eq!(state(&b), ("Flights".to_string(), false));
+        update(&mut b, 4, None, Some(true));
+        assert_eq!(state(&b), ("Flights".to_string(), true));
+        // A title taken away is the name the folder started with.
+        update(&mut b, 5, Some("   "), Some(false));
+        assert_eq!(state(&b), ("Claude Session".to_string(), false));
+        // Neither given: done, nothing changed.
+        update(&mut b, 6, None, None);
+        assert_eq!(state(&b), ("Claude Session".to_string(), false));
+        assert_eq!(
+            ask(
+                &mut b,
+                7,
+                ExtensionRequest::UpdateFolder {
+                    folder: FolderId(99),
+                    name: Some("x".to_string()),
+                    expanded: Some(true),
+                }
+            ),
+            vec![refused(7, "No group with id: 99.")]
+        );
+    }
+
+    #[test]
+    fn every_request_is_answered_once_with_its_token_last() {
+        let (mut b, window, t) = window_with_tabs(4);
+        ask(
+            &mut b,
+            0,
+            ExtensionRequest::GroupTabs {
+                tabs: vec![t[0]],
+                folder: None,
+            },
+        );
+        let folder = b.window(window).unwrap().folders[0].id;
+        let page = || "panel.html".to_string();
+        // Each request, and whether it is refused.
+        let requests = vec![
+            (
+                ExtensionRequest::OpenTab {
+                    window: None,
+                    url: url("https://new.example/"),
+                    active: true,
+                },
+                false,
+            ),
+            (
+                ExtensionRequest::OpenTab {
+                    window: Some(WindowId(99)),
+                    url: url("https://new.example/"),
+                    active: true,
+                },
+                true,
+            ),
+            (ExtensionRequest::ActivateTab(t[1]), false),
+            (ExtensionRequest::ActivateTab(TabId(99)), true),
+            (
+                ExtensionRequest::MoveTab {
+                    tab: t[2],
+                    index: 0,
+                },
+                false,
+            ),
+            (
+                ExtensionRequest::MoveTab {
+                    tab: TabId(99),
+                    index: 0,
+                },
+                true,
+            ),
+            (
+                ExtensionRequest::GroupTabs {
+                    tabs: vec![t[1]],
+                    folder: Some(folder),
+                },
+                false,
+            ),
+            (
+                ExtensionRequest::GroupTabs {
+                    tabs: vec![TabId(99)],
+                    folder: None,
+                },
+                true,
+            ),
+            (
+                ExtensionRequest::UpdateFolder {
+                    folder,
+                    name: Some("Named".to_string()),
+                    expanded: None,
+                },
+                false,
+            ),
+            (
+                ExtensionRequest::UpdateFolder {
+                    folder: FolderId(99),
+                    name: None,
+                    expanded: None,
+                },
+                true,
+            ),
+            (ExtensionRequest::UngroupTabs(vec![t[1]]), false),
+            (ExtensionRequest::UngroupTabs(vec![TabId(99)]), true),
+            (
+                ExtensionRequest::OpenSidePanel {
+                    window,
+                    tab: Some(t[1]),
+                    page: page(),
+                },
+                false,
+            ),
+            (
+                ExtensionRequest::OpenSidePanel {
+                    window: WindowId(99),
+                    tab: None,
+                    page: page(),
+                },
+                true,
+            ),
+            (
+                ExtensionRequest::CloseSidePanel {
+                    window,
+                    tab: Some(t[1]),
+                },
+                false,
+            ),
+            (
+                ExtensionRequest::CloseSidePanel {
+                    window: WindowId(99),
+                    tab: None,
+                },
+                true,
+            ),
+            (ExtensionRequest::OpenWindow { url: None }, false),
+            (ExtensionRequest::CloseTabs(vec![t[3]]), false),
+            (ExtensionRequest::CloseTabs(vec![TabId(99)]), true),
+        ];
+        for (n, (request, refusal)) in requests.into_iter().enumerate() {
+            let token = 100 + n as u64;
+            let actions = ask(&mut b, token, request.clone());
+            let replies: Vec<&EngineAction> = actions
+                .iter()
+                .filter(|a| matches!(a, EngineAction::ExtensionReply { .. }))
+                .collect();
+            assert_eq!(replies.len(), 1, "{request:?}: {actions:?}");
+            let Some(EngineAction::ExtensionReply { token: got, reply }) = actions.last() else {
+                panic!("the reply comes last: {request:?}: {actions:?}");
+            };
+            assert_eq!(*got, token, "{request:?}");
+            assert_eq!(
+                matches!(reply, ExtensionReply::Refused(_)),
+                refusal,
+                "{request:?}: {reply:?}"
+            );
+            // A refusal comes alone: nothing was asked of the engine.
+            if refusal {
+                assert_eq!(actions.len(), 1, "{request:?}: {actions:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_extension_command_needs_a_window_and_an_enabled_extension_that_declares_it() {
+        // side-panel.AC2.2 at the model level
+        let (mut b, window, _) = one_window();
+        let declare =
+            |b: &mut Browser, id: &str, enabled| {
+                installed(b, id, enabled, false);
+                b.extensions.last_mut().unwrap().commands.push(
+                    crate::extension::ExtensionCommand {
+                        name: "toggle".to_string(),
+                        description: "Toggle the panel".to_string(),
+                        // The chord is the key router's business, not dispatch's.
+                        chord: None,
+                    },
+                );
+            };
+        declare(&mut b, "a", true);
+        declare(&mut b, "off", false);
+        let run = |b: &mut Browser, w, id: &str, name: &str| {
+            dispatch(
+                b,
+                &Command::ExtensionCommand {
+                    window: w,
+                    extension: id.to_string(),
+                    name: name.to_string(),
+                },
+            )
+        };
+        assert_eq!(
+            run(&mut b, window, "a", "toggle"),
+            vec![EngineAction::ExtensionCommand {
+                window,
+                extension: "a".to_string(),
+                name: "toggle".to_string(),
+            }]
+        );
+        assert!(run(&mut b, window, "a", "undeclared").is_empty());
+        assert!(run(&mut b, window, "off", "toggle").is_empty());
+        assert!(run(&mut b, window, "missing", "toggle").is_empty());
+        assert!(run(&mut b, WindowId(99), "a", "toggle").is_empty());
     }
 }

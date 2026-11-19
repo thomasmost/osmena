@@ -44,9 +44,12 @@ pub use download::{
 };
 pub use event::{
     Cursor, EditState, EngineEvent, Media, MediaKind, Misspelling, PageContext, PendingTab, apply,
+    window_losing_panel,
 };
 pub use extension::{
-    Extension, ExtensionSource, InstalledExtension, InstalledExtensions, InstalledExtensionsError,
+    Extension, ExtensionCommand, ExtensionReply, ExtensionRequest, ExtensionSource,
+    InstalledExtension, InstalledExtensions, InstalledExtensionsError, ShortcutVerdict, SidePanel,
+    shortcut_verdict,
 };
 pub use history::{History, HistoryEntry, HistoryError};
 pub use input::{ButtonAction, EngineInput, KeyInput, MouseButton};

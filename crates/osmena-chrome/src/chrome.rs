@@ -18,14 +18,16 @@ use osmena_core::{
     Avatar, BlockedPage, Bookmark, Bookmarks, Brand, ChromeColor, Command, CommandKind, EngineInfo,
     Extension, Favicon, Folder, FolderId, FolderTarget, History, KeyChord, Keymap, LaunchData,
     LaunchSettings, LoadState, ProfileForm, Prompt, RgbaImage, StripItem, Suggestion,
-    SuggestionSource, Tab, TabId, UpdateStatus, UrlTemplate, Window, suggestions,
+    SuggestionSource, Tab, TabId, UpdateStatus, UrlTemplate, Window, WindowId, suggestions,
 };
 use url::{ParseError, Url};
 
 use osmena_core::download::{DownloadState, Downloads, describe_download};
+use osmena_core::extension::SidePanel;
 
 use crate::favicon;
 use crate::menus::bookmark_label;
+use crate::routing::PanelRects;
 use crate::theme;
 
 /// The widest a title is drawn in a folder's drop-down list.
@@ -868,9 +870,14 @@ pub fn draw(
     state
         .favicons
         .retain(|tab, _| window.index_of(*tab).is_some());
-    state
-        .extension_icons
-        .retain(|id, _| pinned.iter().any(|e| e.id == *id));
+    // The pinned actions' icons, and the icon in the side panel's
+    // header, whose extension need not be pinned.
+    state.extension_icons.retain(|id, _| {
+        pinned.iter().any(|e| e.id == *id)
+            || window
+                .shown_panel()
+                .is_some_and(|panel| panel.extension == *id)
+    });
     state.action_anchors.clear();
     theme::tint(ui.ctx(), color);
     let palette = Palette::new(color, ui.visuals().dark_mode);
@@ -4571,9 +4578,61 @@ fn puzzle_button(ui: &mut Ui, palette: &Palette, window: &Window) -> egui::Respo
     response
 }
 
+/// The tooltip of an extension's toolbar button: its action's title,
+/// or the extension's name when the action has none.
+pub(crate) fn action_tooltip(extension: &Extension) -> String {
+    extension
+        .action_title
+        .clone()
+        .unwrap_or_else(|| extension.name.clone())
+}
+
+/// An extension's icon in `slot`, fitted to the pixels it covers, or,
+/// for an extension without one (or one the list lacks, `None`), the
+/// initial of `name` in a disc of the profile's colour.
+fn paint_extension_icon(
+    ui: &Ui,
+    state: &mut ChromeState,
+    palette: &Palette,
+    extension: Option<&Extension>,
+    name: &str,
+    slot: Rect,
+) {
+    let ppp = ui.painter().pixels_per_point();
+    let px = favicon::icon_px(slot.width(), ppp);
+    let texture = match extension {
+        Some(extension) => extension_icon_texture(ui, state, extension, px),
+        None => None,
+    };
+    match texture {
+        Some(texture) => {
+            let id = texture.id();
+            ui.painter().image(
+                id,
+                favicon::snap(slot, px, ppp),
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+        None => {
+            let initial: String = name.chars().take(1).collect();
+            let painter = ui.painter();
+            painter.circle_filled(slot.center(), slot.width() / 2.0, palette.strip);
+            painter.text(
+                slot.center(),
+                Align2::CENTER_CENTER,
+                initial.to_uppercase(),
+                TextStyle::Small.resolve(ui.style()),
+                palette.text_on_strip,
+            );
+        }
+    }
+}
+
 /// One pinned extension's action button: its icon, or its initial when it
-/// has none, with the action's title as the tooltip. The button's rect is
-/// recorded so the window can anchor the popup to it.
+/// has none, with the action's title as the tooltip. An action without a
+/// popup gets the same button; the click goes to the extension. The
+/// button's rect is recorded so the window can anchor the popup to it.
 fn action_button(
     ui: &mut Ui,
     state: &mut ChromeState,
@@ -4585,38 +4644,204 @@ fn action_button(
     let (rect, response, _) = icon_button_rect(ui, palette, id);
     state.action_anchors.insert(extension.id.clone(), rect);
     if ui.is_rect_visible(rect) {
-        let ppp = ui.painter().pixels_per_point();
-        let px = favicon::icon_px(ACTION_ICON, ppp);
-        let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(ACTION_ICON));
-        match extension_icon_texture(ui, state, extension, px) {
-            Some(texture) => {
-                let id = texture.id();
-                ui.painter().image(
-                    id,
-                    favicon::snap(icon_rect, px, ppp),
-                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                    Color32::WHITE,
-                );
-            }
-            None => {
-                let initial: String = extension.name.chars().take(1).collect();
-                let painter = ui.painter();
-                painter.circle_filled(icon_rect.center(), ACTION_ICON / 2.0, palette.strip);
-                painter.text(
-                    icon_rect.center(),
-                    Align2::CENTER_CENTER,
-                    initial.to_uppercase(),
-                    TextStyle::Small.resolve(ui.style()),
-                    palette.text_on_strip,
-                );
+        let slot = Rect::from_center_size(rect.center(), Vec2::splat(ACTION_ICON));
+        paint_extension_icon(ui, state, palette, Some(extension), &extension.name, slot);
+    }
+    response.on_hover_text(action_tooltip(extension))
+}
+
+/// Where the parts of the side panel's header sit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PanelHeaderLayout {
+    /// The extension's icon: a toolbar action's size.
+    pub icon: Rect,
+    /// The room for the extension's name, the header's whole height.
+    pub title: Rect,
+    /// The close control's disc, and what a click must land in.
+    pub close: Rect,
+}
+
+/// The header's parts in `header` (`PanelRects::header`): the icon at
+/// the left, the close control at the right, the name between them, all
+/// centred on the row. A header too narrow for a name gives it no
+/// width.
+pub(crate) fn side_panel_header_layout(header: Rect) -> PanelHeaderLayout {
+    let y = header.center().y;
+    let icon = Rect::from_center_size(
+        Pos2::new(
+            header.left() + theme::SIDE_PANEL_PADDING + ACTION_ICON / 2.0,
+            y,
+        ),
+        Vec2::splat(ACTION_ICON),
+    );
+    let close = Rect::from_center_size(
+        Pos2::new(
+            header.right() - theme::SIDE_PANEL_PADDING / 2.0 - theme::SIDE_PANEL_CLOSE / 2.0,
+            y,
+        ),
+        Vec2::splat(theme::SIDE_PANEL_CLOSE),
+    );
+    let left = icon.right() + theme::SIDE_PANEL_GAP;
+    let right = (close.left() - theme::SIDE_PANEL_GAP).max(left);
+    let title = Rect::from_min_max(
+        Pos2::new(left, header.top()),
+        Pos2::new(right, header.bottom()),
+    );
+    PanelHeaderLayout { icon, title, close }
+}
+
+/// What the header calls `panel`: its extension's name, or the
+/// extension's id when `extensions` lacks it (removed while its panel
+/// is open) or its name is blank.
+pub(crate) fn side_panel_title(panel: &SidePanel, extensions: &[Extension]) -> String {
+    extensions
+        .iter()
+        .find(|extension| extension.id == panel.extension)
+        .map(|extension| extension.name.trim())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(panel.extension.as_str())
+        .to_string()
+}
+
+/// The header's name as one row no wider than `room`, cut with an
+/// ellipsis when it is longer.
+pub(crate) fn side_panel_title_job(
+    title: &str,
+    font: FontId,
+    ink: Color32,
+    room: f32,
+) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::simple_singleline(title.to_string(), font, ink);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(room);
+    job
+}
+
+/// The shades the side panel's header is painted in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PanelHeaderColours {
+    /// The header's fill: the toolbar's, which it continues down the
+    /// panel's side.
+    pub fill: Color32,
+    /// The name and the close glyph: the ink that reads on that fill.
+    pub ink: Color32,
+    /// The hairline under the header and between page and panel: the
+    /// strip's edge, the line the chrome draws against the toolbar's
+    /// fill.
+    pub line: Color32,
+    /// The disc behind the close control under the pointer: a toolbar
+    /// button's.
+    pub hover: Color32,
+}
+
+pub(crate) fn side_panel_header_colours(palette: &Palette) -> PanelHeaderColours {
+    PanelHeaderColours {
+        fill: palette.toolbar,
+        ink: palette.ink_on(palette.toolbar),
+        line: palette.strip_edge,
+        hover: palette.hover,
+    }
+}
+
+/// What the header answers: a click on the close control closes the
+/// panel `window` shows, anything else is nothing.
+pub(crate) fn side_panel_header_answer(close_clicked: bool, window: WindowId) -> Vec<Command> {
+    if close_clicked {
+        vec![Command::CloseSidePanel { window }]
+    } else {
+        Vec::new()
+    }
+}
+
+/// The side panel's header, over `rects.header`: the icon and name of
+/// the extension whose panel shows, looked up in `extensions` by the
+/// panel's id (an extension the list lacks is named by its id), and a
+/// close control. One hairline runs under the header and one down the
+/// panel's left edge, between page and panel, over the first pixel
+/// column of header and view; so this is called after the panel's view
+/// is painted. The shell calls it only for the rectangles
+/// `routing::split_content` returned: never in full screen, nor on an
+/// engine without side panels (`routing::panel_shown`). Returns
+/// `CloseSidePanel` when the close control was clicked.
+pub fn draw_side_panel_header(
+    ui: &mut Ui,
+    state: &mut ChromeState,
+    rects: &PanelRects,
+    color: ChromeColor,
+    window: WindowId,
+    panel: &SidePanel,
+    extensions: &[Extension],
+) -> Vec<Command> {
+    let palette = Palette::new(color, ui.visuals().dark_mode);
+    let colours = side_panel_header_colours(&palette);
+    let header = rects.header;
+    let layout = side_panel_header_layout(header);
+    let extension = extensions.iter().find(|e| e.id == panel.extension);
+    let title = side_panel_title(panel, extensions);
+    let ppp = ui.painter().pixels_per_point();
+    let px = 1.0 / ppp;
+    // The id is explicit, like a toolbar button's: nothing else in the
+    // window's root `Ui` is allocated in order.
+    let close = ui.interact(
+        layout.close,
+        Id::new(("side-panel-close", window)),
+        Sense::click(),
+    );
+    if ui.is_rect_visible(header) {
+        ui.painter().rect_filled(header, 0.0, colours.fill);
+        paint_extension_icon(ui, state, &palette, extension, &title, layout.icon);
+        if layout.title.width() >= TAB_TITLE_MIN {
+            let font = TextStyle::Body.resolve(ui.style());
+            let galley = ui.painter().layout_job(side_panel_title_job(
+                &title,
+                font.clone(),
+                colours.ink,
+                layout.title.width(),
+            ));
+            let cut = galley.elided;
+            let pos = Pos2::new(
+                layout.title.left(),
+                text_top_centered(ui.painter(), &font, header.center().y),
+            )
+            .round_to_pixels(ppp);
+            ui.painter().galley(pos, galley, colours.ink);
+            // The whole name, where the header shows less of it.
+            if cut {
+                ui.interact(
+                    layout.title,
+                    Id::new(("side-panel-title", window)),
+                    Sense::hover(),
+                )
+                .on_hover_text(&title);
             }
         }
+        let centre = layout.close.center().round_to_pixel_center(ppp);
+        if close.hovered() || close.is_pointer_button_down_on() {
+            ui.painter()
+                .circle_filled(centre, theme::SIDE_PANEL_CLOSE / 2.0, colours.hover);
+        }
+        ui.painter().extend(cross(centre, colours.ink));
+        // One pixel each: the header's last row, and the panel's first
+        // column from the header's top to the view's foot.
+        let line = Stroke::new(px, colours.line);
+        let under = strip_edge_y(header.bottom(), ppp);
+        ui.painter().line_segment(
+            [
+                Pos2::new(header.left(), under),
+                Pos2::new(header.right(), under),
+            ],
+            line,
+        );
+        let edge = header.left().round_to_pixels(ppp) + 0.5 * px;
+        ui.painter().line_segment(
+            [
+                Pos2::new(edge, header.top()),
+                Pos2::new(edge, rects.view.bottom()),
+            ],
+            line,
+        );
     }
-    let title = extension
-        .action_title
-        .clone()
-        .unwrap_or_else(|| extension.name.clone());
-    response.on_hover_text(title)
+    let clicked = close.on_hover_text("Close side panel").clicked();
+    side_panel_header_answer(clicked, window)
 }
 
 /// Replace the page area with an error panel. Returns true if the user
@@ -4782,8 +5007,8 @@ pub fn draw_blocked_page(ui: &mut Ui, rect: Rect, color: ChromeColor, page: &Blo
 
 /// Turn address-bar text into a URL. Bare domains get `https://`. `localhost`,
 /// bare IPv4 addresses, and `host:port` get `http://`. `javascript:` URLs
-/// are refused. Returns `None` for text that is not a URL (Phase 1 has no
-/// search engine).
+/// are refused. Returns `None` for text that is not a URL (text that is not
+/// a URL is a search, which the caller resolves against the search engine).
 pub fn location_input_to_url(input: &str) -> Option<Url> {
     let text = input.trim();
     if text.is_empty() {
@@ -5075,6 +5300,8 @@ fn key_name(code: Code) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routing::split_content;
+    use osmena_core::extension::ExtensionCommand;
 
     #[test]
     fn the_strip_fades_from_the_swatch_to_the_toolbar() {
@@ -5466,6 +5693,20 @@ mod tests {
                 // The text of the toolbar's glyphs, on a hovered disc.
                 let ratio = wcag_contrast(p.ink, p.hover);
                 assert!(ratio >= 4.5, "ink on hover of {color:?}: {ratio:.2}");
+                // The side panel's header: the extension's name on the
+                // header's fill, and the close glyph on its hover disc.
+                let header = side_panel_header_colours(&p);
+                assert_eq!(header.fill, p.toolbar);
+                let ratio = wcag_contrast(header.ink, header.fill);
+                assert!(
+                    ratio >= 4.5,
+                    "panel header name of {color:?} (dark: {dark_mode}): {ratio:.2}"
+                );
+                let ratio = wcag_contrast(header.ink, header.hover);
+                assert!(
+                    ratio >= 4.5,
+                    "panel close glyph on hover of {color:?} (dark: {dark_mode}): {ratio:.2}"
+                );
             }
         }
     }
@@ -5662,6 +5903,179 @@ mod tests {
         ctx
     }
 
+    /// The extension `ext`, enabled, with an action and a side panel.
+    fn panel_extension(name: &str) -> Extension {
+        Extension {
+            id: "ext".to_string(),
+            name: name.to_string(),
+            version: "1".to_string(),
+            description: String::new(),
+            enabled: true,
+            icon: None,
+            action_title: Some("Open the panel".to_string()),
+            side_panel: true,
+            commands: Vec::<ExtensionCommand>::new(),
+        }
+    }
+
+    /// `ext`'s panel, rendered by view 90.
+    fn side_panel() -> SidePanel {
+        SidePanel {
+            extension: "ext".to_string(),
+            page: "panel.html".to_string(),
+            view: TabId(90),
+        }
+    }
+
+    fn one_tab_window() -> Window {
+        Window::with_tab(WindowId(1), Tab::new(TabId(1), url("https://a.example/")))
+    }
+
+    /// The content rectangle of a `width` by `height` window whose
+    /// chrome is 80 points tall.
+    fn content_of(width: f32, height: f32) -> Rect {
+        Rect::from_min_max(Pos2::new(0.0, 80.0), Pos2::new(width, height))
+    }
+
+    #[test]
+    fn the_header_keeps_its_parts_inside_the_panel_at_every_window_size() {
+        // No header without the predicate, and none in a window too
+        // narrow for the panel and a page: there are no rectangles to
+        // draw it in.
+        assert!(
+            split_content(content_of(1280.0, 800.0), false)
+                .panel
+                .is_none()
+        );
+        let narrow = content_of(
+            theme::SIDE_PANEL_WIDTH + theme::SIDE_PANEL_MIN_PAGE - 40.0,
+            800.0,
+        );
+        assert!(split_content(narrow, true).panel.is_none());
+        for (width, height) in [
+            (720.0, 420.0),
+            (1024.0, 700.0),
+            (1600.0, 900.0),
+            (2560.0, 1400.0),
+        ] {
+            let content = content_of(width, height);
+            let rects = split_content(content, true)
+                .panel
+                .unwrap_or_else(|| panic!("a {width} by {height} window has room for the panel"));
+            let header = rects.header;
+            assert_eq!(header.width(), theme::SIDE_PANEL_WIDTH, "{width}x{height}");
+            assert_eq!(
+                header.height(),
+                theme::SIDE_PANEL_HEADER,
+                "{width}x{height}"
+            );
+            assert_eq!(header.right(), content.right(), "{width}x{height}");
+            let layout = side_panel_header_layout(header);
+            for (name, part) in [
+                ("icon", layout.icon),
+                ("title", layout.title),
+                ("close", layout.close),
+            ] {
+                assert!(
+                    header.contains_rect(part),
+                    "{name} {part:?} leaves the header {header:?} at {width}x{height}"
+                );
+            }
+            assert!(layout.icon.right() < layout.title.left());
+            assert!(layout.title.right() < layout.close.left());
+            assert!(layout.title.width() >= 200.0, "{:?}", layout.title);
+        }
+    }
+
+    #[test]
+    fn the_header_layout_puts_the_icon_left_the_close_control_right_and_the_title_between() {
+        let header = Rect::from_min_size(Pos2::new(440.0, 80.0), Vec2::new(360.0, 36.0));
+        let layout = side_panel_header_layout(header);
+        // The icon: 16 points, 10 in from the left, centred on the row.
+        assert_eq!(
+            layout.icon,
+            Rect::from_min_max(Pos2::new(450.0, 90.0), Pos2::new(466.0, 106.0))
+        );
+        // The close control: 24 points, 5 in from the right.
+        assert_eq!(
+            layout.close,
+            Rect::from_min_max(Pos2::new(771.0, 86.0), Pos2::new(795.0, 110.0))
+        );
+        // The title: the row's height, 8 points clear of both.
+        assert_eq!(
+            layout.title,
+            Rect::from_min_max(Pos2::new(474.0, 80.0), Pos2::new(763.0, 116.0))
+        );
+        // A header too narrow for a title gives it no width, never a
+        // negative one.
+        let sliver = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(40.0, 36.0));
+        assert_eq!(side_panel_header_layout(sliver).title.width(), 0.0);
+    }
+
+    #[test]
+    fn the_header_names_the_extension_or_its_id() {
+        let panel = side_panel();
+        assert_eq!(
+            side_panel_title(&panel, &[panel_extension("Reading List")]),
+            "Reading List"
+        );
+        // Not in the list (removed while its panel is open): the id.
+        assert_eq!(side_panel_title(&panel, &[]), "ext");
+        let other = Extension {
+            id: "other".to_string(),
+            ..panel_extension("Other")
+        };
+        assert_eq!(side_panel_title(&panel, &[other]), "ext");
+        // A blank name says nothing: the id again.
+        assert_eq!(side_panel_title(&panel, &[panel_extension("  ")]), "ext");
+    }
+
+    #[test]
+    fn the_close_control_answers_close_side_panel_and_nothing_otherwise() {
+        assert_eq!(
+            side_panel_header_answer(true, WindowId(7)),
+            vec![Command::CloseSidePanel {
+                window: WindowId(7)
+            }]
+        );
+        assert_eq!(side_panel_header_answer(false, WindowId(7)), Vec::new());
+    }
+
+    #[test]
+    fn a_long_extension_name_is_cut_to_the_header_with_an_ellipsis() {
+        let ctx = with_fonts();
+        let font = FontId::new(13.5, FontFamily::Proportional);
+        let header = Rect::from_min_size(
+            Pos2::new(440.0, 80.0),
+            Vec2::new(theme::SIDE_PANEL_WIDTH, theme::SIDE_PANEL_HEADER),
+        );
+        let room = side_panel_header_layout(header).title.width();
+        let long = "An Extension Whose Publisher Put The Whole Pitch In Its Name, Twice Over";
+        let galley = ctx.fonts_mut(|f| {
+            f.layout_job(side_panel_title_job(
+                long,
+                font.clone(),
+                Color32::BLACK,
+                room,
+            ))
+        });
+        assert!(galley.elided, "the long name was not cut");
+        assert_eq!(galley.rows.len(), 1);
+        assert!(
+            galley.size().x <= room + 0.5,
+            "{} wide in {room}",
+            galley.size().x
+        );
+        // `Galley::text` is the text asked for, not the text shown: the
+        // ellipsis is read off the last glyph laid out.
+        assert_eq!(galley.rows[0].glyphs.last().map(|g| g.chr), Some('…'));
+        // A short name is left whole.
+        let short = ctx
+            .fonts_mut(|f| f.layout_job(side_panel_title_job("Notes", font, Color32::BLACK, room)));
+        assert!(!short.elided);
+        assert_eq!(short.rows[0].glyphs.len(), 5);
+    }
+
     /// The ink of a laid-out line, as offsets from the galley's top.
     fn ink(ctx: &egui::Context, font: &egui::FontId, text: &str) -> (f32, f32) {
         let galley = ctx.fonts_mut(|f| {
@@ -5762,6 +6176,86 @@ mod tests {
                     });
                 }
                 assert_eq!(page.line, line);
+            }
+        }
+    }
+
+    #[test]
+    fn a_pinned_action_without_a_popup_draws_a_button_named_by_its_title() {
+        let ctx = with_fonts();
+        let window = one_tab_window();
+        let palette = Palette::new(ChromeColor::default(), false);
+        let mut state = ChromeState::default();
+        // The model cannot tell an action with a popup from one
+        // without: both have a title, and both get the button.
+        let extension = panel_extension("Panel");
+        for _ in 0..2 {
+            let _ = ctx.run_ui(Default::default(), |ui| {
+                let _ = action_button(ui, &mut state, &palette, &window, &extension);
+            });
+        }
+        assert!(state.action_anchor("ext").is_some());
+        assert_eq!(action_tooltip(&extension), "Open the panel");
+        // No title to show: the extension's name.
+        let untitled = Extension {
+            action_title: None,
+            ..extension.clone()
+        };
+        assert_eq!(action_tooltip(&untitled), "Panel");
+    }
+
+    #[test]
+    fn the_side_panel_header_draws_at_every_window_size() {
+        let ctx = with_fonts();
+        let panel = side_panel();
+        let with_icon = Extension {
+            icon: Some(RgbaImage {
+                width: 2,
+                height: 2,
+                rgba: Arc::from(vec![255u8; 16]),
+            }),
+            ..panel_extension("Reading List")
+        };
+        let long = panel_extension(
+            "An Extension Whose Publisher Put The Whole Pitch In Its Name, Twice Over",
+        );
+        // With an icon, with a long name and no icon, and with the
+        // extension gone from the list.
+        let lists: [Vec<Extension>; 3] = [vec![with_icon], vec![long], Vec::new()];
+        for (width, height) in [
+            (720.0, 420.0),
+            (1024.0, 700.0),
+            (1600.0, 900.0),
+            (2560.0, 1400.0),
+        ] {
+            let rects = split_content(content_of(width, height), true)
+                .panel
+                .unwrap_or_else(|| panic!("a {width} by {height} window has room for the panel"));
+            for (index, extensions) in lists.iter().enumerate() {
+                let mut state = ChromeState::default();
+                let mut answered = vec![Command::Quit];
+                // Twice: the second frame draws from the cached icon.
+                for _ in 0..2 {
+                    let _ = ctx.run_ui(Default::default(), |ui| {
+                        answered = draw_side_panel_header(
+                            ui,
+                            &mut state,
+                            &rects,
+                            ChromeColor::default(),
+                            WindowId(1),
+                            &panel,
+                            extensions,
+                        );
+                    });
+                }
+                // Nobody clicked: the header answers nothing.
+                assert_eq!(answered, Vec::new(), "{width}x{height}, list {index}");
+                // The icon is uploaded once and kept under the id.
+                assert_eq!(
+                    state.extension_icons.contains_key("ext"),
+                    index == 0,
+                    "{width}x{height}, list {index}"
+                );
             }
         }
     }
