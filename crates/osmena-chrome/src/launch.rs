@@ -18,8 +18,8 @@ use osmena_core::launch::{
     DriveKind, DriveState, Fetched, TOP_SITES, TopSite, Units, WeatherCode, WidgetKind, top_sites,
 };
 use osmena_core::{
-    Command, Completion, LaunchSettings, Suggestion, UrlTemplate, Window, WindowId, completion,
-    suggestions,
+    Bookmarks, Command, Completion, LaunchSettings, Suggestion, UrlTemplate, Window, WindowId,
+    completion, suggestions,
 };
 use url::Url;
 
@@ -57,6 +57,10 @@ const FIELD_MARGIN: Margin = Margin {
 /// The engine's chip at the field's right end while the text is a
 /// search: its text size, its padding, its distance from the field's
 /// edge, and how long it takes to fade in and out.
+/// The icon at the field's left end: the square a site's favicon is
+/// drawn in, and how far its centre is from the field's left edge.
+const FIELD_ICON: f32 = 18.0;
+const FIELD_ICON_INSET: f32 = 24.0;
 const CHIP_FONT_SIZE: f32 = 12.0;
 const CHIP_PADDING: Vec2 = Vec2::new(9.0, 3.0);
 const CHIP_INSET: f32 = 12.0;
@@ -338,7 +342,7 @@ pub(crate) fn draw_launch_panel(
                             .max_height(box_size.y)
                             .auto_shrink([false, true])
                             .show(ui, |ui| {
-                                let field = address_field(ui, &scene, &mut launcher);
+                                let field = address_field(ui, &scene, state, &mut launcher);
                                 commands.extend(field.commands);
                                 close |= field.close;
                                 ui.add_space(16.0);
@@ -390,6 +394,71 @@ pub(crate) fn draw_launch_panel(
 struct FieldOutcome {
     commands: Vec<Command>,
     close: bool,
+}
+
+/// The icon at the field's left end, which says what Enter will do
+/// before the user reads a word: the site's own icon when the field
+/// stands for a page, sparkles when it asks, a magnifier when it
+/// searches (and while it is empty, where it invites a search).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FieldIcon {
+    Site(Url),
+    Ask,
+    Search,
+}
+
+impl FieldIcon {
+    /// For a field that stands for `opening` (the picked match, or the
+    /// field's [`Head`]) and is or is not asking.
+    fn of(opening: Option<&Head>, asking: bool) -> FieldIcon {
+        match opening {
+            Some(Head::Page(suggestion)) => FieldIcon::Site(suggestion.url.clone()),
+            Some(Head::Address(url)) => FieldIcon::Site(url.clone()),
+            Some(Head::Ask { .. }) => FieldIcon::Ask,
+            Some(Head::Search(_)) => FieldIcon::Search,
+            None if asking => FieldIcon::Ask,
+            None => FieldIcon::Search,
+        }
+    }
+}
+
+/// Paint `icon` centred on `c`: the site's favicon as the shell has it
+/// (a globe for a site with none yet), sparkles in the accent, or the
+/// magnifier.
+fn paint_field_icon(
+    ui: &Ui,
+    scene: &Scene<'_>,
+    state: &mut ChromeState,
+    icon: &FieldIcon,
+    c: Pos2,
+) {
+    let weak = ui.visuals().weak_text_color();
+    match icon {
+        FieldIcon::Site(url) => {
+            let ppp = ui.painter().pixels_per_point();
+            let px = favicon::icon_px(FIELD_ICON, ppp);
+            let slot = Rect::from_center_size(c, Vec2::splat(FIELD_ICON));
+            let texture = Bookmarks::site_key(url).and_then(|host| {
+                let favicon = scene.context.site_icons.get(&host)?;
+                Some(site_icon_texture(ui, state, &host, favicon, px).id())
+            });
+            match texture {
+                Some(texture) => {
+                    ui.painter().image(
+                        texture,
+                        favicon::snap(slot, px, ppp),
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                }
+                None => {
+                    ui.painter().extend(globe(slot, weak));
+                }
+            }
+        }
+        FieldIcon::Ask => sparkles(ui.painter(), c, scene.palette.accent, FIELD_ICON / 2.0),
+        FieldIcon::Search => magnifier(ui.painter(), c, weak, 6.5),
+    }
 }
 
 /// What the field stands for as it reads, and so what Enter opens while
@@ -478,7 +547,12 @@ impl Head {
 /// question widget (`LaunchSettings::preferred_ask`), the hint reads
 /// "Ask Claude", nothing completes and no page is offered, and Enter
 /// opens the question in that widget's template.
-fn address_field(ui: &mut Ui, scene: &Scene<'_>, launcher: &mut Launcher) -> FieldOutcome {
+fn address_field(
+    ui: &mut Ui,
+    scene: &Scene<'_>,
+    state: &mut ChromeState,
+    launcher: &mut Launcher,
+) -> FieldOutcome {
     let Scene {
         window,
         context,
@@ -548,12 +622,6 @@ fn address_field(ui: &mut Ui, scene: &Scene<'_>, launcher: &mut Launcher) -> Fie
             )
         })
         .inner;
-    magnifier(
-        ui.painter(),
-        Pos2::new(field.rect.left() + 24.0, field.rect.center().y),
-        ui.visuals().weak_text_color(),
-        6.5,
-    );
     if chip_t > 0.0 {
         let chip = Rect::from_min_max(
             Pos2::new(
@@ -645,12 +713,21 @@ fn address_field(ui: &mut Ui, scene: &Scene<'_>, launcher: &mut Launcher) -> Fie
             }
         }
     }
+    // What Enter opens: the picked match, else what the field stands
+    // for. The icon at the field's left end is that thing's.
+    let opening = match launcher.picked {
+        Some(i) => Some(Head::Page(matches[i].clone())),
+        None => head.clone(),
+    };
+    paint_field_icon(
+        ui,
+        scene,
+        state,
+        &FieldIcon::of(opening.as_ref(), launcher.asking),
+        Pos2::new(field.rect.left() + FIELD_ICON_INSET, field.rect.center().y),
+    );
     let enter = ui.input(|i| i.key_pressed(Key::Enter));
     if field.lost_focus() && enter {
-        let opening = match launcher.picked {
-            Some(i) => Some(Head::Page(matches[i].clone())),
-            None => head.clone(),
-        };
         if let Some(opening) = opening {
             commands.push(opening.command(window.id));
         }
@@ -2325,6 +2402,38 @@ mod tests {
         // Back to searching, the same text is an address again.
         launcher.asking = false;
         assert!(matches!(Head::of(&launcher, ask), Some(Head::Address(_))));
+    }
+
+    #[test]
+    fn the_fields_icon_is_the_sites_the_sparkles_or_the_magnifier() {
+        let page = Url::parse("https://docs.rs/regex").unwrap();
+        let suggestion = Suggestion {
+            url: page.clone(),
+            title: "regex".to_string(),
+            source: osmena_core::SuggestionSource::History,
+        };
+        // A completed or picked page and a typed address: the site's.
+        assert_eq!(
+            FieldIcon::of(Some(&Head::Page(suggestion)), false),
+            FieldIcon::Site(page.clone())
+        );
+        assert_eq!(
+            FieldIcon::of(Some(&Head::Address(page.clone())), false),
+            FieldIcon::Site(page)
+        );
+        // Words: the magnifier, as for the empty field.
+        assert_eq!(
+            FieldIcon::of(Some(&Head::Search("rust egui".to_string())), false),
+            FieldIcon::Search
+        );
+        assert_eq!(FieldIcon::of(None, false), FieldIcon::Search);
+        // Asking: sparkles, empty or not.
+        let question = Head::Ask {
+            kind: WidgetKind::AskClaude,
+            query: "why".to_string(),
+        };
+        assert_eq!(FieldIcon::of(Some(&question), true), FieldIcon::Ask);
+        assert_eq!(FieldIcon::of(None, true), FieldIcon::Ask);
     }
 
     #[test]

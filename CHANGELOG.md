@@ -6,6 +6,13 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- The icon at the left end of the Launch Panel's field says what
+  Enter will do: the site's own favicon while the field stands for a
+  page (the completed page, a typed address, or the match picked with
+  the arrows; a globe for a site whose icon the profile has not kept
+  yet), a magnifier while it searches or is empty, and sparkles in
+  the profile's accent while it asks (`FieldIcon` in
+  `osmena-chrome`'s `launch.rs`, tested).
 - The Launch Panel's field asks as well as searches: Shift tapped
   twice turns it from searching to asking, and twice again turns it
   back. While it asks, the chip at its right end names who is asked
@@ -289,6 +296,10 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Fixed
 
+- A site's icon drawn at two sizes in one frame (on the bookmarks bar
+  and on the Launch Panel's shelf) was fitted and uploaded to the GPU
+  anew for each, every frame: the chrome kept one texture per site.
+  It keeps one per site and size.
 - Alt codes typed nothing on Windows: holding Alt and keying 0151 on
   the numeric keypad gave no em dash, in a page or in a field of the
   chrome. Windows posts the character as a `WM_CHAR` after Alt's

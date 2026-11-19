@@ -572,7 +572,7 @@ pub struct ChromeState {
     /// popover opens under that chip instead of the star.
     bookmark_anchor: Option<Rect>,
     /// The uploaded favicons of bookmarked sites, by host.
-    site_icons: HashMap<String, CachedFavicon>,
+    site_icons: HashMap<(String, u32), CachedFavicon>,
     /// A chip of the bookmarks bar being dragged along it: its index.
     bar_drag: Option<usize>,
     /// The find bar's field text, synced from the model when the bar
@@ -3055,7 +3055,7 @@ fn bookmarks_bar(
         .collect();
     state
         .site_icons
-        .retain(|host, _| context.site_icons.contains_key(host));
+        .retain(|(host, _), _| context.site_icons.contains_key(host));
     ui.horizontal(|ui| {
         ui.set_min_height(BAR_CHIP_HEIGHT);
         ui.spacing_mut().item_spacing.x = BAR_CHIP_GAP;
@@ -3308,9 +3308,11 @@ fn chip_background(ui: &Ui, palette: &Palette, rect: Rect, response: &egui::Resp
     }
 }
 
-/// The texture of a bookmarked site's favicon fitted to `px` pixels,
-/// uploaded on first use and again when the shell has a different image
-/// for the host or the size changes.
+/// The texture of a site's favicon fitted to `px` pixels, uploaded on
+/// first use and again when the shell has a different image for the
+/// host. Kept per size: the bookmarks bar, the Launch Panel's shelf and
+/// its field draw the same site's icon at three sizes in one frame, and
+/// one texture between them would be uploaded anew for each.
 pub(crate) fn site_icon_texture<'a>(
     ui: &Ui,
     state: &'a mut ChromeState,
@@ -3321,8 +3323,8 @@ pub(crate) fn site_icon_texture<'a>(
     icon_texture(
         ui,
         &mut state.site_icons,
-        host.to_string(),
-        &format!("site-{host}"),
+        (host.to_string(), px),
+        &format!("site-{host}-{px}"),
         favicon,
         px,
     )

@@ -195,6 +195,9 @@ The engine contract, in `osmena-engine`:
   rest selected after the caret, so typing on replaces it and Enter
   opens the page); Backspace drops the completion and leaves the
   typing, and a space makes the text a phrase, so Enter then searches.
+  The icon at the field's left end is what Enter will open: the
+  site's favicon for a page, a magnifier for a search, sparkles for a
+  question.
   Shift tapped twice turns the field from searching to asking (the
   chip then names who is asked, Claude or ChatGPT as the Launch
   Settings' "Ask with" row says, and Enter opens the question
