@@ -182,6 +182,21 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- Tabs narrow further before the strip scrolls: an inactive tab's
+  least width is 40 points, its icon between the paddings, where
+  every tab's was 64. The active tab keeps 64 (`TAB_ACTIVE_MIN_WIDTH`),
+  so its close control always shows beside its icon, and a tab that
+  is recording gets 13 more than either for its mark
+  (`tab_min_width`). The tabs share what room there is around the
+  ones held at their least widths (`tab_share`, which replaces
+  `tab_width_for`), and a folder's chip now takes its width out of
+  that room, so a strip with folders no longer scrolls sooner than it
+  must. A tab grows to its new width when it is selected and shrinks
+  back when another is, at the pace its neighbours slide, and the
+  close control fades in as the room for it opens (`close_reveal`).
+  A narrow inactive tab is closed with the middle button or once
+  selected: at 40 points the pointer over it has no room to show the
+  control.
 - The strip's "+" no longer scrolls away with the tabs, and a
   frameless window can always be taken hold of. The "+" stood at the
   end of the scrolling row, so a strip with more tabs than fit pushed

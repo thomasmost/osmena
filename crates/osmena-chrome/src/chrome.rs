@@ -38,10 +38,15 @@ const FAVICON_SIZE: f32 = 16.0;
 /// Tab geometry, in points.
 const TAB_HEIGHT: f32 = 32.0;
 /// Every tab in the strip is `TAB_WIDTH` wide until the strip runs out
-/// of room; then all of them shrink alike, down to `TAB_MIN_WIDTH`,
-/// after which the strip scrolls ([`tab_width_for`]).
+/// of room; then all of them shrink alike ([`tab_share`]), each down
+/// to its own least width ([`tab_min_width`]), after which the strip
+/// scrolls. `TAB_MIN_WIDTH` is the least of a tab that shows its icon
+/// and nothing else; the active tab never goes under
+/// `TAB_ACTIVE_MIN_WIDTH`, which is what keeps its close control
+/// beside the icon.
 const TAB_WIDTH: f32 = 200.0;
-const TAB_MIN_WIDTH: f32 = 64.0;
+const TAB_MIN_WIDTH: f32 = 40.0;
+const TAB_ACTIVE_MIN_WIDTH: f32 = 64.0;
 /// Narrower than this, an inactive tab shows its close control only
 /// while hovered, so its title keeps the room.
 const TAB_CLOSE_MIN_WIDTH: f32 = 110.0;
@@ -949,28 +954,13 @@ pub fn draw(
                 ui.spacing().item_spacing.x,
                 frameless,
             );
-            // What is left for the tabs, shared out evenly. A folder's
-            // chip takes its own width from the same room, so a strip
-            // with folders may scroll a little sooner than the count
-            // alone predicts.
+            // What is left is the row's: the chips take their own
+            // widths from it and the tabs share the rest (`strip_row`).
             let items = window.strip_items();
-            let tab_count = items
-                .iter()
-                .map(|item| match item {
-                    StripItem::Tab(_) => 1,
-                    StripItem::Folder { folder, tabs } => {
-                        if window.folder(*folder).is_some_and(|f| f.expanded) {
-                            tabs.len()
-                        } else {
-                            0
-                        }
-                    }
-                })
-                .sum();
             let tab_spacing = 2.0;
             let strip_tabs = StripTabs {
                 palette: &palette,
-                width: tab_width_for(tabs_width, tab_count, tab_spacing),
+                room: tabs_width,
             };
             egui::ScrollArea::horizontal()
                 .max_width(tabs_width)
@@ -1405,11 +1395,19 @@ pub fn background(ctx: &egui::Context, color: ChromeColor) -> [f32; 4] {
         .to_normalized_gamma_f32()
 }
 
-/// What every tab of one strip is drawn with: the palette and the width
-/// they share ([`tab_width_for`]).
+/// What every tab of one strip is drawn with: the palette, and the
+/// room the row has before it must scroll, which the tabs share
+/// ([`tab_share`]).
 struct StripTabs<'a> {
     palette: &'a Palette,
-    width: f32,
+    room: f32,
+}
+
+/// A tab or a chip of the row before the tabs' widths are known.
+enum Entry<'a> {
+    Tab(&'a Tab),
+    /// A chip and how many tabs it stands for (see `RowBuilder`).
+    Chip(Chip, usize),
 }
 
 /// One place in the strip's row: a tab, or a folder's chip.
@@ -1519,20 +1517,14 @@ fn strip_row(
         .unwrap_or_default();
     let is_dragged = |id: TabId| dragging.contains(&id);
 
-    // Measure: every slot's width, and its place with the dragged tabs
-    // taken out.
-    let mut row = RowBuilder {
-        slots: Vec::new(),
-        spacing,
-        compact: 0.0,
-        tab_index: 0,
-        total: 0.0,
-    };
+    // What the row holds: the tabs that show, and the chips with the
+    // widths their names give them.
+    let mut entries: Vec<Entry<'_>> = Vec::new();
     for item in items {
         match item {
             StripItem::Tab(id) => {
                 if let Some(tab) = window.tab(*id) {
-                    row.add(SlotKind::Tab(tab), look.width, is_dragged(*id));
+                    entries.push(Entry::Tab(tab));
                 }
             }
             StripItem::Folder { folder, tabs } => {
@@ -1555,15 +1547,50 @@ fn strip_row(
                 } else {
                     tabs.iter().filter(|id| !is_dragged(**id)).count()
                 };
-                row.add_chip(chip, hidden);
+                entries.push(Entry::Chip(chip, hidden));
                 if f.expanded {
                     for id in tabs {
                         if let Some(tab) = window.tab(*id) {
-                            row.add(SlotKind::Tab(tab), look.width, is_dragged(*id));
+                            entries.push(Entry::Tab(tab));
                         }
                     }
                 }
             }
+        }
+    }
+    // The tabs share what the chips leave, each never under its own
+    // least width: the active tab keeps room for its close control, a
+    // tab that is recording for its mark.
+    let least = |tab: &Tab| tab_min_width(tab.id == window.active, tab.capture.any());
+    let mut room = look.room;
+    let mut mins: Vec<f32> = Vec::new();
+    for entry in &entries {
+        match entry {
+            Entry::Tab(tab) => mins.push(least(tab)),
+            Entry::Chip(chip, _) => room -= chip.width + spacing,
+        }
+    }
+    let share = tab_share(room, &mins, spacing);
+
+    // Measure: every slot's width, and its place with the dragged tabs
+    // taken out.
+    let mut row = RowBuilder {
+        slots: Vec::new(),
+        spacing,
+        compact: 0.0,
+        tab_index: 0,
+        total: 0.0,
+    };
+    for entry in entries {
+        match entry {
+            Entry::Tab(tab) => {
+                row.add(
+                    SlotKind::Tab(tab),
+                    share.max(least(tab)),
+                    is_dragged(tab.id),
+                );
+            }
+            Entry::Chip(chip, hidden) => row.add_chip(chip, hidden),
         }
     }
     let RowBuilder {
@@ -1579,15 +1606,23 @@ fn strip_row(
 
     // Where the dragged tabs are, and where they would land: before the
     // first slot whose centre is right of their first tab's.
-    let step = look.width + spacing;
-    let block = dragging.len() as f32 * step;
+    // Tabs are not all one width (the active one may be wider): the
+    // dragged ones take the room of their own widths.
+    let dragged_width = |id: TabId| {
+        slots
+            .iter()
+            .find(|slot| matches!(&slot.kind, SlotKind::Tab(tab) if tab.id == id))
+            .map_or(share, |slot| slot.width)
+    };
+    let block: f32 = dragging.iter().map(|id| dragged_width(*id) + spacing).sum();
+    let lead_width = dragging.first().map_or(share, |id| dragged_width(*id));
     let pointer = ui.ctx().pointer_latest_pos();
     let drag_left = state.tab_drag.as_ref().zip(pointer).map(|(drag, pointer)| {
         let rightmost = (row.right() - block + spacing).max(row.left());
         (pointer.x - drag.grab).clamp(row.left(), rightmost)
     });
     let index = drag_left.map(|left| {
-        let centre = left + look.width / 2.0;
+        let centre = left + lead_width / 2.0;
         slots
             .iter()
             .filter(|slot| !slot.dragged && slot.stands_for_tabs())
@@ -1612,10 +1647,21 @@ fn strip_row(
         let offset = ui
             .ctx()
             .animate_value_with_time(slot.slide_id(), target, STRIP_SLIDE_SECS);
+        // A tab grows to its new width (the one just selected, making
+        // room for its close control) and shrinks back at the pace the
+        // others slide, so its edge and its neighbour's move as one.
+        let width = match &slot.kind {
+            SlotKind::Tab(tab) => ui.ctx().animate_value_with_time(
+                Id::new(("strip-width", tab.id)),
+                slot.width,
+                STRIP_SLIDE_SECS,
+            ),
+            SlotKind::Chip(_) => slot.width,
+        };
         // On the pixel grid, so edges, outlines and icons are crisp.
         let rect = Rect::from_min_size(
             Pos2::new(row.left() + offset, row.top()),
-            Vec2::new(slot.width, TAB_HEIGHT),
+            Vec2::new(width, TAB_HEIGHT),
         )
         .round_to_pixels(ppp);
         match &slot.kind {
@@ -1631,17 +1677,20 @@ fn strip_row(
     // keys follow them with no delay, so on the drop they slide from
     // where they were let go to where they landed.
     if let Some(left) = drag_left {
-        for (k, id) in dragging.iter().enumerate() {
+        let mut x = left;
+        for id in &dragging {
             let Some(tab) = window.tab(*id) else {
                 continue;
             };
-            let x = left + k as f32 * step;
+            let width = dragged_width(*id);
             ui.ctx()
                 .animate_value_with_time(Id::new(("strip-slide", tab.id)), x - row.left(), 0.0);
-            let rect =
-                Rect::from_min_size(Pos2::new(x, row.top()), Vec2::new(look.width, TAB_HEIGHT))
-                    .round_to_pixels(ppp);
+            ui.ctx()
+                .animate_value_with_time(Id::new(("strip-width", tab.id)), width, 0.0);
+            let rect = Rect::from_min_size(Pos2::new(x, row.top()), Vec2::new(width, TAB_HEIGHT))
+                .round_to_pixels(ppp);
             live_drag |= strip_tab(ui, rect, window, tab, look, state, commands, &mut late);
+            x += width + spacing;
         }
     }
     if !late.is_empty() {
@@ -1759,7 +1808,7 @@ fn strip_tab(
         }
         let grab = response
             .interact_pointer_pos()
-            .map_or(look.width / 2.0, |pointer| pointer.x - rect.left());
+            .map_or(rect.width() / 2.0, |pointer| pointer.x - rect.left());
         // Where the tabs are now, among the others: the drop that would
         // change nothing, until the row works out a better one.
         let index = window
@@ -4105,15 +4154,55 @@ fn paint_grip(painter: &egui::Painter, grip: Rect, ink: Color32, lit: bool) {
     }
 }
 
-/// The width of each tab in a strip with `room` points for `tabs` tabs
-/// and `spacing` between them: `TAB_WIDTH` while they fit, else the
-/// even share, never under `TAB_MIN_WIDTH`.
-fn tab_width_for(room: f32, tabs: usize, spacing: f32) -> f32 {
-    if tabs == 0 {
+/// The least width of a tab: room for its icon between the paddings;
+/// for the active tab `TAB_ACTIVE_MIN_WIDTH`, so its close control
+/// always shows beside the icon; and room for the recording mark on
+/// top of either, so the mark never costs the tab its icon.
+fn tab_min_width(is_active: bool, recording: bool) -> f32 {
+    let base = if is_active {
+        TAB_ACTIVE_MIN_WIDTH
+    } else {
+        TAB_MIN_WIDTH
+    };
+    base + if recording { REC_DOT + REC_GAP } else { 0.0 }
+}
+
+/// The width the tabs of a strip share: `room` points for tabs whose
+/// least widths are `mins`, with `spacing` between them. Each tab is
+/// as wide as the share or as its own least width, whichever is more;
+/// the share is `TAB_WIDTH` while everything fits, else what is left
+/// for the others once the tabs held at their least widths have
+/// theirs, and never under `TAB_MIN_WIDTH`, where the strip scrolls
+/// instead.
+fn tab_share(room: f32, mins: &[f32], spacing: f32) -> f32 {
+    if mins.is_empty() {
         return TAB_WIDTH;
     }
-    let share = (room - spacing * (tabs as f32 - 1.0)) / tabs as f32;
-    share.clamp(TAB_MIN_WIDTH, TAB_WIDTH)
+    let mut left = room - spacing * (mins.len() as f32 - 1.0);
+    let mut sharing = mins.len();
+    // The widest minimum first: each tab held at its minimum leaves
+    // less for the rest, which may hold the next one too.
+    let mut held: Vec<f32> = mins.to_vec();
+    held.sort_by(|a, b| b.total_cmp(a));
+    for min in held {
+        if sharing == 0 || min <= left / sharing as f32 {
+            break;
+        }
+        left -= min;
+        sharing -= 1;
+    }
+    if sharing == 0 {
+        return TAB_MIN_WIDTH;
+    }
+    (left / sharing as f32).clamp(TAB_MIN_WIDTH, TAB_WIDTH)
+}
+
+/// How far the active tab's close control has come in, 0 to 1, at
+/// `width`: nothing at the least width of an inactive tab, all of it
+/// at the active tab's own, so the control fades in as a tab just
+/// selected grows to make room for it.
+fn close_reveal(width: f32) -> f32 {
+    ((width - TAB_MIN_WIDTH) / (TAB_ACTIVE_MIN_WIDTH - TAB_MIN_WIDTH)).clamp(0.0, 1.0)
 }
 
 /// What a tab is drawn as.
@@ -4360,7 +4449,14 @@ fn tab_widget(
                 };
                 shapes.push(egui::Shape::circle_filled(centre, CLOSE_SIZE / 2.0, ring));
             }
-            shapes.extend(cross(centre, text_color));
+            // On a tab just selected, still growing from an inactive
+            // tab's width, the control comes in with the room for it.
+            let reveal = if is_active {
+                close_reveal(rect.width())
+            } else {
+                1.0
+            };
+            shapes.extend(cross(centre, text_color.gamma_multiply(reveal)));
         }
         if is_active {
             late.extend(shapes);
@@ -5645,6 +5741,9 @@ mod tests {
 
     #[test]
     fn tabs_share_the_strip_evenly_between_a_standard_and_a_minimum_width() {
+        let plain = |n: usize| vec![TAB_MIN_WIDTH; n];
+        let tab_width_for =
+            |room: f32, tabs: usize, spacing: f32| tab_share(room, &plain(tabs), spacing);
         assert_eq!(tab_width_for(1000.0, 0, 2.0), TAB_WIDTH);
         assert_eq!(tab_width_for(1000.0, 1, 2.0), TAB_WIDTH);
         assert_eq!(tab_width_for(1000.0, 4, 2.0), TAB_WIDTH);
@@ -5652,6 +5751,54 @@ mod tests {
         assert_eq!(tab_width_for(1000.0, 10, 2.0), (1000.0 - 18.0) / 10.0);
         assert_eq!(tab_width_for(100.0, 10, 2.0), TAB_MIN_WIDTH);
         assert_eq!(tab_width_for(-50.0, 3, 2.0), TAB_MIN_WIDTH);
+    }
+
+    #[test]
+    fn the_active_and_the_recording_tabs_keep_their_own_least_widths() {
+        let lead = REC_DOT + REC_GAP;
+        assert_eq!(tab_min_width(false, false), TAB_MIN_WIDTH);
+        assert_eq!(tab_min_width(true, false), TAB_ACTIVE_MIN_WIDTH);
+        assert_eq!(tab_min_width(false, true), TAB_MIN_WIDTH + lead);
+        assert_eq!(tab_min_width(true, true), TAB_ACTIVE_MIN_WIDTH + lead);
+        // At its least width every tab still shows its icon; the
+        // active one its close control too, a recording one its mark.
+        for (active, recording) in [(false, false), (true, false), (false, true), (true, true)] {
+            let layout = tab_layout(tab_min_width(active, recording), active, false, recording);
+            assert!(layout.icon_left.is_some(), "{active} {recording}");
+            assert_eq!(layout.close, active);
+            assert_eq!(layout.dot_left.is_some(), recording);
+        }
+        // Twenty tabs in 900 points, one active: it keeps its 64 and
+        // the others share the rest evenly.
+        let mut mins = vec![TAB_MIN_WIDTH; 20];
+        mins[3] = tab_min_width(true, false);
+        let share = tab_share(900.0, &mins, 2.0);
+        let expected = (900.0 - 19.0 * 2.0 - TAB_ACTIVE_MIN_WIDTH) / 19.0;
+        assert!((share - expected).abs() < 1e-4, "{share} vs {expected}");
+        assert!(share < TAB_ACTIVE_MIN_WIDTH && share > TAB_MIN_WIDTH);
+        let total: f32 = mins.iter().map(|m| share.max(*m)).sum::<f32>() + 19.0 * 2.0;
+        assert!((total - 900.0).abs() < 1e-2, "{total}");
+        // A recording tab among them is held at its own width too.
+        mins[7] = tab_min_width(false, true);
+        let share = tab_share(900.0, &mins, 2.0);
+        let total: f32 = mins.iter().map(|m| share.max(*m)).sum::<f32>() + 19.0 * 2.0;
+        assert!((total - 900.0).abs() < 1e-2, "{total}");
+        // With room to spare nobody is held: all share alike.
+        assert_eq!(tab_share(5000.0, &mins, 2.0), TAB_WIDTH);
+        let share = tab_share(2000.0, &mins, 2.0);
+        assert!((share - (2000.0 - 38.0) / 20.0).abs() < 1e-4);
+        // Past the least width of all, the share stops and the strip
+        // scrolls.
+        assert_eq!(tab_share(300.0, &mins, 2.0), TAB_MIN_WIDTH);
+    }
+
+    #[test]
+    fn the_close_control_comes_in_as_the_selected_tab_grows() {
+        assert_eq!(close_reveal(TAB_MIN_WIDTH), 0.0);
+        assert_eq!(close_reveal(TAB_ACTIVE_MIN_WIDTH), 1.0);
+        assert_eq!(close_reveal(TAB_WIDTH), 1.0);
+        let half = close_reveal(f32::midpoint(TAB_MIN_WIDTH, TAB_ACTIVE_MIN_WIDTH));
+        assert!((half - 0.5).abs() < 1e-6);
     }
 
     #[test]
@@ -5667,11 +5814,12 @@ mod tests {
         assert_eq!(marked.title.unwrap().0, plain.title.unwrap().0 + lead);
         // A narrow tab with nothing else to show: the mark and the icon
         // centred together, the mark first.
-        let narrow = tab_layout(TAB_MIN_WIDTH, false, false, true);
+        let least = tab_min_width(false, true);
+        let narrow = tab_layout(least, false, false, true);
         assert_eq!(narrow.title, None);
         let group = lead + FAVICON_SIZE;
-        assert_eq!(narrow.dot_left, Some((TAB_MIN_WIDTH - group) / 2.0));
-        assert_eq!(narrow.icon_left, Some((TAB_MIN_WIDTH - group) / 2.0 + lead));
+        assert_eq!(narrow.dot_left, Some((least - group) / 2.0));
+        assert_eq!(narrow.icon_left, Some((least - group) / 2.0 + lead));
         // Too narrow for both: the mark stays, the icon goes.
         let tight = tab_layout(lead + 2.0 * TAB_PADDING_X + 4.0, false, false, true);
         assert!(tight.dot_left.is_some());
@@ -5730,30 +5878,34 @@ mod tests {
 
     #[test]
     fn a_narrow_inactive_tab_centres_its_icon_and_shows_the_close_control_hovered() {
-        let idle = tab_layout(TAB_MIN_WIDTH, false, false, false);
+        // 64 points: what was every tab's least width, and is still
+        // the active tab's.
+        let narrow = TAB_ACTIVE_MIN_WIDTH;
+        let idle = tab_layout(narrow, false, false, false);
         assert_eq!(
             idle,
             TabLayout {
                 dot_left: None,
-                icon_left: Some((TAB_MIN_WIDTH - FAVICON_SIZE) / 2.0),
+                icon_left: Some((narrow - FAVICON_SIZE) / 2.0),
                 title: None,
                 close: false,
             }
         );
-        let hovered = tab_layout(TAB_MIN_WIDTH, false, true, false);
+        let hovered = tab_layout(narrow, false, true, false);
         assert_eq!(hovered.icon_left, Some(TAB_PADDING_X));
         assert_eq!(hovered.title, None);
         assert!(hovered.close);
-        // Narrower than both: the icon stays, the control goes.
-        let tight = tab_layout(40.0, false, true, false);
-        assert_eq!(tight.icon_left, Some((40.0 - FAVICON_SIZE) / 2.0));
+        // Narrower than both, down to an inactive tab's least width:
+        // the icon stays, the control goes.
+        let tight = tab_layout(TAB_MIN_WIDTH, false, true, false);
+        assert_eq!(tight.icon_left, Some((TAB_MIN_WIDTH - FAVICON_SIZE) / 2.0));
         assert!(!tight.close);
     }
 
     #[test]
     fn a_narrow_active_tab_keeps_its_close_control_before_its_icon() {
         assert_eq!(
-            tab_layout(TAB_MIN_WIDTH, true, false, false),
+            tab_layout(TAB_ACTIVE_MIN_WIDTH, true, false, false),
             TabLayout {
                 dot_left: None,
                 icon_left: Some(TAB_PADDING_X),
