@@ -79,6 +79,11 @@ const REC_PERIOD_SECS: f64 = 2.4;
 const REC_RED: Color32 = Color32::from_rgb(226, 54, 54);
 /// The "+" button on the strip.
 const MENU_WIDTH: f32 = 28.0;
+/// How far the tabs fade into the strip at an end of the row that has
+/// more tabs scrolled out of sight beyond it, and how long the fade
+/// takes to come and go.
+const STRIP_FADE_WIDTH: f32 = 36.0;
+const STRIP_FADE_SECS: f32 = 0.12;
 /// Between the last tab and the "+".
 const PLUS_GAP: f32 = 4.0;
 /// The least width of the strip's drag area, the stretch right of the
@@ -342,6 +347,61 @@ fn gradient_mesh(rect: Rect, palette: &Palette, bands: u32, ease_end: f32) -> eg
     if ease_end < 1.0 {
         let fill = palette.strip_at(1.0);
         push_quad(&mut mesh, rect, y_at(ease_end), rect.bottom(), fill, fill);
+    }
+    mesh
+}
+
+/// Which end of the scrolling tabs a fade is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FadeSide {
+    Left,
+    Right,
+}
+
+/// Whether tabs are out of sight past the left and the right end of a
+/// row `content` wide, seen through a view `viewport` wide scrolled by
+/// `offset`. Half a point of slack, so rounding leaves no fade on a
+/// row that fits or is scrolled home.
+fn scroll_overflow(offset: f32, viewport: f32, content: f32) -> (bool, bool) {
+    (offset > 0.5, offset + viewport < content - 0.5)
+}
+
+/// The veil over an end of the scrolling tabs: the strip's own fill
+/// (its colour curve down `strip`, as [`gradient_mesh`] paints it
+/// behind the tabs), solid at the outer edge of `area` and clear at the
+/// inner one, so the tabs there fade into the strip. `strength` (0 to
+/// 1) scales it, for the fade's coming and going.
+fn strip_fade(
+    area: Rect,
+    strip: Rect,
+    palette: &Palette,
+    side: FadeSide,
+    strength: f32,
+) -> egui::Mesh {
+    const BANDS: u32 = 8;
+    let (solid_x, clear_x) = match side {
+        FadeSide::Left => (area.left(), area.right()),
+        FadeSide::Right => (area.right(), area.left()),
+    };
+    let mut mesh = egui::Mesh::default();
+    for band in 0..BANDS {
+        let u0 = band as f32 / BANDS as f32;
+        let u1 = (band + 1) as f32 / BANDS as f32;
+        let (y0, y1) = (
+            strip.top() + strip.height() * u0,
+            strip.top() + strip.height() * u1,
+        );
+        let (c0, c1) = (
+            palette.strip_at(u0).gamma_multiply(strength),
+            palette.strip_at(u1).gamma_multiply(strength),
+        );
+        let base = mesh.vertices.len() as u32;
+        mesh.colored_vertex(Pos2::new(solid_x, y0), c0);
+        mesh.colored_vertex(Pos2::new(clear_x, y0), Color32::TRANSPARENT);
+        mesh.colored_vertex(Pos2::new(clear_x, y1), Color32::TRANSPARENT);
+        mesh.colored_vertex(Pos2::new(solid_x, y1), c1);
+        mesh.add_triangle(base, base + 1, base + 2);
+        mesh.add_triangle(base, base + 2, base + 3);
     }
     mesh
 }
@@ -931,6 +991,9 @@ pub fn draw(
     let strip_panel = Panel::top("tabs")
         .frame(strip_frame)
         .show_separator_line(false);
+    // Where the tabs scroll, and whether any are out of sight past its
+    // left and right ends: painted over once the strip's rect is known.
+    let mut tabs_view: Option<(Rect, (bool, bool))> = None;
     let strip = strip_panel.show_inside(ui, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -962,7 +1025,7 @@ pub fn draw(
                 palette: &palette,
                 room: tabs_width,
             };
-            egui::ScrollArea::horizontal()
+            let scrolled = egui::ScrollArea::horizontal()
                 .max_width(tabs_width)
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
@@ -971,6 +1034,14 @@ pub fn draw(
                         strip_row(ui, window, &items, &strip_tabs, state, &mut commands);
                     });
                 });
+            tabs_view = Some((
+                scrolled.inner_rect,
+                scroll_overflow(
+                    scrolled.state.offset.x,
+                    scrolled.inner_rect.width(),
+                    scrolled.content_size.x,
+                ),
+            ));
             ui.add_space(PLUS_GAP);
             let plus = plus_button(ui, &palette, window).on_hover_text(hint(
                 keymap,
@@ -1059,6 +1130,39 @@ pub fn draw(
             ui.painter().pixels_per_point(),
         ),
     );
+    // Tabs scrolled out of sight leave a sign: the row fades into the
+    // strip at that end instead of being cut off, which says there is
+    // more that way.
+    if let Some((view, (more_left, more_right))) = tabs_view {
+        let strip_rect = strip.response.rect;
+        let edge = strip_edge_y(strip_rect.bottom(), ui.painter().pixels_per_point());
+        for (more, side) in [(more_left, FadeSide::Left), (more_right, FadeSide::Right)] {
+            let t = ui.ctx().animate_bool_with_time(
+                Id::new(("strip-fade", window.id, side == FadeSide::Left)),
+                more,
+                STRIP_FADE_SECS,
+            );
+            if t <= 0.0 {
+                continue;
+            }
+            let width = STRIP_FADE_WIDTH.min(view.width() / 2.0);
+            let (left, right) = match side {
+                FadeSide::Left => (view.left(), view.left() + width),
+                FadeSide::Right => (view.right() - width, view.right()),
+            };
+            // Down to the strip's edge row and not over it: the edge
+            // runs on under the fade.
+            let area = Rect::from_min_max(
+                Pos2::new(left, strip_rect.top()),
+                Pos2::new(right, edge - 0.5 / ui.painter().pixels_per_point()),
+            );
+            ui.painter()
+                .with_clip_rect(area)
+                .add(egui::Shape::mesh(strip_fade(
+                    area, strip_rect, &palette, side, t,
+                )));
+        }
+    }
 
     let toolbar_frame = Frame::new()
         .fill(palette.toolbar)
@@ -5839,6 +5943,48 @@ mod tests {
             assert!((0.25..=1.0).contains(&a), "{a} at {t}");
             assert!((a - b).abs() < 0.1, "{a} to {b} at {t}");
             t += 0.05;
+        }
+    }
+
+    #[test]
+    fn a_row_fades_only_at_an_end_with_tabs_beyond_it() {
+        // Fits: no fade.
+        assert_eq!(scroll_overflow(0.0, 800.0, 600.0), (false, false));
+        assert_eq!(scroll_overflow(0.0, 800.0, 800.3), (false, false));
+        // Longer than the view, scrolled home: more to the right only.
+        assert_eq!(scroll_overflow(0.0, 800.0, 1200.0), (false, true));
+        // In the middle: both ways.
+        assert_eq!(scroll_overflow(150.0, 800.0, 1200.0), (true, true));
+        // At the far end: more to the left only.
+        assert_eq!(scroll_overflow(400.0, 800.0, 1200.0), (true, false));
+        assert_eq!(scroll_overflow(399.8, 800.0, 1200.0), (true, false));
+    }
+
+    #[test]
+    fn the_fade_is_the_strips_own_fill_solid_outside_and_clear_inside() {
+        let palette = Palette::new(ChromeColor::default(), false);
+        let strip = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(900.0, 38.0));
+        let area = Rect::from_min_max(Pos2::new(100.0, 0.0), Pos2::new(136.0, 37.0));
+        for (side, solid_x, clear_x) in [
+            (FadeSide::Left, 100.0, 136.0),
+            (FadeSide::Right, 136.0, 100.0),
+        ] {
+            let mesh = strip_fade(area, strip, &palette, side, 1.0);
+            assert_eq!(mesh.vertices.len(), 32);
+            assert_eq!(mesh.indices.len(), 48);
+            for vertex in &mesh.vertices {
+                let u = vertex.pos.y / strip.height();
+                if vertex.pos.x == solid_x {
+                    // The colour the strip has at that height.
+                    assert_eq!(vertex.color, palette.strip_at(u), "{side:?} at {u}");
+                } else {
+                    assert_eq!(vertex.pos.x, clear_x);
+                    assert_eq!(vertex.color, Color32::TRANSPARENT);
+                }
+            }
+            // Half way in or out, the solid edge is half as strong.
+            let half = strip_fade(area, strip, &palette, side, 0.5);
+            assert!(half.vertices[0].color.a() < 140 && half.vertices[0].color.a() > 110);
         }
     }
 

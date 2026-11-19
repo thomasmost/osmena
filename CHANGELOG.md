@@ -182,6 +182,12 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- A strip with tabs scrolled out of sight says so: the row fades into
+  the strip over 36 points at each end that has more tabs beyond it,
+  instead of being cut off at the edge, and the fade comes and goes
+  as the row is scrolled (`scroll_overflow`, `strip_fade`: the
+  strip's own colour curve, solid at the outer edge and clear at the
+  inner). The strip's edge line runs on under it.
 - Tabs narrow further before the strip scrolls: an inactive tab's
   least width is 40 points, its icon between the paddings, where
   every tab's was 64. The active tab keeps 64 (`TAB_ACTIVE_MIN_WIDTH`),
