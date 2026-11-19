@@ -6,6 +6,22 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- The Launch Panel's field asks as well as searches: Shift tapped
+  twice turns it from searching to asking, and twice again turns it
+  back. While it asks, the chip at its right end names who is asked
+  ("Claude"), the hint reads "Ask Claude", nothing completes the
+  typing and no page is offered under it, the first row of the
+  dropdown is the question with sparkles and "Ask Claude", and Enter
+  opens the question in a new tab through that question widget's
+  template (`Command::AskInNewTab`, as the tile does). A Shift held to
+  type a capital or extend a selection, a long hold, and two taps with
+  anything between them are no double tap (`DoubleShift` in
+  `osmena-chrome`, tested). Who is asked is
+  `LaunchSettings::preferred_ask`: the new `ask_with` setting
+  (`[launch] ask_with = "ask_chatgpt"`), chosen on the Launch
+  Settings' new "Ask with" row through `Command::SetPreferredAsk`;
+  until it is chosen, the question tile that comes first on the
+  mosaic, and Claude's when there is none.
 - The model knows extension side panels, extension keyboard commands
   and what an extension asks of the browser (this is `osmena-core`; the
   shell's half is the entry below). For an engine crate: `Extension` gains

@@ -18,7 +18,8 @@ use osmena_core::launch::{
     DriveKind, DriveState, Fetched, TOP_SITES, TopSite, Units, WeatherCode, WidgetKind, top_sites,
 };
 use osmena_core::{
-    Command, Completion, Suggestion, UrlTemplate, Window, WindowId, completion, suggestions,
+    Command, Completion, LaunchSettings, Suggestion, UrlTemplate, Window, WindowId, completion,
+    suggestions,
 };
 use url::Url;
 
@@ -122,6 +123,92 @@ struct SettingsForm {
     synced_ask: HashMap<WidgetKind, String>,
 }
 
+/// The longest Shift is held for the press to count as a tap, and the
+/// longest between one tap's release and the next one's press for the
+/// two to count as a pair, in seconds.
+const SHIFT_TAP_SECS: f64 = 0.35;
+const SHIFT_PAIR_SECS: f64 = 0.45;
+
+/// Hears Shift tapped twice: pressed and let go alone, and again
+/// straight after. Fed once a frame with whether Shift is held (and no
+/// other modifier), whether anything else was pressed or typed in the
+/// frame, and the time. A Shift held to type a capital, to extend a
+/// selection or to click is no tap, since something else happened
+/// while it was down; neither is a long hold; and anything between
+/// the two taps breaks the pair.
+#[derive(Debug, Default)]
+pub(crate) struct DoubleShift {
+    /// When Shift went down, while it is held.
+    down_at: Option<f64>,
+    /// Nothing else has happened since it went down.
+    alone: bool,
+    /// When the first tap of a pair was let go.
+    tapped_at: Option<f64>,
+}
+
+impl DoubleShift {
+    /// One frame. `true` on the release that completes the pair.
+    pub(crate) fn frame(&mut self, shift: bool, other: bool, now: f64) -> bool {
+        if other {
+            self.alone = false;
+            self.tapped_at = None;
+        }
+        match (self.down_at, shift) {
+            (None, true) => {
+                self.down_at = Some(now);
+                self.alone = !other;
+                false
+            }
+            (Some(down_at), false) => {
+                self.down_at = None;
+                let tap = self.alone && now - down_at <= SHIFT_TAP_SECS;
+                let paired = self
+                    .tapped_at
+                    .take()
+                    .is_some_and(|first| down_at - first <= SHIFT_PAIR_SECS);
+                if tap && !paired {
+                    self.tapped_at = Some(now);
+                }
+                tap && paired
+            }
+            _ => false,
+        }
+    }
+}
+
+/// What a frame's input says to [`DoubleShift`]: whether Shift is held
+/// with no other modifier, and whether anything else was pressed,
+/// typed, pasted or clicked.
+fn shift_input(input: &egui::InputState) -> (bool, bool) {
+    let m = input.modifiers;
+    let other_modifier = m.ctrl || m.alt || m.mac_cmd || m.command;
+    let other = other_modifier
+        || input.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Key { .. }
+                    | egui::Event::Text(_)
+                    | egui::Event::Paste(_)
+                    | egui::Event::Cut
+                    | egui::Event::Copy
+                    | egui::Event::PointerButton { .. }
+                    | egui::Event::MouseWheel { .. }
+                    | egui::Event::Ime(_)
+            )
+        });
+    (m.shift && !other_modifier, other)
+}
+
+/// The name the field asks under: the preferred question widget's
+/// template's (`Claude`), or the widget's own label when that is blank.
+fn ask_name(settings: &LaunchSettings, kind: WidgetKind) -> &str {
+    settings
+        .ask_template(kind)
+        .map(|template| template.name.trim())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(kind.label())
+}
+
 /// The panel's state while it is open: what the user typed in the
 /// field, the page the field completed it to, the match picked with
 /// the arrow keys (`typed` keeps what they typed, for going back up),
@@ -136,6 +223,12 @@ pub(crate) struct Launcher {
     /// deletion or a space; what Enter opens while no match is picked.
     pub(crate) completion: Option<Completion>,
     pub(crate) picked: Option<usize>,
+    /// The field asks instead of searching: Shift tapped twice turns
+    /// this on and off. While it is on the text is a question for the
+    /// preferred question widget's template, whatever it looks like:
+    /// nothing completes it and no page matches it.
+    pub(crate) asking: bool,
+    shift: DoubleShift,
     /// The field takes focus on the first frame.
     pub(crate) focus: bool,
     view: View,
@@ -310,17 +403,26 @@ enum Head {
     Address(Url),
     /// The typed words, searched with the profile's engine.
     Search(String),
+    /// The typed words, asked of the question widget `kind`'s template.
+    Ask { kind: WidgetKind, query: String },
 }
 
 impl Head {
-    /// What the field reads as: the completion while there is one,
-    /// else the typing as an address or as a search; nothing while the
-    /// field is empty.
-    fn of(launcher: &Launcher) -> Option<Head> {
+    /// What the field reads as: a question for `ask` while the field
+    /// is asking; else the completion while there is one, else the
+    /// typing as an address or as a search; nothing while the field is
+    /// empty.
+    fn of(launcher: &Launcher, ask: WidgetKind) -> Option<Head> {
+        let text = launcher.typed.trim();
+        if launcher.asking {
+            return (!text.is_empty()).then(|| Head::Ask {
+                kind: ask,
+                query: text.to_string(),
+            });
+        }
         if let Some(c) = &launcher.completion {
             return Some(Head::Page(c.suggestion.clone()));
         }
-        let text = launcher.typed.trim();
         if text.is_empty() {
             return None;
         }
@@ -345,6 +447,11 @@ impl Head {
                 window,
                 query: query.clone(),
             },
+            Head::Ask { kind, query } => Command::AskInNewTab {
+                window,
+                kind: *kind,
+                query: query.clone(),
+            },
         }
     }
 }
@@ -365,6 +472,12 @@ impl Head {
 /// engine's name, lit while it is what Enter opens; the matches follow
 /// it, and the engine's name sits in a chip at the field's right end
 /// while the text is a search.
+///
+/// Shift tapped twice ([`DoubleShift`]) turns the field from searching
+/// to asking and back: while it asks, the chip names the preferred
+/// question widget (`LaunchSettings::preferred_ask`), the hint reads
+/// "Ask Claude", nothing completes and no page is offered, and Enter
+/// opens the question in that widget's template.
 fn address_field(ui: &mut Ui, scene: &Scene<'_>, launcher: &mut Launcher) -> FieldOutcome {
     let Scene {
         window,
@@ -375,17 +488,39 @@ fn address_field(ui: &mut Ui, scene: &Scene<'_>, launcher: &mut Launcher) -> Fie
     let mut close = false;
     let id = Id::new(("launcher-field", window.id));
     let engine = search_engine_name(context.search);
+    let ask = context.launch_settings.preferred_ask();
+    let asked = ask_name(context.launch_settings, ask);
+    // Shift twice, with the field holding the keyboard, turns it from
+    // searching to asking and back. What was typed stays; what was
+    // completed or picked goes, since a question is not an address.
+    let (shift, other) = ui.input(shift_input);
+    let now = ui.input(|i| i.time);
+    let holds_keyboard = launcher.focus || ui.memory(|m| m.has_focus(id));
+    if launcher.shift.frame(shift, other, now) && holds_keyboard {
+        launcher.asking = !launcher.asking;
+        launcher.completion = None;
+        launcher.picked = None;
+        launcher.text = launcher.typed.clone();
+        caret_to_end(ui, id, launcher.text.chars().count());
+    }
     // The chip is sized before the field so the text can keep clear of
     // it; it answers the field as it read last frame, which the fade
-    // hides.
-    let searching = matches!(Head::of(launcher), Some(Head::Search(_)));
+    // hides. While the field asks the chip stays, empty field or not:
+    // it is what says so.
+    let searching = launcher.asking || matches!(Head::of(launcher, ask), Some(Head::Search(_)));
     let chip_t = ui
         .ctx()
         .animate_bool_with_time(id.with("chip"), searching, CHIP_FADE_SECS);
     let chip_font = FontId::new(CHIP_FONT_SIZE, egui::FontFamily::Name(theme::MEDIUM.into()));
+    let chip_name = if launcher.asking { asked } else { engine };
     let chip_galley =
         ui.painter()
-            .layout_no_wrap(truncate(engine, CHIP_MAX_CHARS), chip_font, palette.ink);
+            .layout_no_wrap(truncate(chip_name, CHIP_MAX_CHARS), chip_font, palette.ink);
+    let hint = if launcher.asking {
+        format!("Ask {asked}")
+    } else {
+        "Search or enter address".to_string()
+    };
     let chip_width = chip_galley.size().x + 2.0 * CHIP_PADDING.x;
     let mut margin = FIELD_MARGIN;
     if searching {
@@ -408,10 +543,7 @@ fn address_field(ui: &mut Ui, scene: &Scene<'_>, launcher: &mut Launcher) -> Fie
                     .font(FontId::proportional(LAUNCHER_FONT_SIZE))
                     // The hint takes the field's font: egui lays it out
                     // in the body size at the top-left otherwise.
-                    .hint_text(
-                        RichText::new("Search or enter address")
-                            .font(FontId::proportional(LAUNCHER_FONT_SIZE)),
-                    )
+                    .hint_text(RichText::new(hint).font(FontId::proportional(LAUNCHER_FONT_SIZE)))
                     .desired_width(f32::INFINITY),
             )
         })
@@ -460,7 +592,7 @@ fn address_field(ui: &mut Ui, scene: &Scene<'_>, launcher: &mut Launcher) -> Fie
     if field.changed() {
         launcher.typed = launcher.text.clone();
         launcher.picked = None;
-        launcher.completion = if deleting {
+        launcher.completion = if deleting || launcher.asking {
             None
         } else {
             // A typing that is an address already is where Enter goes:
@@ -479,11 +611,15 @@ fn address_field(ui: &mut Ui, scene: &Scene<'_>, launcher: &mut Launcher) -> Fie
     }
     // The matches for the typing, less the page the field completed to,
     // which heads the list.
-    let mut matches = suggestions(context.history, context.bookmarks, &launcher.typed);
+    let mut matches = if launcher.asking {
+        Vec::new()
+    } else {
+        suggestions(context.history, context.bookmarks, &launcher.typed)
+    };
     if let Some(c) = &launcher.completion {
         matches.retain(|m| m.url != c.suggestion.url);
     }
-    let head = Head::of(launcher);
+    let head = Head::of(launcher, ask);
     if field.has_focus() && !matches.is_empty() {
         let (down, up) = ui.input_mut(|i| {
             (
@@ -540,7 +676,8 @@ fn address_field(ui: &mut Ui, scene: &Scene<'_>, launcher: &mut Launcher) -> Fie
                     .corner_radius(10)
                     .show(ui, |ui| {
                         ui.set_width(field.rect.width() - 16.0);
-                        if head_row(ui, engine, head, picked.is_none()).clicked() {
+                        let names = (engine, asked);
+                        if head_row(ui, names, head, picked.is_none()).clicked() {
                             commands.push(head.command(window.id));
                             close = true;
                         }
@@ -583,9 +720,19 @@ fn select_completion(ui: &Ui, id: Id, launcher: &Launcher) {
 
 /// The dropdown's first row, what the field stands for: the completed
 /// page as a match row with its title, the typed address with a globe
-/// and "Open", or the words with a magnifier and the engine's name.
-fn head_row(ui: &mut Ui, engine: &str, head: &Head, lit: bool) -> egui::Response {
+/// and "Open", the words with a magnifier and the engine's name, or
+/// the question with sparkles and the name it is asked under (`names`
+/// is the two: the engine's, the question widget's).
+fn head_row(ui: &mut Ui, names: (&str, &str), head: &Head, lit: bool) -> egui::Response {
+    let (engine, asked) = names;
     match head {
+        Head::Ask { query, .. } => action_row(
+            ui,
+            lit,
+            query,
+            &format!("Ask {asked}"),
+            |painter, center, ink| sparkles(painter, center, ink, SUGGESTION_ICON / 2.0),
+        ),
         Head::Page(suggestion) => suggestion_row(ui, suggestion, lit),
         Head::Address(url) => action_row(ui, lit, url.as_str(), "Open", |painter, center, ink| {
             painter.extend(globe(
@@ -711,6 +858,43 @@ fn bottom_row(ui: &mut Ui, launcher: &mut Launcher, commands: &mut Vec<Command>)
             }
         });
     });
+}
+
+/// One four-pointed star at `c`, `r` from its centre to a point: two
+/// thin diamonds crossed, each convex, so the tessellator keeps their
+/// edges smooth.
+fn sparkle(painter: &egui::Painter, c: Pos2, r: f32, ink: Color32) {
+    let waist = r * 0.3;
+    for (dx, dy) in [(waist, r), (r, waist)] {
+        painter.add(Shape::convex_polygon(
+            vec![
+                Pos2::new(c.x, c.y - dy),
+                Pos2::new(c.x + dx, c.y),
+                Pos2::new(c.x, c.y + dy),
+                Pos2::new(c.x - dx, c.y),
+            ],
+            ink,
+            Stroke::NONE,
+        ));
+    }
+}
+
+/// Sparkles in a box of half-width `r` around `c`: a large star low on
+/// the left and a small one high on the right. What says "ask" where a
+/// magnifier says "search".
+pub(crate) fn sparkles(painter: &egui::Painter, c: Pos2, ink: Color32, r: f32) {
+    sparkle(
+        painter,
+        Pos2::new(c.x - r * 0.2, c.y + r * 0.15),
+        r * 0.8,
+        ink,
+    );
+    sparkle(
+        painter,
+        Pos2::new(c.x + r * 0.62, c.y - r * 0.6),
+        r * 0.38,
+        ink,
+    );
 }
 
 /// A magnifier at `c`: a ring of radius `r` with a handle running down
@@ -1929,6 +2113,29 @@ fn settings_view(
                 ui.end_row();
             }
 
+            // Which of the two the field above asks, on Shift twice.
+            ui.label("Ask with");
+            ui.vertical(|ui| {
+                let preferred = context.launch_settings.preferred_ask();
+                ui.horizontal_wrapped(|ui| {
+                    for kind in [WidgetKind::AskClaude, WidgetKind::AskChatGpt] {
+                        let name = ask_name(context.launch_settings, kind);
+                        if ui.selectable_label(preferred == kind, name).clicked() {
+                            commands.push(Command::SetPreferredAsk(kind));
+                        }
+                    }
+                });
+                ui.label(
+                    RichText::new(
+                        "Tap Shift twice in the field above to ask instead of search, and \
+                         twice again to go back.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
+            ui.end_row();
+
             ui.label("Weather");
             ui.vertical(|ui| {
                 match &context.launch_settings.weather.location {
@@ -2041,6 +2248,92 @@ fn settings_view(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shift_tapped_twice_is_heard_once_and_only_when_alone() {
+        let mut shift = DoubleShift::default();
+        // Down, up, down, up: the second release is the pair.
+        assert!(!shift.frame(true, false, 0.00));
+        assert!(!shift.frame(false, false, 0.08));
+        assert!(!shift.frame(true, false, 0.20));
+        assert!(shift.frame(false, false, 0.28));
+        // The pair is spent: a third tap starts over.
+        assert!(!shift.frame(true, false, 0.40));
+        assert!(!shift.frame(false, false, 0.48));
+        assert!(!shift.frame(true, false, 0.60));
+        assert!(shift.frame(false, false, 0.66));
+    }
+
+    #[test]
+    fn a_capital_a_long_hold_and_a_slow_pair_are_no_double_tap() {
+        // Shift held to type a capital, then tapped once.
+        let mut shift = DoubleShift::default();
+        assert!(!shift.frame(true, false, 0.00));
+        assert!(!shift.frame(true, true, 0.05));
+        assert!(!shift.frame(false, false, 0.10));
+        assert!(!shift.frame(true, false, 0.20));
+        assert!(!shift.frame(false, false, 0.28));
+        // A key between the two taps breaks the pair.
+        let mut shift = DoubleShift::default();
+        assert!(!shift.frame(true, false, 0.00));
+        assert!(!shift.frame(false, false, 0.08));
+        assert!(!shift.frame(false, true, 0.12));
+        assert!(!shift.frame(true, false, 0.20));
+        assert!(!shift.frame(false, false, 0.28));
+        // A hold is not a tap.
+        let mut shift = DoubleShift::default();
+        assert!(!shift.frame(true, false, 0.0));
+        assert!(!shift.frame(false, false, 0.9));
+        assert!(!shift.frame(true, false, 1.0));
+        assert!(!shift.frame(false, false, 1.1));
+        // Two taps too far apart are two taps.
+        let mut shift = DoubleShift::default();
+        assert!(!shift.frame(true, false, 0.0));
+        assert!(!shift.frame(false, false, 0.1));
+        assert!(!shift.frame(true, false, 1.0));
+        assert!(!shift.frame(false, false, 1.1));
+        // ... and the second of them can still start a pair.
+        assert!(!shift.frame(true, false, 1.3));
+        assert!(shift.frame(false, false, 1.4));
+    }
+
+    #[test]
+    fn an_asking_field_stands_for_a_question_whatever_it_reads() {
+        let mut launcher = Launcher::new();
+        launcher.asking = true;
+        let ask = WidgetKind::AskChatGpt;
+        // Empty: nothing to open.
+        assert_eq!(Head::of(&launcher, ask), None);
+        // An address is a question too while the field asks.
+        launcher.typed = " docs.rs ".to_string();
+        let head = Head::of(&launcher, ask).unwrap();
+        assert_eq!(
+            head,
+            Head::Ask {
+                kind: ask,
+                query: "docs.rs".to_string()
+            }
+        );
+        assert_eq!(
+            head.command(WindowId(1)),
+            Command::AskInNewTab {
+                window: WindowId(1),
+                kind: ask,
+                query: "docs.rs".to_string()
+            }
+        );
+        // Back to searching, the same text is an address again.
+        launcher.asking = false;
+        assert!(matches!(Head::of(&launcher, ask), Some(Head::Address(_))));
+    }
+
+    #[test]
+    fn the_field_asks_under_the_templates_name_or_the_widgets_label() {
+        let mut settings = LaunchSettings::default();
+        assert_eq!(ask_name(&settings, WidgetKind::AskClaude), "Claude");
+        settings.ask_chatgpt.name = "  ".to_string();
+        assert_eq!(ask_name(&settings, WidgetKind::AskChatGpt), "Ask ChatGPT");
+    }
 
     fn kinds(slots: &[Slot]) -> Vec<(WidgetKind, f32, f32, f32)> {
         slots

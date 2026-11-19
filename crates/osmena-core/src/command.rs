@@ -383,6 +383,10 @@ pub enum Command {
         kind: WidgetKind,
         template: UrlTemplate,
     },
+    /// Which question widget's template the Launch Panel's own field
+    /// asks with (`LaunchSettings::ask_with`); a kind that is no
+    /// question widget changes nothing.
+    SetPreferredAsk(WidgetKind),
     /// Find places named `query` for the weather tile.
     LookUpPlace(String),
     /// The weather tile's place; `None` asks for one again.
@@ -1631,6 +1635,13 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
                 }
                 _ => Vec::new(),
             }
+        }
+        Command::SetPreferredAsk(kind) => {
+            if !kind.is_ask() || browser.settings.launch.ask_with == Some(*kind) {
+                return Vec::new();
+            }
+            browser.settings.launch.ask_with = Some(*kind);
+            vec![EngineAction::SaveSettings]
         }
         Command::LookUpPlace(query) => {
             let query = query.trim();
@@ -5735,6 +5746,17 @@ mod tests {
             longitude: -122.3,
             country: None,
         }
+    }
+
+    #[test]
+    fn the_preferred_question_is_saved_once_and_only_for_a_question_widget() {
+        let (mut b, _, _) = one_window();
+        let choose = Command::SetPreferredAsk(WidgetKind::AskChatGpt);
+        assert_eq!(dispatch(&mut b, &choose), vec![EngineAction::SaveSettings]);
+        assert_eq!(b.settings.launch.preferred_ask(), WidgetKind::AskChatGpt);
+        assert!(dispatch(&mut b, &choose).is_empty());
+        assert!(dispatch(&mut b, &Command::SetPreferredAsk(WidgetKind::Weather)).is_empty());
+        assert_eq!(b.settings.launch.ask_with, Some(WidgetKind::AskChatGpt));
     }
 
     #[test]

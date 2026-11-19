@@ -187,6 +187,10 @@ pub struct LaunchSettings {
     pub weather: WeatherSettings,
     /// Hosts the user took off the "Most visited" tile.
     pub hidden_sites: Vec<String>,
+    /// Which question widget's template the panel's own field asks
+    /// with, once the user has said; see
+    /// [`LaunchSettings::preferred_ask`].
+    pub ask_with: Option<WidgetKind>,
 }
 
 impl Default for LaunchSettings {
@@ -197,6 +201,7 @@ impl Default for LaunchSettings {
             ask_chatgpt: UrlTemplate::chatgpt(),
             weather: WeatherSettings::default(),
             hidden_sites: Vec::new(),
+            ask_with: None,
         }
     }
 }
@@ -242,6 +247,17 @@ impl LaunchSettings {
         }
         self.widgets = WidgetKind::ALL.to_vec();
         true
+    }
+
+    /// The question widget whose template the panel's field asks with
+    /// when it is switched from searching to asking: the one the user
+    /// chose (`ask_with`), else the question tile that comes first on
+    /// their mosaic, else Claude's.
+    pub fn preferred_ask(&self) -> WidgetKind {
+        self.ask_with
+            .filter(|kind| kind.is_ask())
+            .or_else(|| self.widgets.iter().copied().find(|kind| kind.is_ask()))
+            .unwrap_or(WidgetKind::AskClaude)
     }
 
     /// The template of a question widget; `None` for any other kind.
@@ -643,6 +659,29 @@ mod tests {
 
     fn url(s: &str) -> Url {
         Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn the_preferred_question_is_the_choice_then_the_first_tile_then_claude() {
+        let mut settings = LaunchSettings::default();
+        assert_eq!(settings.preferred_ask(), WidgetKind::AskClaude);
+        // The tile the user put first speaks for them until they say.
+        settings.move_widget(WidgetKind::AskChatGpt, 0);
+        assert_eq!(settings.preferred_ask(), WidgetKind::AskChatGpt);
+        settings.ask_with = Some(WidgetKind::AskClaude);
+        assert_eq!(settings.preferred_ask(), WidgetKind::AskClaude);
+        // A choice that is no question widget is no choice, and a
+        // mosaic without question tiles still has an answer.
+        settings.ask_with = Some(WidgetKind::Weather);
+        assert_eq!(settings.preferred_ask(), WidgetKind::AskChatGpt);
+        settings.widgets = vec![WidgetKind::Weather];
+        assert_eq!(settings.preferred_ask(), WidgetKind::AskClaude);
+        // The choice is written by name and read back.
+        settings.ask_with = Some(WidgetKind::AskChatGpt);
+        let text = toml::to_string(&settings).unwrap();
+        assert!(text.contains("ask_with = \"ask_chatgpt\""), "{text}");
+        let back: LaunchSettings = toml::from_str(&text).unwrap();
+        assert_eq!(back.preferred_ask(), WidgetKind::AskChatGpt);
     }
 
     #[test]
