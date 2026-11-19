@@ -28,6 +28,9 @@ use crate::settings::{ChromeColor, Settings};
 
 pub const PROFILES_DIR_NAME: &str = "profiles";
 pub const DEFAULT_PROFILE_NAME: &str = "default";
+/// What the name of a profile's directory inside the shared engine
+/// directory starts with ([`Profile::shared_engine_data`]).
+pub const SHARED_DATA_PREFIX: &str = "profile-";
 /// The display name of a guest profile, and the stem of its directory
 /// name (`guest`, `guest-2`, …).
 pub const GUEST_PROFILE_NAME: &str = "Guest";
@@ -580,6 +583,33 @@ impl Profile {
         self.name == DEFAULT_PROFILE_NAME
     }
 
+    /// The default profile's engine directory: the one directory an
+    /// engine that runs every profile in one process
+    /// ([`EngineInfo::profiles_in_process`]) may need to keep them all
+    /// under. This profile's own when it is the default one.
+    pub fn shared_engine_dir(&self) -> PathBuf {
+        if self.is_default() {
+            return self.engine_dir.clone();
+        }
+        let default = self.profiles_dir().join(DEFAULT_PROFILE_NAME);
+        match self.engine_dir.file_name() {
+            Some(engine) => default.join(engine),
+            None => default,
+        }
+    }
+
+    /// Where such an engine keeps this profile's own data inside
+    /// [`Profile::shared_engine_dir`], when it cannot keep it in
+    /// [`Profile::engine_dir`]: `profile-<name>`. `None` for the default
+    /// profile, whose data is the shared directory's own. Deleting a
+    /// profile removes this directory with it.
+    pub fn shared_engine_data(&self) -> Option<PathBuf> {
+        (!self.is_default()).then(|| {
+            self.shared_engine_dir()
+                .join(format!("{SHARED_DATA_PREFIX}{}", self.name))
+        })
+    }
+
     pub fn settings_path(&self) -> PathBuf {
         self.dir.join("settings.toml")
     }
@@ -815,6 +845,25 @@ mod tests {
         assert_eq!(
             p.sibling("a/b"),
             Err(ProfileError::InvalidName("a/b".to_string()))
+        );
+    }
+
+    #[test]
+    fn the_shared_engine_directory_is_the_default_profiles_and_holds_the_others() {
+        let root = PathBuf::from("/cfg");
+        let default = under(&root, "default").unwrap();
+        assert_eq!(default.shared_engine_dir(), default.engine_dir);
+        assert_eq!(default.shared_engine_data(), None);
+        let work = under(&root, "work").unwrap();
+        assert_eq!(work.shared_engine_dir(), default.engine_dir);
+        assert_eq!(
+            work.shared_engine_data(),
+            Some(default.engine_dir.join("profile-work"))
+        );
+        // A sibling resolves the same directories.
+        assert_eq!(
+            default.sibling("work").unwrap().shared_engine_data(),
+            work.shared_engine_data()
         );
     }
 

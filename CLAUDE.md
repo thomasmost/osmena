@@ -5,7 +5,11 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-11-19 (ten changes to the strip and the Launch
+_Last updated: 2026-11-19 (every open profile in one process, for an
+engine that says it can: `Shell` over one `ProfileApp` per profile,
+the single-instance handoff, `StartEngine` called per profile; see the
+status section "2026-11-19, one process"; before that, the same day,
+ten changes to the strip and the Launch
 Panel, see the status section of that date: the "+" and a drag area
 outside the scrolling tabs, tabs down to 40 points with the active one
 at 64, the fade at a scrolled end, the recording mark, the field's
@@ -49,6 +53,15 @@ crates, dependencies pointing only downwards:
 `--exit-after <seconds>` that quits through the normal path after
 logging the open tabs, for smoke tests, `run`). `tools/osmena-xtask` is a
 library the browsers' `xtask` binaries call for icon generation.
+
+Inside `osmena-shell` the process and a profile are two things.
+`shell.rs` is the process: `Shell` is winit's application handler and
+owns the open profiles, the engine's start closure, the menu bar, the
+updater and the single-instance lock (`instance.rs`). `app.rs` is one
+open profile: `ProfileApp` owns that profile's `Browser`, its engine,
+its browser windows and settings window, and everything written to its
+directory. `load.rs` reads a profile off disk into a model, at start
+and for each profile opened later.
 
 Data flow: the chrome and the keymap emit `Command`s; `osmena_core::dispatch`
 updates the model and returns `EngineAction`s, which the shell forwards to
@@ -465,6 +478,49 @@ No engine is needed; the workspace builds in under a minute.
   (`Prompt::ManageProfiles`, drawn by `draw_manage_profiles_prompt`)
   issue the same commands; deletion lives in that dialog and the Edit
   dialog, not in the menu.
+- **A process hosts profiles; a profile never reaches past itself.**
+  `EngineInfo::profiles_in_process` picks the shape: true, and `Shell`
+  holds a `ProfileApp` per open profile, each with an engine from
+  another call of the start closure; false, and it holds exactly one
+  and "another profile" is `process::open_in_profile`. Either way a
+  `ProfileApp` knows only its own model, windows and engine. What it
+  needs of the process it asks for with a `Request` (`OpenProfile`,
+  `HandOver`, `QuitAll`, `ProfilesChanged`), which `Shell::after_turn`
+  carries out once the profile's turn is over; that is also where the
+  update status is kept the same in every profile (whichever moved it
+  wins) and where a profile whose windows are gone is taken away
+  (`reap`, then `ProfileApp::shutdown`: files written, windows before
+  engine, the claim released). `EngineAction::Quit` therefore means
+  "this profile is over", never "exit the event loop": only `Shell`
+  exits, when the last profile went, and it drops the start closure
+  there, inside the loop, after every engine. `Command::Quit` is the
+  browser's: the profile that gets it pushes `QuitAll` and the others
+  each run their own Quit, guard included (`quit_relayed`). Events
+  find their profile by the window (`owns_window`); what names no
+  window (a link from another application, a menu-bar pick, a later
+  start with no `--profile`) goes to `Shell::front`, the profile with
+  the keyboard, else the one that last had it. Core ids are per
+  `Browser`, so two profiles both have a `WindowId(1)`: never look a
+  core id up across profiles. `Shared` is what every `ProfileApp` is
+  handed: the event-loop proxy, the updater, the set of profiles open
+  here (a profile open in this process has this process's pid in its
+  `running.pid`, which `profiles::in_use` reads as "not another
+  process", so "is it open" must ask this set too) and the names
+  retired in this run. An engine that keeps running after a profile
+  closes may hold that profile's data in memory and write its
+  directory once more: so a profile deleted while open retires its
+  name until the process ends (`Shared::retired`, and
+  `profiles::engine_data_names` for what is on disk), is deleted again
+  when the last engine has gone (`Shell::end_engines`), and what a
+  crash left is swept at the next start, before any engine
+  (`profiles::sweep_engine_data`). One browser process per data
+  directory is `instance.rs` (a `File::try_lock` lock, a loopback
+  port, a token in a 0600 file); `run` claims it before loading
+  anything and a later start forwards `Relaunch` and exits. Anything
+  scripted passes `--data-dir`, or it lands in the browser the user
+  has open. `open-profiles.toml` (written at Quit, when the last
+  window closes, and when the system ends the application) is what a
+  start without `--profile` opens.
 - **The history is the model's, written by the shell.** `apply` records
   a visit when a load completes and a title when one arrives, answering
   `EngineAction::SaveHistory`; the shell writes `history.toml` a few
@@ -589,6 +645,91 @@ No engine is needed; the workspace builds in under a minute.
 - Commit to `main` unless asked for a branch. Conventional Commits.
 - The browsers' own docs (`README.md`, `CLAUDE.md`) describe what each one
   adds; the shared behaviour is documented here only.
+
+## Status and handoff (2026-11-19, one process)
+
+The owner's report: on macOS each Nautilus profile was an application
+of its own, so Cmd+` could not move between profiles. The cause was
+the design, a browser process per profile (`process::open_in_profile`).
+Now an engine that can (`EngineInfo::profiles_in_process`) has every
+open profile in one process; the convention bullet "A process hosts
+profiles" and the README's "Profiles and processes" say how. Nautilus
+does; Paladin cannot (Servo's options are the process's) and keeps the
+old shape, which is the same code as before behind the flag.
+
+Made on the branch `single-process` in a worktree beside Nautilus's and
+Paladin's (`.worktrees/single-process/` in the parent workspace) and
+merged to `main` on 2026-11-20 at the owner's word; both browsers pin
+that commit in the same change set.
+
+What changed, by file: `shell.rs` (new: `Shell`, the application
+handler, with what `App` held for the process), `app.rs` (`App` became
+`ProfileApp`, one open profile; `Request`, `Shared`), `load.rs` (new:
+`run`'s reading of a profile, reused for profiles opened later),
+`instance.rs` (new: the single-instance lock and handoff), `lib.rs`
+(`run`, `StartEngine`, `CliArgs::profile` as an option, `--data-dir`),
+`profiles.rs` (the open-profiles list, the shared engine data on
+delete, the sweep, retired names), `update.rs` (`install` takes the
+relaunch arguments), `launch/mod.rs` (answers carry their profile),
+and in core `EngineInfo::profiles_in_process`,
+`Profile::shared_engine_dir` and `shared_engine_data`.
+
+Verified: `cargo test --workspace --features osmena-engine/glutin`
+(541 tests, one ignored: the lock and handoff over a real loopback
+port, a wrong token refused, a stale file claiming nothing, the token
+file's mode; the open-profiles list; deletion with the shared data;
+the sweep and the names not reused; the shared directories), clippy
+with `-D warnings`, `cargo fmt --all --check`. In Nautilus's bundle on
+the Mac (Apple silicon), built against this branch, every launch on a
+scratch `--data-dir`, judged by logs, exit statuses and the window
+list (`CGWindowListCopyWindowInfo`, owner pid):
+
+- A start on the default profile and a later start with `--profile
+  work <url>`: the second exited 0 at once, the first logged "another
+  start handed over" and opened the profile; two windows, one pid,
+  both `running.pid` files naming it; a later start with no arguments
+  opened a new window in the profile in front. `--exit-after` logged
+  the tabs of both profiles and both closed; exit 0; no process left.
+- The two profiles kept their own `localStorage` and cookie on the
+  same site, across two runs.
+- With a temporary scripted hook in `Shell` (since removed): a second
+  profile opened, closed (the first kept running) and opened again; the
+  first closed with the second left; a guest opened and closed twice
+  (the second named `guest-2`, nothing of either on disk after the
+  exit); a profile that was not open deleted, its shared data with it;
+  the only open profile deleted, the default one opening in its place.
+- A start with no `--profile` after a quit of two profiles: with
+  `--restore` both came back with their windows; without it only the
+  one that had been in front (the other does not restore its windows).
+
+Not verified: Cmd+` itself and anything else by hand (no Accessibility
+for scripted keys on this Mac: the windows are one process's, which is
+what the cycle needs, but nobody pressed the key); the menu bar
+following the profile in front, by eye; a menu-bar pick landing in the
+right profile; Quit by Cmd+Q or the Dock with two profiles (the same
+`Command::Quit` and `exiting` paths, reached here by `--exit-after`);
+the quit guard with downloads going in one of two profiles; a link
+from another application with two profiles open; the settings window
+of one profile while another is open; tab drags with two profiles'
+windows on screen (a drop on another profile's window is expected to
+make a new window in the tab's own profile); the update's restart
+(`--restore` with no `--profile`); Windows entirely (the lock, the
+loopback handoff and `--data-dir` are plain `std`, the PowerShell
+relaunch line changed shape). Paladin, the engine with the flag off:
+type-checked, linted, and a debug build run as two processes on two
+profiles at once, each loading its page and exiting 0, with no lock
+and no list written; its "open in another profile" was not clicked.
+
+Known and left: a start that names no profile opens only the profile
+that was in front unless the others restore their windows, as Chromium
+does; two starts in the same instant both find the lock free only if
+the system's lock is broken, so that race is not handled further; the
+`Request::QuitAll` list is written before each profile's own guard
+runs, so a Quit that one profile's download prompt cancels leaves the
+list naming them all until the browser does quit (it is rewritten
+then). Open item 2 (an integration test of the shell with a fake
+engine) would now have real work to do: `Shell::after_turn`,
+`carry_out` and `reap` have no unit tests, only the runs above.
 
 ## Status and handoff (2026-11-19)
 

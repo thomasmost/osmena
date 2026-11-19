@@ -3,10 +3,12 @@
 //! this is where their directories are made and removed.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use osmena_core::profile::{DEFAULT_PROFILE_NAME, GUEST_PROFILE_NAME, directory_name_for};
+use osmena_core::profile::{
+    DEFAULT_PROFILE_NAME, GUEST_PROFILE_NAME, SHARED_DATA_PREFIX, directory_name_for,
+};
 use osmena_core::{Avatar, Brand, ChromeColor, Profile, ProfileForm, Settings};
 
 /// How old a guest directory must be before a sweep may take it for
@@ -15,12 +17,81 @@ use osmena_core::{Avatar, Brand, ChromeColor, Profile, ProfileForm, Settings};
 /// sweeping.
 const GUEST_GRACE: Duration = Duration::from_secs(60);
 
+/// The file, in the brand's data directory, that lists the profiles
+/// open when the browser last quit.
+const OPEN_LIST_NAME: &str = "open-profiles.toml";
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct OpenList {
+    #[serde(default)]
+    profiles: Vec<String>,
+}
+
+/// The brand's data directory: the one that holds the profiles
+/// directory `profile` is in.
+pub fn brand_dir(profile: &Profile) -> PathBuf {
+    let profiles = profile.profiles_dir();
+    profiles.parent().map(Path::to_path_buf).unwrap_or(profiles)
+}
+
+/// The directory names of the profiles that were open when the browser
+/// last quit, the one in front first: what a start that names no
+/// profile opens again. Only those `current` still finds beside it,
+/// and no guests; empty when nothing was written or it cannot be read.
+pub fn read_open(current: &Profile) -> Vec<String> {
+    let path = brand_dir(current).join(OPEN_LIST_NAME);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let list: OpenList = match toml::from_str(&text) {
+        Ok(list) => list,
+        Err(e) => {
+            log::warn!("{e} (in {}); opening the default profile", path.display());
+            return Vec::new();
+        }
+    };
+    let mut known = current.others();
+    known.push(current.name.clone());
+    let mut names: Vec<String> = Vec::new();
+    for name in list.profiles {
+        if known.contains(&name) && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Write down the profiles open now (the one in front first), for the
+/// next start.
+pub fn write_open(current: &Profile, names: &[String]) {
+    let path = brand_dir(current).join(OPEN_LIST_NAME);
+    let list = OpenList {
+        profiles: names.to_vec(),
+    };
+    let written = toml::to_string(&list)
+        .map_err(io::Error::other)
+        .and_then(|text| std::fs::write(&path, text));
+    if let Err(e) = written {
+        log::warn!("cannot write {}: {e}", path.display());
+    }
+}
+
 /// Make the profile `form` describes beside `current`: a directory
 /// named after the form's name ([`directory_name_for`]) holding a
 /// `settings.toml` of the brand's defaults with the form's name, colour,
-/// avatar and flags. Returns the new profile.
-pub fn create(current: &Profile, brand: &Brand, form: &ProfileForm) -> Result<Profile, String> {
+/// avatar and flags. Returns the new profile. `retired` are the names
+/// of profiles deleted while this process ran them: the engine may
+/// still have their data in memory, so none of them is given out again
+/// in this run.
+pub fn create(
+    current: &Profile,
+    brand: &Brand,
+    form: &ProfileForm,
+    retired: &[String],
+) -> Result<Profile, String> {
     let mut taken = current.others();
+    taken.extend(engine_data_names(current));
+    taken.extend(retired.iter().cloned());
     taken.push(current.name.clone());
     taken.push(DEFAULT_PROFILE_NAME.to_string());
     let dir = directory_name_for(&form.name, &taken);
@@ -47,9 +118,15 @@ pub fn create(current: &Profile, brand: &Brand, form: &ProfileForm) -> Result<Pr
 /// brand's defaults named "Guest" on a neutral colour. The browser
 /// started for it deletes it on its way out; [`sweep_guests`] takes
 /// care of one whose browser never got that far.
-pub fn create_guest(current: &Profile, brand: &Brand) -> Result<Profile, String> {
+pub fn create_guest(
+    current: &Profile,
+    brand: &Brand,
+    retired: &[String],
+) -> Result<Profile, String> {
     let mut taken = current.others();
     taken.extend(current.guests());
+    taken.extend(engine_data_names(current));
+    taken.extend(retired.iter().cloned());
     taken.push(current.name.clone());
     taken.push(DEFAULT_PROFILE_NAME.to_string());
     let dir = directory_name_for(GUEST_PROFILE_NAME, &taken);
@@ -72,6 +149,44 @@ pub fn create_guest(current: &Profile, brand: &Brand) -> Result<Profile, String>
         guest: true,
         ..profile
     })
+}
+
+/// The profile names the shared engine directory holds data for
+/// ([`Profile::shared_engine_data`]). A name with data there and no
+/// profile is one whose profile was deleted while the engine still had
+/// its data open: a new profile must not take the name, or it would
+/// start with what the deleted one left.
+fn engine_data_names(current: &Profile) -> Vec<String> {
+    std::fs::read_dir(current.shared_engine_dir())
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .filter_map(|name| name.strip_prefix(SHARED_DATA_PREFIX).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Remove what the shared engine directory still holds of profiles that
+/// are gone: an engine that runs every profile in one process may write
+/// a deleted profile's data once more as it lets go of it. Call it
+/// before any engine starts, when nothing is open.
+pub fn sweep_engine_data(current: &Profile) {
+    let profiles = current.profiles_dir();
+    for name in engine_data_names(current) {
+        if profiles.join(&name).is_dir() {
+            continue;
+        }
+        let dir = current
+            .shared_engine_dir()
+            .join(format!("{SHARED_DATA_PREFIX}{name}"));
+        match remove(&dir) {
+            Ok(()) => log::info!("removed what was left of profile {name:?}"),
+            Err(e) => log::warn!("cannot remove {}: {e}", dir.display()),
+        }
+    }
 }
 
 /// Remove the guest profiles beside `current` (not `current` itself)
@@ -108,9 +223,33 @@ pub fn sweep_guests(current: &Profile) {
     }
 }
 
-/// Remove the profile directory with everything in it.
+/// Everything on disk that is `profile`'s: its directory, and what an
+/// engine that keeps every profile under one directory keeps of it
+/// there ([`Profile::shared_engine_data`]).
+fn directories(profile: &Profile) -> Vec<PathBuf> {
+    let mut dirs = vec![profile.dir.clone()];
+    dirs.extend(profile.shared_engine_data());
+    dirs
+}
+
+/// Remove `dir` with everything in it; one that is not there is removed.
+fn remove(dir: &Path) -> io::Result<()> {
+    match std::fs::remove_dir_all(dir) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// Remove the profile directory with everything in it, and the engine's
+/// data for the profile kept outside it.
 pub fn delete(profile: &Profile) -> io::Result<()> {
-    std::fs::remove_dir_all(&profile.dir)
+    let mut outcome = Ok(());
+    for dir in directories(profile) {
+        if let Err(e) = remove(&dir) {
+            outcome = Err(e);
+        }
+    }
+    outcome
 }
 
 /// How long [`delete_at_exit`] keeps trying while the engine that just
@@ -135,29 +274,26 @@ pub enum Deletion {
 /// removes the directory itself.
 pub fn delete_at_exit(profile: &Profile) -> Result<Deletion, String> {
     let deadline = std::time::Instant::now() + DELETE_PATIENCE;
-    let mut last = loop {
+    let last = loop {
         match delete(profile) {
             Ok(()) => return Ok(Deletion::Removed),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Deletion::Removed),
-            Err(e) if std::time::Instant::now() < deadline => {
+            Err(_) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(200));
-                let _ = e;
             }
             Err(e) => break e,
         }
     };
-    if !profile.dir.exists() {
-        return Ok(Deletion::Removed);
-    }
-    match remove_after_exit(&profile.dir) {
-        Ok(()) => Ok(Deletion::Deferred),
-        Err(e) => {
-            last = io::Error::new(
-                last.kind(),
-                format!("{last}; and no helper could be started: {e}"),
-            );
-            Err(last.to_string())
+    // What is still there (the profile's own directory usually went: the
+    // engine holds files in its own).
+    let mut failed = None;
+    for dir in directories(profile).into_iter().filter(|dir| dir.exists()) {
+        if let Err(e) = remove_after_exit(&dir) {
+            failed = Some(e);
         }
+    }
+    match failed {
+        None => Ok(Deletion::Deferred),
+        Some(e) => Err(format!("{last}; and no helper could be started: {e}")),
     }
 }
 
@@ -316,6 +452,7 @@ mod tests {
         wheel_line_px: 40.0,
         extensions: None,
         page_tools: PageTools::NONE,
+        profiles_in_process: false,
     };
 
     #[test]
@@ -323,7 +460,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let current = Profile::resolve_under(root.path(), &BRAND, &ENGINE, "default").unwrap();
         current.ensure_dirs().unwrap();
-        let guest = create_guest(&current, &BRAND).unwrap();
+        let guest = create_guest(&current, &BRAND, &[]).unwrap();
         assert_eq!(guest.name, "guest");
         assert!(guest.guest);
         assert!(guest.guest_marker_path().is_file());
@@ -340,7 +477,7 @@ mod tests {
         );
         // Not a profile to list; a second guest takes the next name.
         assert!(current.others().is_empty());
-        let second = create_guest(&current, &BRAND).unwrap();
+        let second = create_guest(&current, &BRAND, &[]).unwrap();
         assert_eq!(second.name, "guest-2");
         assert_eq!(current.guests(), vec!["guest", "guest-2"]);
 
@@ -376,7 +513,7 @@ mod tests {
             share_bookmarks: true,
             copy_extensions: true,
         };
-        let made = create(&current, &BRAND, &form).unwrap();
+        let made = create(&current, &BRAND, &form, &[]).unwrap();
         assert_eq!(made.name, "work-stuff");
         assert_eq!(
             made.dir,
@@ -394,11 +531,116 @@ mod tests {
         assert!(settings.profile.copy_extensions);
         assert_eq!(settings.homepage, "https://home.example/");
         // The same name again gets the next directory.
-        let again = create(&current, &BRAND, &form).unwrap();
+        let again = create(&current, &BRAND, &form, &[]).unwrap();
         assert_eq!(again.name, "work-stuff-2");
         assert_eq!(current.others(), vec!["work-stuff", "work-stuff-2"]);
         delete(&again).unwrap();
         assert_eq!(current.others(), vec!["work-stuff"]);
+    }
+
+    #[test]
+    fn the_open_profiles_are_read_back_in_order_without_the_ones_that_are_gone() {
+        let root = tempfile::tempdir().unwrap();
+        let current = Profile::resolve_under(root.path(), &BRAND, &ENGINE, "default").unwrap();
+        current.ensure_dirs().unwrap();
+        // Nothing written yet.
+        assert!(read_open(&current).is_empty());
+        let work = current.sibling("work").unwrap();
+        work.ensure_dirs().unwrap();
+        let guest = create_guest(&current, &BRAND, &[]).unwrap();
+        write_open(
+            &work,
+            &[
+                "work".to_string(),
+                "gone".to_string(),
+                guest.name.clone(),
+                "default".to_string(),
+                "work".to_string(),
+            ],
+        );
+        assert_eq!(
+            brand_dir(&current),
+            root.path().join("Test"),
+            "beside the profiles directory"
+        );
+        // Whichever profile reads it: a deleted profile, a guest and a
+        // repeat are left out.
+        assert_eq!(read_open(&current), ["work", "default"]);
+        assert_eq!(read_open(&work), ["work", "default"]);
+        std::fs::write(
+            root.path().join("Test").join(OPEN_LIST_NAME),
+            "profiles = 3",
+        )
+        .unwrap();
+        assert!(read_open(&current).is_empty());
+    }
+
+    #[test]
+    fn deleting_a_profile_takes_its_data_in_the_shared_engine_directory_too() {
+        let root = tempfile::tempdir().unwrap();
+        let default = Profile::resolve_under(root.path(), &BRAND, &ENGINE, "default").unwrap();
+        default.ensure_dirs().unwrap();
+        let work = default.sibling("work").unwrap();
+        work.ensure_dirs().unwrap();
+        let shared = work.shared_engine_data().unwrap();
+        std::fs::create_dir_all(shared.join("Cache")).unwrap();
+        assert!(shared.starts_with(&default.engine_dir));
+        delete(&work).unwrap();
+        assert!(!work.dir.exists());
+        assert!(!shared.exists());
+        assert!(default.engine_dir.is_dir(), "the shared directory stays");
+        // A profile with nothing there, and one already gone, delete
+        // cleanly; on the way out likewise.
+        let other = default.sibling("other").unwrap();
+        other.ensure_dirs().unwrap();
+        assert_eq!(delete_at_exit(&other), Ok(Deletion::Removed));
+        assert_eq!(delete_at_exit(&other), Ok(Deletion::Removed));
+    }
+
+    #[test]
+    fn what_a_deleted_profile_left_in_the_shared_directory_is_swept_and_its_name_not_reused() {
+        let root = tempfile::tempdir().unwrap();
+        let default = Profile::resolve_under(root.path(), &BRAND, &ENGINE, "default").unwrap();
+        default.ensure_dirs().unwrap();
+        let work = default.sibling("work").unwrap();
+        work.ensure_dirs().unwrap();
+        let kept = work.shared_engine_data().unwrap();
+        std::fs::create_dir_all(&kept).unwrap();
+        // A guest and a profile that are gone, whose data the engine
+        // wrote again after the deletion.
+        let left_by_guest = default.engine_dir.join("profile-guest");
+        let left_by_side = default.engine_dir.join("profile-side");
+        std::fs::create_dir_all(left_by_guest.join("Cache")).unwrap();
+        std::fs::create_dir_all(&left_by_side).unwrap();
+        // Until the sweep, neither name is given out again.
+        let guest = create_guest(&default, &BRAND, &[]).unwrap();
+        assert_eq!(guest.name, "guest-2");
+        let form = ProfileForm {
+            name: "Side".to_string(),
+            color: ChromeColor::Plum,
+            avatar: Avatar::Whale,
+            share_bookmarks: false,
+            copy_extensions: false,
+        };
+        assert_eq!(create(&default, &BRAND, &form, &[]).unwrap().name, "side-2");
+        // Nor a name this run retired, whatever is on disk.
+        let retired = ["side-3".to_string(), "guest-3".to_string()];
+        assert_eq!(
+            create(&default, &BRAND, &form, &retired).unwrap().name,
+            "side-4"
+        );
+        assert_eq!(
+            create_guest(&default, &BRAND, &retired).unwrap().name,
+            "guest-4"
+        );
+        sweep_engine_data(&default);
+        assert!(!left_by_guest.exists());
+        assert!(!left_by_side.exists());
+        assert!(kept.is_dir(), "a profile that is there keeps its data");
+        // Other things in the shared directory are not profiles' data.
+        std::fs::create_dir_all(default.engine_dir.join("Default")).unwrap();
+        sweep_engine_data(&default);
+        assert!(default.engine_dir.join("Default").is_dir());
     }
 
     #[test]

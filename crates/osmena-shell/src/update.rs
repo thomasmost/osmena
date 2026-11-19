@@ -286,16 +286,17 @@ impl Updater {
     }
 
     /// Prepare the installation of `update` from `file`, to run once this
-    /// process has exited, and the restart into the same profile. The
-    /// caller quits on `Ok`.
+    /// process has exited, and the restart with the arguments
+    /// `relaunch` (the profile to come back to, `--restore`). The caller
+    /// quits on `Ok`.
     pub fn install(
         &self,
         update: &AvailableUpdate,
         file: &Path,
-        profile: &str,
+        relaunch: &[String],
     ) -> Result<(), String> {
         log::info!("installing {} from {}", update.id, file.display());
-        install_platform(self, update, file, profile)
+        install_platform(self, update, file, relaunch)
     }
 }
 
@@ -342,7 +343,7 @@ fn install_platform(
     _updater: &Updater,
     _update: &AvailableUpdate,
     file: &Path,
-    profile: &str,
+    relaunch: &[String],
 ) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW};
@@ -356,15 +357,16 @@ fn install_platform(
         .join("powershell.exe");
     // A PowerShell single-quoted string: only the quote itself escapes.
     let quote = |text: &str| format!("'{}'", text.replace('\'', "''"));
+    let arguments: Vec<String> = relaunch.iter().map(|a| quote(a)).collect();
     let script = format!(
         "$ErrorActionPreference = 'SilentlyContinue'; \
          Wait-Process -Id {pid}; \
          Start-Process -FilePath {installer} -ArgumentList '/S' -Wait; \
-         Start-Process -FilePath {exe} -ArgumentList '--profile', {profile}, '--restore'",
+         Start-Process -FilePath {exe} -ArgumentList {arguments}",
         pid = std::process::id(),
         installer = quote(&file.to_string_lossy()),
         exe = quote(&exe.to_string_lossy()),
-        profile = quote(profile),
+        arguments = arguments.join(", "),
     );
     log::info!("update helper: {script}");
     std::process::Command::new(powershell)
@@ -392,7 +394,7 @@ fn install_platform(
     updater: &Updater,
     update: &AvailableUpdate,
     file: &Path,
-    profile: &str,
+    relaunch: &[String],
 ) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot find this executable: {e}"))?;
     let app = exe
@@ -448,13 +450,14 @@ fn install_platform(
     std::process::Command::new("sh")
         .arg("-c")
         .arg(
-            "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; \
-             open -n \"$2\" --args --profile \"$3\" --restore",
+            "pid=\"$1\"; app=\"$2\"; shift 2; \
+             while kill -0 \"$pid\" 2>/dev/null; do sleep 0.2; done; \
+             open -n \"$app\" --args \"$@\"",
         )
         .arg("sh")
         .arg(std::process::id().to_string())
         .arg(&app)
-        .arg(profile)
+        .args(relaunch)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -496,7 +499,7 @@ fn install_platform(
     _updater: &Updater,
     _update: &AvailableUpdate,
     _file: &Path,
-    _profile: &str,
+    _relaunch: &[String],
 ) -> Result<(), String> {
     Err("installing updates is not supported on this platform".to_string())
 }

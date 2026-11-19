@@ -4,6 +4,70 @@ All notable changes to the osmena crates. The crates version together.
 
 ## Unreleased
 
+### Changed
+
+- Every open profile can run in one process. An engine says so with the
+  new `EngineInfo::profiles_in_process` (a required field: every
+  `EngineInfo` literal needs it; `false` keeps a profile a process, as
+  before). When it is true, opening another profile (the Profiles
+  menu, "Open in profile", a new or guest profile) opens it in the
+  running process with an engine, a model and windows of its own, so
+  all profiles' windows belong to one application: one Dock icon and
+  one menu bar on macOS (the bar follows the profile in front), and
+  the system's window cycling goes through all of them. A profile that
+  is open already comes to the front instead of starting again.
+  Closing a profile's last window closes that profile and leaves the
+  others; the browser quits with the last one. Quit quits every open
+  profile, each through its own guard for downloads still going.
+- For a browser: `StartEngine` is now `Box<dyn FnMut(&Profile,
+  Arc<dyn Waker>) -> Result<E, EngineError>>`. It takes the profile
+  (where it took the engine directory, which is `profile.engine_dir`)
+  and, with `profiles_in_process`, is called once for each profile
+  opened, while earlier engines live. Every engine is dropped before
+  the closure is, inside the event loop: a runtime the engines share
+  goes in the closure. `Engine::spin` is called on each open engine
+  after every event. `Profile::shared_engine_dir` and
+  `Profile::shared_engine_data` name the one directory such an engine
+  may keep every profile under and a profile's part of it
+  (`profile-<name>`); deleting a profile removes that too.
+- With `profiles_in_process`, the browser is one process per data
+  directory: a second start hands its command line (the profile, the
+  addresses, `--restore`) to the running browser over a loopback port
+  and exits with status 0, and the running one opens them, or a new
+  window when no address was given. The lock is `instance.lock` in the
+  brand's data directory, with the port and a token in `instance.toml`
+  (readable by the user alone).
+- `--profile` has no default any more (`CliArgs::profile` is an
+  `Option<String>`). Without it, a browser that runs profiles together
+  opens the profile that was in front at the last quit, and behind it
+  the others that were open then, those whose settings bring their
+  windows back (all of them with `--restore`); the list is
+  `open-profiles.toml` in the brand's data directory. With nothing to
+  go by, and for any other engine, it is the default profile as
+  before.
+- The update's restart brings back every profile that was open (it
+  passes `--restore` and no `--profile`) when they share the process.
+- The minimum Rust version is 1.89 (the single-instance lock uses
+  `File::try_lock`).
+
+### Added
+
+- `--data-dir <dir>` (hidden): every profile under `<dir>` instead of
+  the per-user data directory, so a build can run beside the installed
+  browser with its own profiles and its own process. Scripted runs
+  should pass it: without it a launch is handed to the browser the
+  user has open.
+
+### Fixed
+
+- A guest profile's name, and the name of any profile deleted while it
+  was open, is not given to a new profile until the browser has quit,
+  and what the engine wrote of it after the deletion is removed when
+  the last engine has gone and swept at the next start
+  (`profiles::sweep_engine_data`). An engine that keeps running after
+  a profile closes may still hold that profile's data in memory, and
+  may write its directory once more as it lets go.
+
 ### Added
 
 - A tab whose page is using the microphone or the camera carries a

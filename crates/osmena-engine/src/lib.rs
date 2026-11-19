@@ -385,9 +385,14 @@ pub trait TabHost {
     fn set_view_origin(&mut self, _view: TabId, _x: i32, _y: i32) {}
 }
 
-/// One engine instance, one per process. The shell builds it through a
-/// closure the browser supplies (engines differ in their options), then
-/// spins it from the event loop and drains its events into the model.
+/// One profile's engine. The shell builds it through a closure the
+/// browser supplies (engines differ in their options), then spins it
+/// from the event loop and drains its events into the profile's model.
+/// There is one per process, or, for an engine whose
+/// `EngineInfo::profiles_in_process` is true, one per open profile in
+/// the same process: then [`Engine::spin`] is called on each of them
+/// after every event, and an event an engine reports must be of its
+/// own profile's tabs.
 pub trait Engine: 'static {
     type Surface: Surface;
     type Host: TabHost;

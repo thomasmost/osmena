@@ -73,6 +73,9 @@ pub static INFO: EngineInfo = EngineInfo {
         store_url: "https://chromewebstore.google.com/",
         store_item_id: web_store_item_id,
     }),
+    // One process runs every open profile (see "Profiles and
+    // processes" below); `false` makes each profile a process.
+    profiles_in_process: true,
 };
 
 // In main, after the engine-specific preamble (helper-process dispatch,
@@ -81,9 +84,48 @@ osmena_shell::run(osmena_shell::Launch {
     brand: &BRAND,
     engine: &nautilus_engine::INFO,
     args: cli.base,
-    start_engine: Box::new(|dir, waker| nautilus_engine::Engine::new(dir, waker)),
+    // Called for each profile the shell opens: once, or once per open
+    // profile when `profiles_in_process` is true.
+    start_engine: Box::new(move |profile, waker| chromium.start(profile, waker)),
 })
 ```
+
+### Profiles and processes
+
+`EngineInfo::profiles_in_process` says which of two shapes the browser
+has.
+
+- **True: one process, every profile.** The shell calls `start_engine`
+  again for each profile it opens, while the engines of the profiles
+  opened before still live, and keeps one `Browser` model, one engine
+  and one set of windows per open profile. All of them are windows of
+  the one application: on macOS they share the Dock icon, the menu bar
+  (which follows the profile in front) and the window cycle. Closing a
+  profile's last window drops that profile's engine and leaves the
+  others; the process ends with the last one. Every engine is dropped
+  before the closure, inside the event loop, so what the engines share
+  (a runtime that may start once per process) belongs in the closure
+  and shuts down in its `Drop`. `spin` is called on every open engine
+  after each event, so an engine whose work is one loop for the whole
+  process runs it from each. A second start of the browser does not
+  become a second process: the first holds a lock in the brand's data
+  directory (`instance.lock`, with `instance.toml` beside it naming a
+  loopback port and a token only the user can read) and the later one
+  sends its command line there and exits; the running browser opens
+  the profile (or brings it forward) with the addresses as tabs, or a
+  new window when none were given. `Profile::shared_engine_dir` (the
+  default profile's engine directory) is where such an engine may have
+  to keep every profile, and `Profile::shared_engine_data`
+  (`profile-<name>` inside it) one profile's part of it; the shell
+  removes that with the profile.
+- **False: one profile, one process.** `start_engine` is called once;
+  "open in another profile" starts the executable again with
+  `--profile`, and nothing above applies.
+
+`--data-dir <dir>` (hidden) keeps every profile under `<dir>` instead of
+the per-user data directory: a browser apart from the installed one,
+with its own lock and its own process, for scripted runs and for trying
+a build beside the one in use.
 
 The engine contract, in `osmena-engine`:
 
@@ -440,7 +482,9 @@ The engine contract, in `osmena-engine`:
   avatar. The toolbar ends in the avatar; its menu, the same Profiles
   menu the macOS menu bar has, is shaped like Chromium's: the current
   profile and "Edit…", the other profiles under an "Other <brand>
-  Profiles" heading (each starts a browser for it: a profile is a
+  Profiles" heading (each opens that profile's window, or brings it
+  forward when it is open: with an engine that runs them together the
+  profiles are windows of one application, otherwise each is a
   process), then "Add <brand> Profile…", "Open Guest Profile" and
   "Manage Profiles…" (a dialog with a row per profile: open, edit or
   delete it, and the two ways to add one). The dialog asks for
@@ -453,16 +497,23 @@ The engine contract, in `osmena-engine`:
   copy its extensions (installed here, then independent; only when
   the engine runs extensions). History is never shared. A new
   profile's directory is the slug of its name (`work-stuff`, then
-  `work-stuff-2`); deleting one asks first, refuses a profile open in
-  another browser, and for the current profile hands over to the
-  default one and removes the directory on the way out. A guest
+  `work-stuff-2`); deleting one asks first, refuses a profile that is
+  open, and for the current profile closes its windows (handing over
+  to the default one when nothing else is open) and removes the
+  directory as it goes. A guest
   profile is a throwaway: "Open Guest Profile" makes one (`guest`,
   then `guest-2`, marked by an empty `guest` file; named "Guest",
-  grey, a ghost avatar, nothing shared) and starts a browser for it,
-  which removes the directory when it exits; a guest is listed in no
-  menu, cannot be edited, and one a crash left behind is swept at the
-  next start once it is a minute old and no browser claims it.
-  default one and removes the directory on the way out.
+  grey, a ghost avatar, nothing shared) and opens it; its directory
+  goes when its last window closes. A guest is listed in no menu,
+  cannot be edited, and one a crash left behind is swept at the next
+  start once it is a minute old and no browser claims it. The name of
+  a profile deleted while it was open is not given out again until the
+  browser has quit, and what its engine left on disk is swept at the
+  next start. With every profile in one process, Quit quits them all
+  (each asking first while it has downloads going), and the next start
+  that names no profile opens the one that was in front, with the
+  others that were open behind it when their settings bring their
+  windows back (`open-profiles.toml` in the brand's data directory).
 - **The default browser (macOS).** While the browser is not the
   system's default for web links, a bar under the toolbar offers to
   make it so (Make default, Don't ask again, Not now); the settings
@@ -534,9 +585,11 @@ checks off; "Check for updates…" still works by hand), downloads into
 "Restart to update" pill. The restart quits and installs: on Windows a
 hidden PowerShell waits for the process to exit, runs the installer with
 `/S` (which closes every other window of the browser too) and starts
-the same profile again; on macOS the running bundle is moved into the
+the browser again; on macOS the running bundle is moved into the
 updates directory, the unpacked one takes its place, and a shell reopens
-it for the profile once the process is gone. A check that finds the
+it once the process is gone. What comes back is every profile that was
+open when they share the process, the one profile otherwise, each with
+its windows (`--restore`). A check that finds the
 browser up to date removes what the updates directory holds for builds
 up to the running one. To try the flow against a local server, build
 with `OSMENA_BUILD_NUMBER=1` and start the browser with the hidden

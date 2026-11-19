@@ -1,12 +1,16 @@
-//! The winit application: owns the engine, the browser model, and the
-//! native windows, and runs the dispatch loop (see the crate docs).
+//! One open profile: its engine, its browser model, and its native
+//! windows, with the dispatch loop over them (see the crate docs). The
+//! process's own side, the event loop and what every profile shares, is
+//! `crate::shell`.
 
-use std::collections::{HashMap, VecDeque};
+use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use osmena_chrome::fatal::report_fatal;
-use osmena_chrome::{icon, menus, native_menu};
+use osmena_chrome::menus;
 use osmena_core::profile::DEFAULT_PROFILE_NAME;
 use osmena_core::{
     Bookmarks, BookmarksFile, Brand, Browser, Command, CommandKind, DownloadPolicy, EngineAction,
@@ -16,16 +20,15 @@ use osmena_core::{
 };
 use osmena_engine::{Engine, StripSnapshot, TabHost, Waker};
 use url::Url;
-use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 
-use crate::StartEngine;
 use crate::clipboard;
 use crate::default_browser;
 use crate::favicons::FaviconCache;
 use crate::launch::LaunchFetcher;
+use crate::load::Opened;
 use crate::media_prompt;
 use crate::profiles;
 use crate::repaint;
@@ -70,8 +73,12 @@ pub enum AppEvent {
     ExitAfter(std::time::Duration),
     Menu,
     Update(UpdateStatus),
-    /// A Launch Panel fetcher's answer (`crate::launch`).
-    Launch(osmena_core::launch::LaunchUpdate),
+    /// A Launch Panel fetcher's answer (`crate::launch`), for the
+    /// profile of this directory name.
+    Launch(String, osmena_core::launch::LaunchUpdate),
+    /// Another start of the browser handed over its command line
+    /// (`crate::instance`).
+    Relaunch(crate::instance::Relaunch),
     /// The system asks this browser to open these (a link clicked in
     /// another app, a page opened with it from the Finder).
     OpenUrls(Vec<Url>),
@@ -85,7 +92,7 @@ pub enum AppEvent {
     Typed(String),
 }
 
-struct WinitWaker(Mutex<EventLoopProxy<AppEvent>>);
+pub(crate) struct WinitWaker(pub(crate) Mutex<EventLoopProxy<AppEvent>>);
 
 impl Waker for WinitWaker {
     fn wake(&self) {
@@ -99,7 +106,38 @@ impl Waker for WinitWaker {
     }
 }
 
-pub struct App<E: Engine> {
+/// What an open profile asks of the process, which the shell carries
+/// out once the profile's turn is over (`ProfileApp::take_requests`).
+#[derive(Debug)]
+pub(crate) enum Request {
+    /// Open `profile` (or bring its windows forward, if it is open) with
+    /// `urls` as tabs.
+    OpenProfile { profile: String, urls: Vec<Url> },
+    /// This profile is closing because it was deleted: if nothing else
+    /// is open, the default profile takes over.
+    HandOver,
+    /// The user quit the browser: every other profile quits too, each
+    /// through its own guard (`force` skips it: the update's restart).
+    QuitAll { force: bool },
+    /// A profile was made or deleted: every profile lists them again.
+    ProfilesChanged,
+}
+
+/// What every open profile shares with the process.
+#[derive(Clone)]
+pub(crate) struct Shared {
+    pub proxy: EventLoopProxy<AppEvent>,
+    /// Checks for and installs newer builds; `None` for a build that
+    /// cannot update itself.
+    pub updater: Rc<Option<Updater>>,
+    /// The directory names of the profiles open in this process.
+    pub open: Rc<RefCell<BTreeSet<String>>>,
+    /// The directory names of the profiles deleted while this process
+    /// ran them: not given to a new profile in this run.
+    pub retired: Rc<RefCell<BTreeSet<String>>>,
+}
+
+pub struct ProfileApp<E: Engine> {
     brand: &'static Brand,
     engine_info: &'static EngineInfo,
     browser: Browser,
@@ -110,21 +148,20 @@ pub struct App<E: Engine> {
     settings_window: Option<SettingsWindow<E::Surface>>,
     pending_actions: Vec<EngineAction>,
     engine: Option<E>,
-    /// Builds the engine on `resumed`; taken once.
-    start_engine: Option<StartEngine<E>>,
-    waker: Arc<WinitWaker>,
-    /// `--exit-after`: quit this long after the engine started.
-    exit_after: Option<std::time::Duration>,
-    exit_proxy: EventLoopProxy<AppEvent>,
+    shared: Shared,
+    /// What this profile asked of the process since the shell last
+    /// looked.
+    requests: Vec<Request>,
+    /// A Quit that came from another profile is not sent round again.
+    relayed_quit: bool,
+    /// This profile's windows are gone and its engine is to go: the
+    /// shell takes it away (`ProfileApp::shutdown`).
     exiting: bool,
-    engine_failed: bool,
-    /// The first window could not be opened, so the app has nothing to show.
+    /// The first window could not be opened, so the profile has nothing
+    /// to show.
     window_failed: bool,
     /// When the history last changed without being saved since.
     history_dirty: Option<Instant>,
-    /// The application's menu bar (macOS), rebuilt from the model after
-    /// every event when its entries change.
-    menu_bar: native_menu::MenuBar,
     /// The strip as the engine was last told it (`Engine::strip_changed`):
     /// the next is sent only when it differs. `None` until the first, and
     /// always for an engine that runs no extensions.
@@ -132,9 +169,9 @@ pub struct App<E: Engine> {
     /// The user deleted the profile this browser runs: its directory
     /// goes once the engine has let go of it, on the way out.
     delete_on_exit: Option<Profile>,
-    /// Checks for and installs newer builds; `None` for a build that
-    /// cannot update itself.
-    updater: Option<Updater>,
+    /// This profile runs the automatic update checks: one open profile
+    /// does, the shell says which.
+    update_lead: bool,
     /// When the next automatic update check is due.
     update_check_due: Option<Instant>,
     /// The favicons of visited sites on disk, for the bookmarks bar and
@@ -164,48 +201,31 @@ pub struct App<E: Engine> {
     /// for a link, the link arrives a moment later and takes this tab's
     /// place instead of opening beside it.
     startup_tab: Option<TabId>,
-    /// URLs the system handed over before the engine was there to open
-    /// them; opened once it is.
-    pending_urls: Vec<Url>,
     /// Asks the event loop to read the default-browser status again.
     default_browser_proxy: Arc<Mutex<EventLoopProxy<AppEvent>>>,
 }
 
-impl<E: Engine> App<E> {
-    /// `initial_actions` are the actions from building the initial model
-    /// (opening the first window and its tabs). They run once the event
-    /// loop is active and the engine exists.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
+impl<E: Engine> ProfileApp<E> {
+    /// An open profile: `opened` is its model with the first windows in
+    /// it, `engine` the engine started for it. Nothing is on screen
+    /// until [`ProfileApp::start`].
+    pub(crate) fn new(
         brand: &'static Brand,
         engine_info: &'static EngineInfo,
-        mut browser: Browser,
-        keymap: Keymap,
-        initial_actions: Vec<EngineAction>,
-        start_engine: StartEngine<E>,
-        event_loop: &EventLoop<AppEvent>,
-        exit_after: Option<std::time::Duration>,
-        update_manifest: Option<&str>,
-    ) -> App<E> {
-        let menu_proxy = Mutex::new(event_loop.create_proxy());
-        native_menu::install_event_handler(move || {
-            let proxy = menu_proxy.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Err(e) = proxy.send_event(AppEvent::Menu) {
-                log::warn!("failed to report a menu pick to the event loop: {e}");
-            }
-        });
+        opened: Opened,
+        engine: E,
+        shared: Shared,
+    ) -> ProfileApp<E> {
+        let Opened {
+            mut browser,
+            keymap,
+            actions,
+            homepage_tab,
+        } = opened;
         browser.profiles = browser.profile.siblings(brand);
         browser.default_browser = default_browser::status();
         log::info!("default browser: {:?}", browser.default_browser);
-        let open_proxy = Mutex::new(event_loop.create_proxy());
-        default_browser::install_open_handler(move |urls| {
-            let proxy = open_proxy.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Err(e) = proxy.send_event(AppEvent::OpenUrls(urls)) {
-                log::warn!("failed to hand the system's URLs to the event loop: {e}");
-            }
-        });
         profiles::claim(&browser.profile.pid_path());
-        profiles::sweep_guests(&browser.profile);
         // A guest's directory goes with its browser.
         let delete_on_exit = browser.profile.guest.then(|| browser.profile.clone());
         if browser.profile.guest {
@@ -218,44 +238,30 @@ impl<E: Engine> App<E> {
         favicons.preload(bookmarked_hosts(&browser.bookmarks));
         let launch = LaunchFetcher::new(
             brand,
+            browser.profile.name.clone(),
             browser.profile.google_path(),
-            event_loop.create_proxy(),
+            shared.proxy.clone(),
         );
         browser.launch.drive = launch.initial_drive_state();
-        let updater = Updater::new(
-            brand,
-            update_manifest,
-            browser.profile.updates_dir(),
-            event_loop.create_proxy(),
-        );
-        match &updater {
-            Some(updater) => log::info!("running {}", updater.current()),
-            None => log::info!(
-                "{}: no build number or no update source; updates are off",
-                brand.describe_build()
-            ),
-        }
-        App {
+        let default_browser_proxy = Arc::new(Mutex::new(shared.proxy.clone()));
+        ProfileApp {
             brand,
             engine_info,
             browser,
             keymap,
             windows: HashMap::new(),
             settings_window: None,
-            pending_actions: initial_actions,
-            engine: None,
-            start_engine: Some(start_engine),
-            waker: Arc::new(WinitWaker(Mutex::new(event_loop.create_proxy()))),
-            exit_after,
-            exit_proxy: event_loop.create_proxy(),
+            pending_actions: actions,
+            engine: Some(engine),
+            shared,
+            requests: Vec::new(),
+            relayed_quit: false,
             exiting: false,
-            engine_failed: false,
             window_failed: false,
             history_dirty: None,
-            menu_bar: native_menu::MenuBar::default(),
             last_strip: None,
             delete_on_exit,
-            updater,
+            update_lead: false,
             update_check_due: None,
             favicons,
             launch,
@@ -266,20 +272,169 @@ impl<E: Engine> App<E> {
             pending_geometry: HashMap::new(),
             session_final: false,
             started: Instant::now(),
-            startup_tab: None,
-            pending_urls: Vec::new(),
-            default_browser_proxy: Arc::new(Mutex::new(event_loop.create_proxy())),
+            startup_tab: homepage_tab,
+            default_browser_proxy,
         }
     }
 
-    /// The first window opened on the home page, in `tab`, because the
-    /// start named nothing to open (see `startup_tab`).
-    pub(crate) fn opened_on_homepage(&mut self, tab: TabId) {
-        self.startup_tab = Some(tab);
+    /// Tell the engine what the profile's settings say and open the
+    /// first windows.
+    pub(crate) fn start(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(engine) = self.engine.as_ref() {
+            if self.engine_info.downloads {
+                engine.configure_downloads(self.download_policy());
+            }
+            // Every engine gets the list; one without a hook ignores it
+            // (the method is defaulted) and still blocks what the user
+            // types through the model.
+            engine.configure_blocked_sites(self.browser.blocked.clone());
+        }
+        log::info!(
+            "profile {:?} at {}",
+            self.browser.profile.name,
+            self.browser.profile.dir.display()
+        );
+        let actions = std::mem::take(&mut self.pending_actions);
+        self.perform_all(actions, event_loop);
+        // The first windows are open: the engine learns the strip before
+        // any extension can ask about it.
+        self.sync_strip();
+    }
+
+    /// The profile's directory name.
+    pub(crate) fn name(&self) -> &str {
+        &self.browser.profile.name
+    }
+
+    pub(crate) fn profile(&self) -> &Profile {
+        &self.browser.profile
+    }
+
+    /// The profile's windows are gone (or never came): the shell takes
+    /// it away.
+    pub(crate) fn is_exiting(&self) -> bool {
+        self.exiting
+    }
+
+    /// What this profile asked of the process since the last call.
+    pub(crate) fn take_requests(&mut self) -> Vec<Request> {
+        std::mem::take(&mut self.requests)
+    }
+
+    /// Whether `id` is one of this profile's windows, its settings
+    /// window included.
+    pub(crate) fn owns_window(&self, id: winit::window::WindowId) -> bool {
+        self.windows.contains_key(&id)
+            || self
+                .settings_window
+                .as_ref()
+                .is_some_and(|sw| sw.winit_id() == id)
+    }
+
+    /// Whether one of this profile's windows has the keyboard.
+    pub(crate) fn has_focus(&self) -> bool {
+        self.windows.values().any(|w| w.has_focus())
+            || self
+                .settings_window
+                .as_ref()
+                .is_some_and(|sw| sw.has_focus())
+    }
+
+    /// Bring this profile's window (the focused one, else any) to the
+    /// front.
+    pub(crate) fn bring_to_front(&mut self) {
+        if let Some(id) = self.menu_window()
+            && let Some(w) = self.window_for_core_id(id)
+        {
+            w.bring_to_front();
+        }
+    }
+
+    /// Where the browser is with updates, as this profile shows it.
+    pub(crate) fn update_status(&self) -> &UpdateStatus {
+        &self.browser.update
+    }
+
+    /// This profile runs the automatic update checks from now on, or no
+    /// longer does.
+    pub(crate) fn set_update_lead(&mut self, lead: bool) {
+        if self.update_lead == lead {
+            return;
+        }
+        self.update_lead = lead;
+        if lead {
+            self.schedule_update_check(update::FIRST_CHECK_DELAY);
+        } else {
+            self.update_check_due = None;
+        }
+    }
+
+    /// Quit this profile because another one was asked to quit the
+    /// browser: through its own guard, unless `force`.
+    pub(crate) fn quit_relayed(&mut self, force: bool, event_loop: &ActiveEventLoop) {
+        if self.exiting {
+            return;
+        }
+        self.relayed_quit = true;
+        if force {
+            self.perform(EngineAction::Quit, event_loop);
+        } else {
+            self.run_commands(vec![Command::Quit], event_loop);
+        }
+        self.relayed_quit = false;
+    }
+
+    /// Show `status` as where the browser is with updates: another
+    /// profile moved it.
+    pub(crate) fn set_update_status(&mut self, status: UpdateStatus) {
+        self.browser.update = status;
+        self.redraw_all();
+    }
+
+    /// The addresses a command line names, read as the address bar
+    /// would with this profile's search engine; what is neither a URL
+    /// nor searchable is logged and left out.
+    pub(crate) fn typed_urls(&self, typed: &[String]) -> Vec<Url> {
+        typed
+            .iter()
+            .filter_map(|text| {
+                let url = osmena_chrome::chrome::location_input_to_url(text)
+                    .or_else(|| self.browser.settings.search.url_for(text));
+                if url.is_none() {
+                    log::warn!("not a URL: {text:?}");
+                }
+                url
+            })
+            .collect()
+    }
+
+    /// The open tabs, as `--exit-after` logs them.
+    pub(crate) fn describe_tabs(&self) -> Vec<String> {
+        self.browser
+            .windows
+            .iter()
+            .flat_map(|w| w.tabs.iter())
+            .map(|t| format!("{:?} at {}", t.title, t.url))
+            .collect()
+    }
+
+    /// Open another profile with `urls`: in this process when the engine
+    /// runs them together (the shell does it once this turn is over),
+    /// else as a browser process of its own.
+    fn open_profile(&mut self, profile: &str, urls: &[Url]) -> std::io::Result<()> {
+        if self.engine_info.profiles_in_process {
+            self.requests.push(Request::OpenProfile {
+                profile: profile.to_string(),
+                urls: urls.to_vec(),
+            });
+            Ok(())
+        } else {
+            crate::process::open_in_profile(profile, urls)
+        }
     }
 
     /// Read the default-browser status again and show it if it changed.
-    fn refresh_default_browser(&mut self) {
+    pub(crate) fn refresh_default_browser(&mut self) {
         let status = default_browser::status();
         if status != self.browser.default_browser {
             log::info!("default browser: {status:?}");
@@ -292,11 +447,7 @@ impl<E: Engine> App<E> {
     /// focused window (or any), brought to the front. The link the
     /// browser was launched for loads in the tab the start opened on
     /// the home page instead, while that tab is still on it.
-    fn open_urls(&mut self, urls: Vec<Url>, event_loop: &ActiveEventLoop) {
-        if self.engine.is_none() {
-            self.pending_urls.extend(urls);
-            return;
-        }
+    pub(crate) fn open_urls(&mut self, urls: Vec<Url>, event_loop: &ActiveEventLoop) {
         let Some(window) = self.menu_window() else {
             // No browser window: the first URL opens one, the rest tabs.
             let mut urls = urls.into_iter();
@@ -497,7 +648,7 @@ impl<E: Engine> App<E> {
     /// Whether this build checks for updates on its own: it can, and
     /// the setting says so.
     fn checks_automatically(&self) -> bool {
-        self.updater.is_some() && self.browser.settings.check_for_updates
+        self.update_lead && self.shared.updater.is_some() && self.browser.settings.check_for_updates
     }
 
     /// Put the next automatic check `delay` from now, unless one is
@@ -528,7 +679,7 @@ impl<E: Engine> App<E> {
     }
 
     /// The update check reported: show it.
-    fn update_reported(&mut self, status: UpdateStatus) {
+    pub(crate) fn update_reported(&mut self, status: UpdateStatus) {
         if matches!(self.browser.update, UpdateStatus::Installing(_)) {
             // On the way out; nothing changes that.
             return;
@@ -546,7 +697,7 @@ impl<E: Engine> App<E> {
 
     /// A Launch Panel fetcher answered: fold it in and redraw, so an
     /// open panel shows it.
-    fn launch_reported(&mut self, update: osmena_core::launch::LaunchUpdate) {
+    pub(crate) fn launch_reported(&mut self, update: osmena_core::launch::LaunchUpdate) {
         if let osmena_core::launch::LaunchUpdate::GoogleConnected(Ok(account)) = &update {
             log::info!("Google Drive connected as {account}");
         }
@@ -572,7 +723,7 @@ impl<E: Engine> App<E> {
 
     /// Something went wrong that the user should see: the status area
     /// shows it until dismissed.
-    fn report_error(&mut self, message: String, event_loop: &ActiveEventLoop) {
+    pub(crate) fn report_error(&mut self, message: String, event_loop: &ActiveEventLoop) {
         log::error!("{message}");
         let actions = apply(&mut self.browser, &EngineEvent::EngineError(message));
         self.perform_all(actions, event_loop);
@@ -580,8 +731,9 @@ impl<E: Engine> App<E> {
 
     /// List the other profiles again (one may have been made or deleted,
     /// here or in another browser).
-    fn refresh_profiles(&mut self) {
+    pub(crate) fn refresh_profiles(&mut self) {
         self.browser.profiles = self.browser.profile.siblings(self.brand);
+        self.redraw_all();
     }
 
     /// Whether the bookmarks are the default profile's file.
@@ -674,10 +826,9 @@ impl<E: Engine> App<E> {
         }
     }
 
-    /// False if the engine or the first window could not be started. Either
-    /// way the app exits at once, and the process must report failure.
-    pub fn started_cleanly(&self) -> bool {
-        !self.engine_failed && !self.window_failed
+    /// True if the profile's first window could not be opened.
+    pub(crate) fn window_failed(&self) -> bool {
+        self.window_failed
     }
 
     fn window_for_tab(&mut self, tab: TabId) -> Option<&mut BrowserWindow<E>> {
@@ -720,11 +871,16 @@ impl<E: Engine> App<E> {
         Some(Command::MoveTabsToNewWindow(tabs))
     }
 
-    fn run_commands(&mut self, commands: Vec<Command>, event_loop: &ActiveEventLoop) {
+    pub(crate) fn run_commands(&mut self, commands: Vec<Command>, event_loop: &ActiveEventLoop) {
         if !commands.is_empty() {
             self.session_changed();
         }
         for command in commands {
+            // Quit is the browser's: the other open profiles hear of it
+            // too, each with its own guard for downloads still going.
+            if matches!(command, Command::Quit) && !self.relayed_quit {
+                self.requests.push(Request::QuitAll { force: false });
+            }
             // Closing the last window or tab quits: the session to come
             // back to is the one before the close, not the empty model
             // after it.
@@ -783,12 +939,13 @@ impl<E: Engine> App<E> {
         }
     }
 
-    /// Rebuild the menu bar if the model it shows changed.
-    fn sync_menu_bar(&mut self) {
+    /// What the menu bar shows while this profile's window is in
+    /// front.
+    pub(crate) fn menu_bar_entries(&self) -> Vec<menus::MenuEntry> {
         let window = self.menu_window().and_then(|id| self.browser.window(id));
         let profile_name = self.browser.profile_name();
         let updates = self.update_menu();
-        let entries = menus::menu_bar(&menus::MenuBarInput {
+        menus::menu_bar(&menus::MenuBarInput {
             brand: self.brand.name,
             window,
             keymap: &self.keymap,
@@ -807,8 +964,7 @@ impl<E: Engine> App<E> {
             },
             profiles: &self.browser.profiles,
             updates,
-        });
-        self.menu_bar.sync(entries);
+        })
     }
 
     /// Tell the engine the strip, if it differs from the one it has: the
@@ -842,36 +998,28 @@ impl<E: Engine> App<E> {
         self.last_strip = Some(snapshot);
     }
 
-    /// Run the commands of the menu bar items picked since the last
-    /// time. An editing command goes to whatever has the keyboard: a
-    /// text field of the chrome or of the settings window gets it as the
-    /// egui events its key chord would have been, the page otherwise.
-    fn menu_picks(&mut self, event_loop: &ActiveEventLoop) {
-        for id in native_menu::take_menu_ids() {
-            let Some(command) = self.menu_bar.command(&id) else {
-                continue;
-            };
-            if let Command::Page { command: page, .. } = &command
-                && let Some(events) = edit_events(page)
+    /// Run a command picked from the menu bar. An editing command goes
+    /// to whatever has the keyboard: a text field of the chrome or of
+    /// the settings window gets it as the egui events its key chord
+    /// would have been, the page otherwise.
+    pub(crate) fn menu_pick(&mut self, command: Command, event_loop: &ActiveEventLoop) {
+        if let Command::Page { command: page, .. } = &command
+            && let Some(events) = edit_events(page)
+        {
+            if let Some(sw) = self.settings_window.as_mut()
+                && sw.has_focus()
             {
-                if let Some(sw) = self.settings_window.as_mut()
-                    && sw.has_focus()
-                {
-                    sw.inject_egui_events(events);
-                    continue;
-                }
-                if let Some(w) = self.windows.values_mut().find(|w| w.has_focus())
-                    && w.egui_wants_keyboard()
-                {
-                    w.inject_egui_events(events);
-                    continue;
-                }
+                sw.inject_egui_events(events);
+                return;
             }
-            self.run_commands(vec![command], event_loop);
-            if self.exiting {
+            if let Some(w) = self.windows.values_mut().find(|w| w.has_focus())
+                && w.egui_wants_keyboard()
+            {
+                w.inject_egui_events(events);
                 return;
             }
         }
+        self.run_commands(vec![command], event_loop);
     }
 
     fn perform_all(&mut self, actions: Vec<EngineAction>, event_loop: &ActiveEventLoop) {
@@ -1191,14 +1339,15 @@ impl<E: Engine> App<E> {
                 self.copy_extensions_from_default(event_loop);
             }
             EngineAction::CreateProfile(form) => {
-                match profiles::create(&self.browser.profile, self.brand, &form) {
+                let retired: Vec<String> = self.shared.retired.borrow().iter().cloned().collect();
+                match profiles::create(&self.browser.profile, self.brand, &form, &retired) {
                     Ok(profile) => {
                         log::info!(
                             "created profile {:?} at {}",
                             profile.name,
                             profile.dir.display()
                         );
-                        if let Err(e) = crate::process::open_in_profile(&profile.name, &[]) {
+                        if let Err(e) = self.open_profile(&profile.name, &[]) {
                             self.report_error(
                                 format!("cannot start a browser for the new profile: {e}"),
                                 event_loop,
@@ -1210,13 +1359,19 @@ impl<E: Engine> App<E> {
                     }
                 }
                 self.refresh_profiles();
-                self.redraw_all();
+                self.requests.push(Request::ProfilesChanged);
             }
             EngineAction::DeleteProfile(profile) => {
                 if profile == self.browser.profile.name {
                     // This browser's own: hand over to the default profile
-                    // and take the directory away once the engine is gone.
-                    if let Err(e) = crate::process::open_in_profile(DEFAULT_PROFILE_NAME, &[]) {
+                    // (in one process, only when no other profile is
+                    // open) and take the directory away once the engine
+                    // is gone.
+                    if self.engine_info.profiles_in_process {
+                        self.requests.push(Request::HandOver);
+                    } else if let Err(e) =
+                        crate::process::open_in_profile(DEFAULT_PROFILE_NAME, &[])
+                    {
                         log::error!("cannot start a browser for the default profile: {e}");
                     }
                     self.delete_on_exit = Some(self.browser.profile.clone());
@@ -1231,10 +1386,17 @@ impl<E: Engine> App<E> {
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| profile.clone());
                 match self.browser.profile.sibling(&profile) {
-                    Ok(other) if profiles::in_use(&other.pid_path()) => self.report_error(
-                        format!("\u{201c}{name}\u{201d} is open in another window; close it first"),
-                        event_loop,
-                    ),
+                    Ok(other)
+                        if self.shared.open.borrow().contains(&other.name)
+                            || profiles::in_use(&other.pid_path()) =>
+                    {
+                        self.report_error(
+                            format!(
+                                "\u{201c}{name}\u{201d} is open in another window; close it first"
+                            ),
+                            event_loop,
+                        )
+                    }
                     Ok(other) => {
                         if let Err(e) = profiles::delete(&other) {
                             self.report_error(
@@ -1254,7 +1416,7 @@ impl<E: Engine> App<E> {
                     }
                 }
                 self.refresh_profiles();
-                self.redraw_all();
+                self.requests.push(Request::ProfilesChanged);
             }
             EngineAction::SaveHistory => {
                 self.history_dirty.get_or_insert_with(Instant::now);
@@ -1378,7 +1540,7 @@ impl<E: Engine> App<E> {
                 });
                 self.redraw_all();
             }
-            EngineAction::CheckForUpdates => match &self.updater {
+            EngineAction::CheckForUpdates => match self.shared.updater.as_ref() {
                 Some(updater) => {
                     updater.check();
                     self.redraw_all();
@@ -1392,13 +1554,26 @@ impl<E: Engine> App<E> {
                 }
             },
             EngineAction::InstallUpdate { update, file } => {
-                let outcome = match &self.updater {
-                    Some(updater) => updater.install(&update, &file, &self.browser.profile.name),
+                // The new build comes back with what is open now: every
+                // open profile when they share this process (the shell
+                // writes the list on the way out), this one otherwise.
+                let relaunch: Vec<String> = if self.engine_info.profiles_in_process {
+                    vec!["--restore".to_string()]
+                } else {
+                    vec![
+                        "--profile".to_string(),
+                        self.browser.profile.name.clone(),
+                        "--restore".to_string(),
+                    ]
+                };
+                let outcome = match self.shared.updater.as_ref() {
+                    Some(updater) => updater.install(&update, &file, &relaunch),
                     None => Err("this build cannot install updates".to_string()),
                 };
                 match outcome {
                     Ok(()) => {
                         log::info!("quitting to install {}", update.id);
+                        self.requests.push(Request::QuitAll { force: true });
                         self.perform(EngineAction::Quit, event_loop);
                     }
                     Err(e) => {
@@ -1408,14 +1583,15 @@ impl<E: Engine> App<E> {
                 }
             }
             EngineAction::OpenGuestProfile => {
-                match profiles::create_guest(&self.browser.profile, self.brand) {
+                let retired: Vec<String> = self.shared.retired.borrow().iter().cloned().collect();
+                match profiles::create_guest(&self.browser.profile, self.brand, &retired) {
                     Ok(guest) => {
                         log::info!(
                             "made guest profile {:?} at {}",
                             guest.name,
                             guest.dir.display()
                         );
-                        if let Err(e) = crate::process::open_in_profile(&guest.name, &[]) {
+                        if let Err(e) = self.open_profile(&guest.name, &[]) {
                             // Nothing will claim it: take it back now.
                             if let Err(e) = profiles::delete(&guest) {
                                 log::warn!("cannot remove the unused guest profile: {e}");
@@ -1432,7 +1608,7 @@ impl<E: Engine> App<E> {
                 }
             }
             EngineAction::OpenInProfile { profile, urls } => {
-                if let Err(e) = crate::process::open_in_profile(&profile, &urls) {
+                if let Err(e) = self.open_profile(&profile, &urls) {
                     let urls: Vec<&str> = urls.iter().map(Url::as_str).collect();
                     let message = format!(
                         "cannot start a browser for profile {profile:?} with {}: {e}",
@@ -1472,17 +1648,19 @@ impl<E: Engine> App<E> {
                 }
             }
             EngineAction::Quit => {
+                // This profile's part of it: the shell takes the profile
+                // away after this turn, and ends the process when it was
+                // the last one open.
                 self.save_session_for_exit(None);
                 self.exiting = true;
                 self.close_settings_window();
                 self.windows.clear();
-                event_loop.exit();
             }
         }
     }
 
     /// Spin the engine and fold its events into the model.
-    fn pump(&mut self, event_loop: &ActiveEventLoop) {
+    pub(crate) fn pump(&mut self, event_loop: &ActiveEventLoop) {
         let Some(engine) = self.engine.as_ref() else {
             return;
         };
@@ -1605,7 +1783,7 @@ impl<E: Engine> App<E> {
     }
 
     /// Every window shows something that changed outside it.
-    fn redraw_all(&self) {
+    pub(crate) fn redraw_all(&self) {
         for w in self.windows.values() {
             w.request_redraw();
         }
@@ -1836,73 +2014,9 @@ fn tab_of(event: &EngineEvent) -> Option<TabId> {
     }
 }
 
-impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.engine.is_none() && !self.exiting {
-            let Some(start_engine) = self.start_engine.take() else {
-                return;
-            };
-            let waker: Arc<dyn Waker> = self.waker.clone();
-            match start_engine(&self.browser.profile.engine_dir, waker) {
-                Ok(engine) => {
-                    if self.engine_info.downloads {
-                        engine.configure_downloads(self.download_policy());
-                    }
-                    // Every engine gets the list; one without a hook
-                    // ignores it (the method is defaulted) and still
-                    // blocks what the user types through the model.
-                    engine.configure_blocked_sites(self.browser.blocked.clone());
-                    self.engine = Some(engine);
-                }
-                Err(e) => {
-                    report_fatal(
-                        self.brand,
-                        &format!(
-                            "{}: the browser engine failed to start for profile {:?} \
-                             (directory {}): {e}",
-                            self.brand.binary,
-                            self.browser.profile.name,
-                            self.browser.profile.dir.display()
-                        ),
-                    );
-                    self.engine_failed = true;
-                    self.exiting = true;
-                    event_loop.exit();
-                    return;
-                }
-            }
-            log::info!(
-                "profile {:?} at {}",
-                self.browser.profile.name,
-                self.browser.profile.dir.display()
-            );
-            crate::process::bind_children_to_this_process();
-            icon::set_dock_icon(self.brand);
-            if let Some(delay) = self.exit_after {
-                let proxy = self.exit_proxy.clone();
-                let _ = std::thread::Builder::new()
-                    .name("ExitAfter".to_string())
-                    .spawn(move || {
-                        std::thread::sleep(delay);
-                        if let Err(e) = proxy.send_event(AppEvent::ExitAfter(delay)) {
-                            log::warn!("cannot ask the event loop to exit: {e}");
-                        }
-                    });
-            }
-            let actions = std::mem::take(&mut self.pending_actions);
-            self.perform_all(actions, event_loop);
-            let urls = std::mem::take(&mut self.pending_urls);
-            if !urls.is_empty() {
-                self.open_urls(urls, event_loop);
-            }
-            // The first windows are open: the engine learns the strip
-            // before any extension can ask about it.
-            self.sync_strip();
-            self.schedule_update_check(update::FIRST_CHECK_DELAY);
-        }
-    }
-
-    fn window_event(
+impl<E: Engine> ProfileApp<E> {
+    /// An event of one of this profile's windows (`owns_window`).
+    pub(crate) fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
         window_id: winit::window::WindowId,
@@ -1993,69 +2107,28 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
                 self.run_commands(vec![command], event_loop);
             }
         }
-        self.pump(event_loop);
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
-        match event {
-            AppEvent::Wake => self.pump(event_loop),
-            AppEvent::Menu => {
-                self.menu_picks(event_loop);
-                self.pump(event_loop);
-            }
-            AppEvent::Update(status) => self.update_reported(status),
-            AppEvent::Launch(update) => self.launch_reported(update),
-            AppEvent::OpenUrls(urls) => {
-                self.open_urls(urls, event_loop);
-                self.pump(event_loop);
-            }
-            AppEvent::DefaultBrowserAnswered => {
-                self.refresh_default_browser();
-                // An answer that left things as they were still needs the
-                // bar back in the settings window's terms.
-                self.redraw_all();
-            }
-            AppEvent::Typed(text) => {
-                if let Some(sw) = self.settings_window.as_mut()
-                    && sw.has_focus()
-                {
-                    sw.inject_egui_events(vec![egui::Event::Text(text)]);
-                } else if let Some(w) = self.windows.values_mut().find(|w| w.has_focus()) {
-                    w.typed_text(&self.browser, text);
-                }
-                self.pump(event_loop);
-            }
-            AppEvent::ExitAfter(delay) => {
-                // What a smoke test reads: did the pages load.
-                let tabs: Vec<String> = self
-                    .browser
-                    .windows
-                    .iter()
-                    .flat_map(|w| w.tabs.iter())
-                    .map(|t| format!("{:?} at {}", t.title, t.url))
-                    .collect();
-                log::info!(
-                    "--exit-after {:.1}s: quitting with {} tab(s): {}",
-                    delay.as_secs_f64(),
-                    tabs.len(),
-                    tabs.join(", ")
-                );
-                self.run_commands(vec![Command::Quit], event_loop);
-            }
+    /// Text the system typed with no key event of its own, for whatever
+    /// of this profile's has the keyboard.
+    pub(crate) fn typed(&mut self, text: String) {
+        if let Some(sw) = self.settings_window.as_mut()
+            && sw.has_focus()
+        {
+            sw.inject_egui_events(vec![egui::Event::Text(text)]);
+        } else if let Some(w) = self.windows.values_mut().find(|w| w.has_focus()) {
+            w.typed_text(&self.browser, text);
         }
     }
 
     /// Everything pending is handled: ask each window what egui wants,
-    /// and sleep until the earliest delayed repaint (a caret blink, a
-    /// tooltip) or the next event, whichever comes first. A window whose
-    /// repaint is due now has asked for its redraw by the time this
-    /// returns.
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+    /// and say when this profile next wants a turn: the earliest
+    /// delayed repaint (a caret blink, a tooltip) or timer of its own.
+    /// A window whose repaint is due now has asked for its redraw by the
+    /// time this returns.
+    pub(crate) fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) -> Option<Instant> {
         if self.exiting {
-            return;
-        }
-        if cfg!(target_os = "macos") {
-            self.sync_menu_bar();
+            return None;
         }
         let mut next = None;
         // The history is written a moment after it last changed.
@@ -2083,7 +2156,7 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
         }
         next = repaint::earliest(next, self.tick_warms(event_loop));
         if self.exiting {
-            return;
+            return None;
         }
         // Last, so the strip carries the turn's changes, a warm's completion
         // among them: the update check and the warms run commands above, and
@@ -2095,16 +2168,14 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
         if let Some(sw) = self.settings_window.as_mut() {
             next = repaint::earliest(next, sw.redraw_deadline());
         }
-        event_loop.set_control_flow(match next {
-            Some(at) => ControlFlow::WaitUntil(at),
-            None => ControlFlow::Wait,
-        });
+        next
     }
 
-    /// Runs on every exit path, including macOS `terminate:` from the Dock
-    /// menu, which otherwise ends the process without dropping `App`. Tear
-    /// down in dependency order: windows (tab hosts, GL) before the engine.
-    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+    /// This profile is over: write what it keeps, then tear down in
+    /// dependency order, windows (tab hosts, GL) before the engine. Runs
+    /// when its last window closed and on every exit path of the
+    /// process. Returns the profile if it was deleted with it.
+    pub(crate) fn shutdown(&mut self) -> Option<Profile> {
         self.exiting = true;
         self.save_history();
         // The windows as they were, for the next start (not for a
@@ -2121,9 +2192,18 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
         self.close_settings_window();
         self.windows.clear();
         self.engine = None;
+        self.shared
+            .open
+            .borrow_mut()
+            .remove(&self.browser.profile.name);
         profiles::release(&self.browser.profile.pid_path());
-        if let Some(profile) = self.delete_on_exit.take() {
-            match profiles::delete_at_exit(&profile) {
+        let deleted = self.delete_on_exit.take();
+        if let Some(profile) = &deleted {
+            self.shared
+                .retired
+                .borrow_mut()
+                .insert(profile.name.clone());
+            match profiles::delete_at_exit(profile) {
                 Ok(profiles::Deletion::Removed) => {
                     log::info!("deleted profile {:?}", profile.name)
                 }
@@ -2138,5 +2218,6 @@ impl<E: Engine> ApplicationHandler<AppEvent> for App<E> {
                 ),
             }
         }
+        deleted
     }
 }

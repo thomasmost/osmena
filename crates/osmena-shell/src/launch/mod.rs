@@ -40,6 +40,9 @@ struct AccessToken {
 #[derive(Clone)]
 pub struct LaunchFetcher {
     proxy: EventLoopProxy<AppEvent>,
+    /// The directory name of the profile this fetches for: its answers
+    /// are addressed to it.
+    profile: String,
     user_agent: String,
     product: String,
     /// `Brand::google_client_id`; `None` leaves Drive unavailable.
@@ -55,11 +58,13 @@ pub struct LaunchFetcher {
 impl LaunchFetcher {
     pub fn new(
         brand: &Brand,
+        profile: String,
         account_path: PathBuf,
         proxy: EventLoopProxy<AppEvent>,
     ) -> LaunchFetcher {
         LaunchFetcher {
             proxy,
+            profile,
             user_agent: format!("{}/{}", brand.binary, brand.version),
             product: brand.name.to_string(),
             client_id: brand.google_client_id.map(str::to_string),
@@ -86,7 +91,10 @@ impl LaunchFetcher {
     }
 
     fn report(&self, update: LaunchUpdate) {
-        if let Err(e) = self.proxy.send_event(AppEvent::Launch(update)) {
+        if let Err(e) = self
+            .proxy
+            .send_event(AppEvent::Launch(self.profile.clone(), update))
+        {
             log::warn!("cannot report to the event loop: {e}");
         }
     }

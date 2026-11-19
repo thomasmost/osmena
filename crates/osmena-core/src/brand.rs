@@ -175,6 +175,13 @@ pub struct EngineInfo {
     /// What the page's context menu may offer beyond the model's own
     /// entries.
     pub page_tools: PageTools,
+    /// Whether one process can run several profiles at once: the shell
+    /// then starts an engine per open profile in the same process (the
+    /// start closure is called again for each), and a second launch of
+    /// the browser hands its command line to the one already running.
+    /// False for an engine whose state is process-global: every profile
+    /// is then a process of its own, as before.
+    pub profiles_in_process: bool,
 }
 
 #[cfg(test)]
@@ -208,6 +215,7 @@ pub(crate) mod test_support {
         wheel_line_px: 40.0,
         extensions: None,
         page_tools: PageTools::ALL,
+        profiles_in_process: false,
     };
 }
 
