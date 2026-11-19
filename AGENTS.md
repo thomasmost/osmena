@@ -5,7 +5,13 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-11-17 (a page's request for the microphone or the
+_Last updated: 2026-11-19 (ten changes to the strip and the Launch
+Panel, see the status section of that date: the "+" and a drag area
+outside the scrolling tabs, tabs down to 40 points with the active one
+at 64, the fade at a scrolled end, the recording mark, the field's
+icon, asking on Shift twice, a typed address opened as typed, the
+completion without query and fragment, the touchpad's pinch; before
+that 2026-11-17, a page's request for the microphone or the
 camera is asked about in a dialog of the system's; before that
 2026-11-16, Alt codes on Windows: the shell's message
 hook delivers the character winit drops; before that, 2026-11-08
@@ -171,7 +177,10 @@ No engine is needed; the workspace builds in under a minute.
   agrees because the model re-applies after every navigation). The
   chord table has two chords per zoom kind (the row and the numpad);
   the shell turns `Ctrl`+wheel over the page into `ZoomIn`/`ZoomOut`
-  a notch at a time. The settings window's default goes through
+  a notch at a time, and a touchpad's pinch the same way (`pinch.rs`:
+  on Windows the wheel message's own Ctrl flag, noted by the message
+  hook because winit does not pass it on; on macOS winit's
+  `PinchGesture`, a step per `PINCH_STEP`). The settings window's default goes through
   `command::apply_default_zoom`.
 - **Blocked sites are the model's list; the engine refuses, the chrome
   reminds.** `Browser::blocked` (`BlockedSites`, `blocked.toml`) is a
@@ -248,6 +257,34 @@ No engine is needed; the workspace builds in under a minute.
   native menu it blocks the event loop while it is up. The words are
   `MediaRequest::question`, tested in core; nothing in a test shows
   the dialog.
+- **The strip keeps three things out of the tabs' reach.** The tabs
+  scroll in what `tabs_room` leaves: the "+" stands outside the scroll
+  area, straight after it, and on a frameless window at least
+  `GRAB_MIN_WIDTH` right of the "+" is the drag area (the grip of dots
+  at its left end is `grip_rect`/`grip_dots`), on every platform. A
+  new control on the strip takes its room in `tabs_room`, never from
+  inside the scroll area. An end of the row with tabs scrolled out of
+  sight is veiled by `strip_fade` (the strip's own colour curve, so it
+  must follow `gradient_mesh` if that changes), painted after the
+  panel because it needs the strip's rect, like the background.
+- **Tabs are not all one width.** `tab_min_width` is a tab's least
+  (40 points; 64 for the active tab, so its close control always
+  shows; 13 more while it records) and `tab_share` what the others
+  get around the tabs held at their least, chips taken out of the room
+  first. `strip_row` lays the slots out at those widths and draws each
+  tab at a width animated under `("strip-width", id)` over
+  `STRIP_SLIDE_SECS`, the same time the offsets slide in: both are
+  linear, so a growing tab's edge and its neighbour's stay together.
+  Change one duration and you change both. Nothing may assume a
+  common tab width again (the drag code sums the dragged tabs' own).
+- **A tab says what its page is doing with the devices.**
+  `Tab::capture` (`MediaCapture`) is what the engine last reported
+  with `EngineEvent::MediaCaptureChanged`; `tab_layout` puts the
+  recording mark ahead of the icon and never leaves it out, and a
+  collapsed folder's chip carries it for the tabs it hides. The fade
+  is `recording_alpha`, a function of time alone, so every mark in
+  every window fades together; it asks for repaints only while a mark
+  is on screen.
 - **The strip's row is laid out by hand.** `strip_row` measures every
   tab and chip (`Slot`), places each at an animated offset
   (`Context::animate_value_with_time` keyed by the tab or folder id, so
@@ -311,7 +348,22 @@ No engine is needed; the workspace builds in under a minute.
   field stands for (the completed page, the typed address, or a
   search) and is both the dropdown's first row and what Enter opens
   while no match is picked; keep the two the same by construction, not
-  by two branches. The `new_tab_url`
+  by two branches. Three rules bound the completion: it is a page,
+  never a state of one (`page_of` drops the query and the fragment,
+  and addresses that differ only there are one page with their visits
+  together); a typing that is an address already (the chrome passes
+  `location_input_to_url(..).is_some()` as `typed_is_address`) is
+  never carried deeper, only finished within its host or matched
+  exactly (`stays_on_address`); and nothing completes while the field
+  is asking. Asking is `Launcher::asking`, turned on and off by Shift
+  tapped twice (`DoubleShift`, fed `shift_input` once a frame, pure
+  and tested): the head is then `Head::Ask` for
+  `LaunchSettings::preferred_ask` (the `ask_with` setting, else the
+  first question tile, else Claude's) and Enter is `AskInNewTab`. The
+  icon at the field's left end is `FieldIcon::of` what Enter opens;
+  add a `Head` and it needs an icon there. Site icons are cached per
+  host and size (`site_icon_texture`), since one frame draws a site
+  at up to three sizes. The `new_tab_url`
   setting is what a new *window* opens on. The tiles under the field
   are `osmena_core::launch`: `WidgetKind` names them, `Settings::launch`
   (`LaunchSettings`) holds the order and what they need, and
@@ -537,6 +589,70 @@ No engine is needed; the workspace builds in under a minute.
 - Commit to `main` unless asked for a branch. Conventional Commits.
 - The browsers' own docs (`README.md`, `CLAUDE.md`) describe what each one
   adds; the shared behaviour is documented here only.
+
+## Status and handoff (2026-11-19)
+
+Ten improvements the owner listed, ranked by RICE and made one commit
+each, in that order (the convention bullets on the strip, tab widths,
+the recording mark, the Launch Panel and zoom say how each hangs
+together; the CHANGELOG has an entry for each):
+
+1. `be55e71` the Launch Panel opens a typed address as typed.
+2. `424227d` its completion leaves off the query and the fragment.
+3. `256d829` the strip's "+" outside the scrolling tabs, and the drag
+   area with its grip.
+4. `<select>` not opening: reported for Nautilus on macOS, where it
+   could not be reproduced from here (it opens on Windows). Nothing
+   changed in osmena; Nautilus's handoff of the same date has what is
+   known and how to tell. Open.
+5. `6f93c29` Shift twice turns the field from searching to asking.
+6. `065d669` the field's icon: favicon, magnifier or sparkles.
+7. `fcaf015` the recording mark (`EngineEvent::MediaCaptureChanged`).
+8. `4ba5199` tabs down to 40 points, the active one at 64, animated.
+9. `3873193` the fade at a scrolled end of the row.
+10. `5ceac60` a touchpad's pinch zooms the page.
+
+Both browsers pin `5ceac60`, each change adopted in a commit of its
+own. Nautilus reports the capture from CEF's `on_media_access_change`;
+Paladin reports none (Servo does not say), so it shows no mark.
+
+Verified: `cargo test` (531 tests, one ignored), clippy with
+`-D warnings` and fmt after every change; CI green on `main`. By eye,
+in a debug Nautilus built against this checkout on Windows at 100%
+scale, captured with `PrintWindow`: 22 tabs with the "+" and the grip
+in place right of them (3); "why", Shift twice, "is Sky" typed with a
+capital, Shift twice, by scripted keys: the chip went Google, Claude,
+Google, the row "Ask Claude" with sparkles and back, and the capital
+toggled nothing (5); "gi" with GitHub's favicon in the field and the
+sparkles while asking (6); a page calling `getUserMedia` with
+Chromium's fake device, the dialog answered Yes: the engine logged
+`media in use: MediaCapture { microphone: true, camera: false }` and
+the tab drew the red dot left of its globe (7); 30 tabs at 40 points
+with centred icons and the row fading out at its right end (8, 9);
+two posted `WM_MOUSEWHEEL` messages with `MK_CONTROL` and no key held,
+which is what Windows sends for a pinch: the zoom chip read 125% (10).
+
+Not verified: anything on macOS (the `PinchGesture` path, the grip
+and the drag area beside the traffic lights, the shell's macOS-target
+clippy, which needs a C compiler this session did not have; CI's
+macOS jobs compile and lint it); a real touchpad on Windows (the
+message was imitated); the camera, and the mark going out when the
+page lets go (unit-tested only); the mark on a collapsed folder's
+chip by eye; the active tab's growth and the close control's fade as
+motion (stills only, and in the 30-tab capture the active tab was
+scrolled out of sight); the fade at the left end; a dark system
+theme; dragging tabs of unequal widths by hand; the Launch Settings'
+"Ask with" row by eye; Paladin (type-checked against `256d829`,
+not run).
+
+Observed and left alone: the strip does not scroll to bring the
+active tab into view (opening 30 tabs leaves the last, active one off
+the right end), which narrower tabs make rarer but not impossible; a
+narrow inactive tab cannot be closed from under the pointer, by
+Chromium's own rule, only with the middle button or once selected;
+`youtube.com/watch?v=…` completes to `youtube.com/watch`, which is
+what "leave off the query" means for a site that keeps the page in
+the query (the full address is still among the matches).
 
 ## Status and handoff (2026-11-17)
 
