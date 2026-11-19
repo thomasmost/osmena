@@ -145,6 +145,17 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- The strip's "+" no longer scrolls away with the tabs, and a
+  frameless window can always be taken hold of. The "+" stood at the
+  end of the scrolling row, so a strip with more tabs than fit pushed
+  it out of sight, and the same tabs took the whole of the drag area
+  between them and the window controls. The "+" now stands outside
+  the scrolling tabs, straight after them, and at least
+  `GRAB_MIN_WIDTH` (56 points) right of it is the drag area whatever
+  the tab count, on Windows and macOS alike; a grip of dots at its
+  left end, beside the "+", marks it and lights under the pointer
+  with the grab cursor. A window with the system's title bar keeps
+  the "+" in sight and has no grip.
 - The Launch Panel's completion leaves off an address's `?query` and
   `#fragment`: `sho` completes to `shop.example/list`, not to
   `shop.example/list?page=2&sid=…`, and Enter opens the bare page.

@@ -66,6 +66,20 @@ const TAB_TITLE_MIN: f32 = 24.0;
 const TAB_TITLE_FADE: f32 = 20.0;
 /// The "+" button on the strip.
 const MENU_WIDTH: f32 = 28.0;
+/// Between the last tab and the "+".
+const PLUS_GAP: f32 = 4.0;
+/// The least width of the strip's drag area, the stretch right of the
+/// "+" that moves a frameless window: however many tabs there are,
+/// this much of the strip is never theirs.
+const GRAB_MIN_WIDTH: f32 = 56.0;
+/// The grip painted at the drag area's left end, beside the "+": rows
+/// and columns of dots, their pitch and their size, in points.
+const GRIP_ROWS: usize = 3;
+const GRIP_COLUMNS: usize = 6;
+const GRIP_PITCH: f32 = 5.0;
+const GRIP_DOT: f32 = 2.0;
+/// From the "+" to the grip's first column.
+const GRIP_INSET: f32 = 8.0;
 /// One window control (minimize, maximize, close) on a frameless window.
 const CONTROL_WIDTH: f32 = 40.0;
 /// Room for macOS's traffic lights at the left of a frameless strip.
@@ -918,11 +932,19 @@ pub fn draw(
             let controls = frameless && !cfg!(target_os = "macos");
             let right_width = if controls { 3.0 * CONTROL_WIDTH } else { 0.0 }
                 + 2.0 * ui.spacing().item_spacing.x;
-            let tabs_width = (ui.available_width() - right_width).max(0.0);
-            // What is left for the tabs after the "+" button, shared
-            // out evenly. A folder's chip takes its own width from the
-            // same room, so a strip with folders may scroll a little
-            // sooner than the count alone predicts.
+            // The "+" and, on a frameless window, the least of the drag
+            // area stand outside the scrolling tabs: however many tabs
+            // there are, a new one is a click away and the window can
+            // be taken hold of.
+            let tabs_width = tabs_room(
+                ui.available_width() - right_width,
+                ui.spacing().item_spacing.x,
+                frameless,
+            );
+            // What is left for the tabs, shared out evenly. A folder's
+            // chip takes its own width from the same room, so a strip
+            // with folders may scroll a little sooner than the count
+            // alone predicts.
             let items = window.strip_items();
             let tab_count = items
                 .iter()
@@ -940,11 +962,7 @@ pub fn draw(
             let tab_spacing = 2.0;
             let strip_tabs = StripTabs {
                 palette: &palette,
-                width: tab_width_for(
-                    tabs_width - (4.0 + MENU_WIDTH + tab_spacing),
-                    tab_count,
-                    tab_spacing,
-                ),
+                width: tab_width_for(tabs_width, tab_count, tab_spacing),
             };
             egui::ScrollArea::horizontal()
                 .max_width(tabs_width)
@@ -953,18 +971,20 @@ pub fn draw(
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = tab_spacing;
                         strip_row(ui, window, &items, &strip_tabs, state, &mut commands);
-                        ui.add_space(4.0);
-                        if plus_button(ui, &palette, window)
-                            .on_hover_text(hint(keymap, CommandKind::NewTab, "New tab"))
-                            .clicked()
-                        {
-                            commands.push(Command::NewTab {
-                                window: window.id,
-                                url: None,
-                            });
-                        }
                     });
                 });
+            ui.add_space(PLUS_GAP);
+            let plus = plus_button(ui, &palette, window).on_hover_text(hint(
+                keymap,
+                CommandKind::NewTab,
+                "New tab",
+            ));
+            if plus.clicked() {
+                commands.push(Command::NewTab {
+                    window: window.id,
+                    url: None,
+                });
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 if controls {
@@ -1004,6 +1024,20 @@ pub fn draw(
                     sense,
                 );
                 if frameless {
+                    // The grip beside the "+" says where to take hold;
+                    // the whole stretch moves the window all the same.
+                    let grip = grip_rect(rect);
+                    let over_grip = response
+                        .hover_pos()
+                        .is_some_and(|p| grip.expand(GRIP_PITCH).contains(p));
+                    if over_grip {
+                        ui.ctx().set_cursor_icon(if response.dragged() {
+                            egui::CursorIcon::Grabbing
+                        } else {
+                            egui::CursorIcon::Grab
+                        });
+                    }
+                    paint_grip(ui.painter(), grip, palette.text_on_strip, over_grip);
                     if response.double_clicked() {
                         state.window_request = Some(WindowRequest::ToggleMaximize);
                     } else if response.drag_started_by(egui::PointerButton::Primary) {
@@ -3986,6 +4020,56 @@ fn menu_button(ui: &mut Ui, palette: &Palette, window: &Window) -> egui::Respons
     response
 }
 
+/// The width the tabs may scroll within, of the `room` between the
+/// strip's left end and the window controls: what is left once the
+/// "+" (with its gap and the spacing on both sides of it) and, on a
+/// frameless window, the least of the drag area are taken out.
+fn tabs_room(room: f32, spacing: f32, frameless: bool) -> f32 {
+    let plus = spacing + PLUS_GAP + MENU_WIDTH + spacing;
+    let grab = if frameless { GRAB_MIN_WIDTH } else { 0.0 };
+    (room - plus - grab).max(0.0)
+}
+
+/// Where the grip is painted in the drag area `area`: at its left end,
+/// a little off the "+", centred on its height.
+fn grip_rect(area: Rect) -> Rect {
+    let size = Vec2::new(
+        (GRIP_COLUMNS - 1) as f32 * GRIP_PITCH + GRIP_DOT,
+        (GRIP_ROWS - 1) as f32 * GRIP_PITCH + GRIP_DOT,
+    );
+    Rect::from_min_size(
+        Pos2::new(area.left() + GRIP_INSET, area.center().y - size.y / 2.0),
+        size,
+    )
+}
+
+/// The grip's dots, each a square of `GRIP_DOT` points on the pixel
+/// grid: a texture that reads as something to take hold of, as the
+/// ridges on a drawer's handle do.
+fn grip_dots(grip: Rect, pixels_per_point: f32) -> Vec<Rect> {
+    let mut dots = Vec::with_capacity(GRIP_ROWS * GRIP_COLUMNS);
+    for row in 0..GRIP_ROWS {
+        for column in 0..GRIP_COLUMNS {
+            let min = Pos2::new(
+                grip.left() + column as f32 * GRIP_PITCH,
+                grip.top() + row as f32 * GRIP_PITCH,
+            );
+            dots.push(
+                Rect::from_min_size(min, Vec2::splat(GRIP_DOT)).round_to_pixels(pixels_per_point),
+            );
+        }
+    }
+    dots
+}
+
+/// Paint the grip in `ink`: faint at rest, plainer under the pointer.
+fn paint_grip(painter: &egui::Painter, grip: Rect, ink: Color32, lit: bool) {
+    let ink = faded(ink, if lit { 150 } else { 70 });
+    for dot in grip_dots(grip, painter.pixels_per_point()) {
+        painter.rect_filled(dot, GRIP_DOT / 2.0, ink);
+    }
+}
+
 /// The width of each tab in a strip with `room` points for `tabs` tabs
 /// and `spacing` between them: `TAB_WIDTH` while they fit, else the
 /// even share, never under `TAB_MIN_WIDTH`.
@@ -5482,6 +5566,40 @@ mod tests {
         assert_eq!(tab_width_for(1000.0, 10, 2.0), (1000.0 - 18.0) / 10.0);
         assert_eq!(tab_width_for(100.0, 10, 2.0), TAB_MIN_WIDTH);
         assert_eq!(tab_width_for(-50.0, 3, 2.0), TAB_MIN_WIDTH);
+    }
+
+    #[test]
+    fn the_plus_and_the_drag_area_are_never_the_tabs_room() {
+        // A frameless strip keeps the "+" and the least drag area
+        // whatever the tabs want; a framed one keeps the "+" alone.
+        let plus = 2.0 + PLUS_GAP + MENU_WIDTH + 2.0;
+        assert_eq!(tabs_room(1000.0, 2.0, true), 1000.0 - plus - GRAB_MIN_WIDTH);
+        assert_eq!(tabs_room(1000.0, 2.0, false), 1000.0 - plus);
+        // A window too narrow for either leaves the tabs nothing,
+        // never less.
+        assert_eq!(tabs_room(40.0, 2.0, true), 0.0);
+    }
+
+    #[test]
+    fn the_grip_sits_beside_the_plus_inside_the_least_drag_area() {
+        let area =
+            Rect::from_min_size(Pos2::new(300.0, 6.0), Vec2::new(GRAB_MIN_WIDTH, TAB_HEIGHT));
+        let grip = grip_rect(area);
+        assert!(area.contains_rect(grip), "{grip:?} in {area:?}");
+        assert_eq!(grip.left(), area.left() + GRIP_INSET);
+        assert_eq!(grip.center().y, area.center().y);
+        for ppp in [1.0, 1.25, 1.5, 2.0] {
+            let dots = grip_dots(grip, ppp);
+            assert_eq!(dots.len(), GRIP_ROWS * GRIP_COLUMNS);
+            for dot in &dots {
+                // On the pixel grid, inside the area.
+                assert_eq!(*dot, dot.round_to_pixels(ppp));
+                assert!(area.expand(1.0).contains_rect(*dot));
+            }
+            // With room between neighbours.
+            assert!(dots[1].left() > dots[0].right(), "at {ppp}");
+            assert!(dots[GRIP_COLUMNS].top() > dots[0].bottom(), "at {ppp}");
+        }
     }
 
     #[test]
