@@ -165,7 +165,19 @@ pub struct Completion {
 /// A site's front page is shown without its trailing slash. `None`
 /// when nothing matches, when `typed` is empty, or once it holds a
 /// space: a phrase is a search.
-pub fn completion(history: &History, bookmarks: &Bookmarks, typed: &str) -> Option<Completion> {
+///
+/// `typed_is_address` says the typing already reads as an address of
+/// its own (`docs.rs`, `https://example.com/a`). Such a typing is where
+/// the user means to go, so the completion never carries it deeper: it
+/// is the very page typed, or it finishes the host still being typed
+/// (`github.co` on its way to `github.com`), and never adds a path, a
+/// port, a query or a fragment to it ([`stays_on_address`]).
+pub fn completion(
+    history: &History,
+    bookmarks: &Bookmarks,
+    typed: &str,
+    typed_is_address: bool,
+) -> Option<Completion> {
     if typed.is_empty() || typed.chars().any(char::is_whitespace) {
         return None;
     }
@@ -175,6 +187,9 @@ pub fn completion(history: &History, bookmarks: &Bookmarks, typed: &str) -> Opti
         let Some(form) = completing_form(url, typed, &query) else {
             return;
         };
+        if typed_is_address && !stays_on_address(&form, typed) {
+            return;
+        }
         let rank = (
             visits,
             Reverse(form.chars().count()),
@@ -222,6 +237,22 @@ pub fn completion(history: &History, bookmarks: &Bookmarks, typed: &str) -> Opti
         );
     }
     best.map(|(_, c)| c)
+}
+
+/// Whether completing `typed`, an address already, to `form` keeps the
+/// user where they said: `form` is the typing itself (a closing slash
+/// apart), or the typing has not left the host yet and `form` goes on
+/// with more of the host. `docs.rs` is never carried to `docs.rs/regex`
+/// or `localhost` to `localhost:3000`, and `docs.rs/re` only ever
+/// stands for itself.
+fn stays_on_address(form: &str, typed: &str) -> bool {
+    let rest: String = form.chars().skip(typed.chars().count()).collect();
+    if rest.is_empty() || rest == "/" {
+        return true;
+    }
+    const BEYOND_HOST: [char; 4] = ['/', ':', '?', '#'];
+    let after_scheme = typed.split_once("://").map_or(typed, |(_, rest)| rest);
+    !after_scheme.contains(BEYOND_HOST) && !rest.starts_with(BEYOND_HOST)
 }
 
 /// How a candidate ranks: visits, then the shorter address, then the
@@ -331,7 +362,58 @@ mod tests {
         bookmarks: &Bookmarks,
         typed: &str,
     ) -> Option<(String, String)> {
-        completion(history, bookmarks, typed).map(|c| (c.text, c.suggestion.url.to_string()))
+        completion(history, bookmarks, typed, false).map(|c| (c.text, c.suggestion.url.to_string()))
+    }
+
+    #[test]
+    fn a_typed_address_is_never_completed_deeper() {
+        let mut history = History::default();
+        for t in 0..9 {
+            history.record(
+                &url("https://docs.rs/regex/latest/regex/"),
+                "regex",
+                100 + t,
+            );
+        }
+        history.record(&url("https://docs.rs/regex"), "regex - Rust", 50);
+        for t in 0..4 {
+            history.record(&url("http://localhost:3000/app"), "App", 300 + t);
+        }
+        let bookmarks = Bookmarks::default();
+        let address = |typed: &str| {
+            completion(&history, &bookmarks, typed, true)
+                .map(|c| (c.text, c.suggestion.url.to_string()))
+        };
+        // The site was typed whole: its most visited page, deep inside
+        // it, is not where the user said to go.
+        assert_eq!(address("docs.rs"), None);
+        assert_eq!(address("https://docs.rs"), None);
+        assert_eq!(address("docs.rs/"), None);
+        assert_eq!(address("localhost"), None);
+        // A typed page stands for itself when it is known (and so gets
+        // its title), never for a page under it.
+        assert_eq!(
+            address("docs.rs/regex"),
+            Some(("docs.rs/regex".into(), "https://docs.rs/regex".into()))
+        );
+        assert_eq!(address("docs.rs/regex/latest"), None);
+        assert_eq!(
+            address("docs.rs/regex/latest/regex"),
+            Some((
+                "docs.rs/regex/latest/regex/".into(),
+                "https://docs.rs/regex/latest/regex/".into()
+            ))
+        );
+        // A host still being typed is finished, as before.
+        assert_eq!(
+            address("docs.r").map(|c| c.0),
+            Some("docs.rs/regex/latest/regex/".into())
+        );
+        // And a typing that is no address completes as it always did.
+        assert_eq!(
+            completes_to(&history, &bookmarks, "docs.rs").map(|c| c.0),
+            Some("docs.rs/regex/latest/regex/".into())
+        );
     }
 
     #[test]
@@ -400,13 +482,13 @@ mod tests {
                 url: url("https://doc.rust-lang.org/std/"),
             }],
         );
-        let found = completion(&history, &bookmarks, "doc").unwrap();
+        let found = completion(&history, &bookmarks, "doc", false).unwrap();
         assert_eq!(found.text, "docs.rs");
         assert_eq!(found.suggestion.display_title(), "Docs.rs");
         assert_eq!(found.suggestion.source, SuggestionSource::History);
         // The never-visited bookmark completes only what nothing in
         // the history does, and carries its star.
-        let found = completion(&history, &bookmarks, "doc.r").unwrap();
+        let found = completion(&history, &bookmarks, "doc.r", false).unwrap();
         assert_eq!(found.text, "doc.rust-lang.org/std/");
         assert_eq!(found.suggestion.source, SuggestionSource::Bookmark);
         assert_eq!(found.suggestion.title, "Rust docs");

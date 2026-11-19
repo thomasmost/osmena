@@ -145,6 +145,15 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- The Launch Panel opens a typed address as typed. A typing that
+  already reads as an address (`docs.rs`, `https://example.com/a`)
+  was completed to the most visited page starting with it, often one
+  deep inside the site, and Enter went there. The completion now
+  either is the very page typed or finishes the host still being
+  typed (`github.co` on its way to `github.com`); it never adds a
+  path, a port, a query or a fragment to an address. For a caller:
+  `osmena_core::completion` takes a fourth argument,
+  `typed_is_address`.
 - `Extension`'s `action_title` is now set for any toolbar action, with
   or without a popup; before, an action without a popup read as `None`.
   `Extension` and `ExtensionSupport` have new fields (`side_panel` and

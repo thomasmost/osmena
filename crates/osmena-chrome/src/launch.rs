@@ -463,7 +463,14 @@ fn address_field(ui: &mut Ui, scene: &Scene<'_>, launcher: &mut Launcher) -> Fie
         launcher.completion = if deleting {
             None
         } else {
-            completion(context.history, context.bookmarks, &launcher.typed)
+            // A typing that is an address already is where Enter goes:
+            // the completion may finish its host, never carry it deeper.
+            completion(
+                context.history,
+                context.bookmarks,
+                &launcher.typed,
+                location_input_to_url(&launcher.typed).is_some(),
+            )
         };
         if let Some(c) = &launcher.completion {
             launcher.text = c.text.clone();
