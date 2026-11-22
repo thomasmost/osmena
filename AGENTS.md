@@ -745,7 +745,9 @@ together; the CHANGELOG has an entry for each):
 4. `<select>` not opening: reported for Nautilus on macOS, where it
    could not be reproduced from here (it opens on Windows). Nothing
    changed in osmena; Nautilus's handoff of the same date has what is
-   known and how to tell. Open.
+   known and how to tell. Closed 2026-11-22 in Nautilus: it needed a
+   second window open, on any system (Nautilus's C15 and its handoff
+   of that date).
 5. `6f93c29` Shift twice turns the field from searching to asking.
 6. `065d669` the field's icon: favicon, magnifier or sparkles.
 7. `fcaf015` the recording mark (`EngineEvent::MediaCaptureChanged`).
