@@ -5,7 +5,12 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-11-19 (every open profile in one process, for an
+_Last updated: 2026-11-22 (the chrome's glyphs and the profile avatars
+are drawings: SVGs under `osmena-chrome/assets`, built into two fonts
+by `tools/glyphs/build.py`, with `icons.rs`, the test-only `raster.rs`
+and the sheets; see the convention "A glyph is a drawing" and the
+status section of that date; before that 2026-11-19, every open
+profile in one process, for an
 engine that says it can: `Shell` over one `ProfileApp` per profile,
 the single-instance handoff, `StartEngine` called per profile; see the
 status section "2026-11-19, one process"; before that, the same day,
@@ -75,6 +80,11 @@ an engine crate.
 - `cargo test --workspace --features osmena-engine/glutin`
 - `cargo clippy --workspace --all-targets --features osmena-engine/glutin -- -D warnings`
 - `cargo fmt --all` (CI runs `--check`).
+- `python tools/glyphs/build.py` after a drawing under
+  `crates/osmena-chrome/assets/{icons,avatars}` changed (needs
+  `fonttools` and `skia-pathops`; `--preview <dir>` for a quick look).
+- `cargo test -p osmena-chrome sheet -- --ignored` for pictures of the
+  chrome in `target/sheets`, no window needed.
 
 No engine is needed; the workspace builds in under a minute.
 
@@ -109,14 +119,45 @@ No engine is needed; the workspace builds in under a minute.
   ring while focused; a new colour goes through `Palette`, which
   picks dark or light text by the swatch's luminance and derives the
   surface, card, field and hover shades (a contrast test holds every
-  swatch in both modes at AA). A toolbar button is a painted glyph in
-  a disc that fills only under the pointer (`icon_button_rect`,
-  `nav_button`), never a text glyph in a button frame. A new swatch
-  joins a hue of `ChromeColor::FAMILIES` (pastel, middle, deep; a test
-  checks they darken in that order). Avatar glyphs come from
-  `theme::AVATARS` only, a cut of Noto Emoji: a new avatar needs its
-  code point added to that cut (the recipe is on `AVATARS`; a test
-  fails otherwise).
+  swatch in both modes at AA). A toolbar button is a glyph of the
+  icon font in a disc that fills only under the pointer
+  (`icon_button_rect`, `nav_button`; on a popup's surface
+  `popup_glyph_button`), never a character in a button frame. A new
+  swatch joins a hue of `ChromeColor::FAMILIES` (pastel, middle, deep;
+  a test checks they darken in that order).
+- **A glyph is a drawing, not code.** The chrome's glyphs
+  (`icons::Icon`, family `theme::ICONS`) and the profile avatars
+  (`osmena_core::Avatar`, family `theme::AVATARS`) are SVGs under
+  `osmena-chrome/assets/icons` and `assets/avatars`, one per variant,
+  named after it in kebab-case, which `tools/glyphs/build.py` builds
+  into `OsmenaIcons.ttf` and `OsmenaAvatars.ttf`; the code points are
+  read from `Icon::code` and `Avatar::glyph`, so those lines are the
+  one place that says them. Both fonts are loaded with hinting off
+  (`theme::drawings`): the outlines are on the pixel grid by hand. A
+  drawing is on a 16-unit grid. An icon is painted with
+  `icons::paint` (or `icons::shape`, for a list of shapes) at
+  `icons::SIZE`, where a unit is a pixel at one pixel per point, its
+  box rounded onto the pixel grid; so a line meant to be sharp has its
+  centre on a half unit (8.5, not 8), which puts a glyph with a line
+  through its middle half a pixel right of and under the centre of an
+  even box. That is deliberate; a drawing with no such line (the two
+  crosses) sits on 8. The set's weight is 1.5 with round ends (1.25
+  for the small cross and the globe). An avatar is painted at
+  `AVATAR_GLYPH` times its disc's radius, on a disc centred on the
+  pixel grid: a solid silhouette with nothing finer than a pixel at
+  the toolbar's size, inside nine of the disc's ten units (a test
+  renders every one and fails at the rim); the emoji faces are their
+  features only, the disc being the face. The whale is Noto Emoji's
+  old one, the avatar before the palettes, which makes that font OFL.
+  Look before believing: `cargo test -p osmena-chrome sheet --
+  --ignored` renders the real chrome through `raster.rs` (egui's own
+  tessellation filled in software, test-only) into `target/sheets`,
+  and the tests in `icons.rs` hold a few glyphs to their pixels
+  (Reload is an open arc, the puzzle piece and the star are hollow, a
+  middle line is one row). What moves (the throbber, the downloads'
+  ring, the recording mark) and what follows the system (the window
+  controls), and the weather tile's two-tone pictures, are still
+  painted in code.
 - **Every user action is a `Command`.** New chrome controls and shortcuts
   add a `Command` (and a `CommandKind` if it needs a hotkey), never a
   direct engine call. A new `CommandKind` needs a `name` (stable: it is
@@ -645,6 +686,54 @@ No engine is needed; the workspace builds in under a minute.
 - Commit to `main` unless asked for a branch. Conventional Commits.
 - The browsers' own docs (`README.md`, `CLAUDE.md`) describe what each one
   adds; the shared behaviour is documented here only.
+
+## Status and handoff (2026-11-22)
+
+The owner's report: the profile avatars "got made too complicated" with
+the palettes, the Refresh icon "is busted and has been for a while",
+and the solid puzzle piece is odd beside the outlined star; review all
+the icons, restore the whale of before the palettes, make new assets.
+
+What was found, looking at the chrome's own pixels: the avatars since
+`65fe67a` were the current Noto Emoji's thin outlines, grey mush at the
+toolbar's 13 pixels, where the font before it (egui's old Noto Emoji)
+had drawn solid shapes; Reload was an arc of 288 degrees with a corner
+drawn at its start, so a ring with a tick; every stroked glyph of 1.5
+or 1.6 points lay across two rows of pixels; the Launch Settings' gear
+read as a sun; the find bar's arrows were characters from a fallback
+font.
+
+What changed (the convention "A glyph is a drawing" says how it hangs
+together): `icons.rs` and 17 drawings under `assets/icons`; 65
+drawings under `assets/avatars` (the whale lifted from egui's bundled
+`NotoEmoji-Regular.ttf`, the other 64 new); `tools/glyphs/build.py`;
+the two fonts; `theme::ICONS` and `theme::drawings`; `paint_avatar`
+on the pixel grid at `AVATAR_GLYPH`; `popup_glyph_button`; the
+painters `nav_glyph`, `paint_star`, `cross`, `globe`, `magnifier`,
+`sparkles` and `gear_shape` are gone; `raster.rs` and `sheet.rs`
+(test-only).
+
+Verified: `cargo test --workspace --features osmena-engine/glutin`
+(551 tests, 7 ignored, the six sheets among them), clippy with
+`-D warnings`, `cargo fmt --all --check`. By eye, in the sheets (the
+real `chrome::draw` rendered in software at one pixel per point, and
+the icons also at 1.25, 1.5 and 2): the toolbar light and dark on two
+swatches, the find bar, the Launch Panel, the profile dialog on each
+of its three tabs, every avatar at the three sizes the chrome draws.
+
+Not verified: a GPU's own rounding against the software fill (the
+shader's arithmetic is copied, its filtering is not exercised by
+text); macOS; the avatars on every swatch (two were looked at); the
+glyph buttons' hover discs, which need a pointer; the downloads
+popover and the status line's dismiss with the new close glyph by eye
+(the same button as the find bar's, which was looked at).
+
+Looked at and left alone: the application icons, which are the
+browsers'. Each browser's 16-pixel icon is weak (one a hairline spiral
+in a wide margin, the other detailed line art); `osmena-xtask` renders
+every size from one SVG, so a simpler drawing for the small sizes
+would need a second source there. The bookmarks bar's "▾" and "»" and
+the zoom popup's "−" and "+" are still characters.
 
 ## Status and handoff (2026-11-19, one process)
 

@@ -1,4 +1,7 @@
-Copyright 2013 Google LLC
+OsmenaAvatars.ttf
+
+Copyright 2026 the osmena contributors
+Copyright 2013 Google LLC (the whale, U+1F433, which is Noto Emoji's)
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:

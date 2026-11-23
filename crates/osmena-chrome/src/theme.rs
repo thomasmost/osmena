@@ -4,18 +4,17 @@
 //!
 //! The face is Inter (SIL Open Font License, `assets/fonts`), a
 //! geometric UI face with even metrics at small sizes; egui's own fonts
-//! stay behind it as fallbacks for the glyphs it lacks (emoji, the
-//! toolbar's arrows). Profile avatars are drawn from their own family
-//! ([`AVATARS`]): a subset of the current monochrome Noto Emoji (also
-//! OFL), which has the newer emoji egui's older copy lacks. Inputs are
-//! pills with generous side padding;
-//! widgets round at 8 px, like the tabs.
+//! stay behind it as fallbacks for the glyphs it lacks. The chrome's
+//! glyphs ([`ICONS`]) and the profile avatars ([`AVATARS`]) are two
+//! small fonts of this repository's own drawings, built from the SVGs
+//! under `assets/icons` and `assets/avatars`. Inputs are pills with
+//! generous side padding; widgets round at 8 px, like the tabs.
 
 use std::sync::Arc;
 
 use egui::{
-    Color32, Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Id, Margin,
-    Stroke, Style, TextStyle, Theme, Vec2, epaint::Shadow,
+    Color32, Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, FontTweak, Id,
+    Margin, Stroke, Style, TextStyle, Theme, Vec2, epaint::Shadow,
 };
 use osmena_core::ChromeColor;
 
@@ -87,13 +86,32 @@ pub const MEDIUM: &str = "Inter-Medium";
 
 /// The family the profile avatars' glyphs are drawn in.
 ///
-/// Its font, `assets/fonts/NotoEmoji-Avatars.ttf`, is Google Fonts'
-/// `NotoEmoji[wght].ttf` (version 3.002) pinned to weight 400 and cut
-/// down to the glyphs of `osmena_core::Avatar` with fontTools
-/// (`varLib.instancer`, then `subset` with no layout features). A new
-/// avatar's code point goes into a new cut; a test checks the font has
-/// every avatar.
+/// Its font, `assets/fonts/OsmenaAvatars.ttf`, is built from the
+/// drawings in `assets/avatars` by `tools/glyphs/build.py`, one glyph
+/// per `osmena_core::Avatar` at the emoji code point the avatar names:
+/// plain silhouettes made to read on a disc twenty pixels across. A new
+/// avatar is a variant, its code point and a drawing named after it;
+/// tests check the font has every avatar and every avatar a drawing.
+/// The whale is Noto Emoji's, which is why this one font is under the
+/// SIL Open Font License (`LICENSE-OsmenaAvatars.txt`).
 pub const AVATARS: &str = "Avatars";
+
+/// The family of the chrome's own glyphs (`crate::icons`).
+///
+/// Its font, `assets/fonts/OsmenaIcons.ttf`, is built from the drawings
+/// in `assets/icons` by `tools/glyphs/build.py`; a test checks it has
+/// every glyph the chrome names.
+pub const ICONS: &str = "Icons";
+
+/// A font of drawings, as its builder made it: the outlines are placed
+/// on the pixel grid by hand, and a hinter moving them to suit a
+/// letter's stems would only blur them.
+fn drawings(bytes: &'static [u8]) -> Arc<FontData> {
+    Arc::new(FontData::from_static(bytes).tweak(FontTweak {
+        hinting_override: Some(false),
+        ..FontTweak::default()
+    }))
+}
 
 /// Install the fonts and the style on `ctx`.
 pub fn install(ctx: &Context) {
@@ -117,9 +135,11 @@ fn fonts() -> FontDefinitions {
     );
     fonts.font_data.insert(
         AVATARS.to_owned(),
-        Arc::new(FontData::from_static(include_bytes!(
-            "../assets/fonts/NotoEmoji-Avatars.ttf"
-        ))),
+        drawings(include_bytes!("../assets/fonts/OsmenaAvatars.ttf")),
+    );
+    fonts.font_data.insert(
+        ICONS.to_owned(),
+        drawings(include_bytes!("../assets/fonts/OsmenaIcons.ttf")),
     );
     let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
     proportional.insert(0, "Inter".to_owned());
@@ -129,12 +149,17 @@ fn fonts() -> FontDefinitions {
         .families
         .insert(FontFamily::Name(MEDIUM.into()), medium);
     // The proportional faces behind it only lend the family a
-    // replacement glyph; every avatar is in the cut itself.
+    // replacement glyph; every avatar is in the font itself.
     let mut avatars = vec![AVATARS.to_owned()];
     avatars.extend(fonts.families[&FontFamily::Proportional].iter().cloned());
     fonts
         .families
         .insert(FontFamily::Name(AVATARS.into()), avatars);
+    // The icons stand alone: a glyph the font lacks is a mistake a
+    // test catches, not something another face should paper over.
+    fonts
+        .families
+        .insert(FontFamily::Name(ICONS.into()), vec![ICONS.to_owned()]);
     fonts
 }
 
@@ -248,20 +273,80 @@ mod tests {
             definitions.families[&FontFamily::Name(AVATARS.into())][0],
             AVATARS
         );
-        // The cut alone, without the fallbacks behind it.
+        // The font alone, without the fallbacks behind it.
         definitions
             .families
-            .insert(FontFamily::Name("cut".into()), vec![AVATARS.to_owned()]);
+            .insert(FontFamily::Name("alone".into()), vec![AVATARS.to_owned()]);
         let mut fonts = egui::epaint::text::Fonts::new(Default::default(), definitions);
-        let font = FontId::new(16.0, FontFamily::Name("cut".into()));
+        let font = FontId::new(16.0, FontFamily::Name("alone".into()));
         for avatar in osmena_core::Avatar::ALL {
             if let Some(glyph) = avatar.glyph() {
                 assert!(fonts.has_glyphs(&font, glyph), "{avatar:?} {glyph}");
             }
         }
-        // The flamingo is in Noto Emoji but no avatar: the cut is a cut.
+        // The flamingo is an emoji but no avatar: nothing is in the
+        // font that no avatar asks for.
         let flamingo = char::from_u32(0x1F9A9).unwrap();
         assert!(!fonts.has_glyph(&font, flamingo));
+    }
+
+    #[test]
+    fn the_icon_font_has_every_icon_and_stands_alone() {
+        let definitions = fonts();
+        assert_eq!(
+            definitions.families[&FontFamily::Name(ICONS.into())],
+            vec![ICONS.to_owned()]
+        );
+        let mut fonts = egui::epaint::text::Fonts::new(Default::default(), definitions);
+        let font = FontId::new(crate::icons::SIZE, FontFamily::Name(ICONS.into()));
+        for icon in crate::icons::Icon::ALL {
+            assert!(fonts.has_glyph(&font, icon.code()), "{icon:?}");
+        }
+    }
+
+    /// The name of a variant as its drawing's file has it:
+    /// `StarFilled` is `star-filled`.
+    fn file_name(variant: &str) -> String {
+        let mut name = String::new();
+        for (index, letter) in variant.chars().enumerate() {
+            if letter.is_uppercase() && index > 0 {
+                name.push('-');
+            }
+            name.extend(letter.to_lowercase());
+        }
+        name
+    }
+
+    /// The drawings in a directory of `assets`, by file name.
+    fn drawings_in(directory: &str) -> Vec<String> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join(directory);
+        let mut names: Vec<String> = std::fs::read_dir(&path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+            .map(|entry| entry.unwrap().path())
+            .filter(|file| file.extension().is_some_and(|e| e == "svg"))
+            .map(|file| file.file_stem().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn every_glyph_has_its_drawing_and_every_drawing_its_glyph() {
+        let mut icons: Vec<String> = crate::icons::Icon::ALL
+            .iter()
+            .map(|icon| file_name(&format!("{icon:?}")))
+            .collect();
+        icons.sort();
+        assert_eq!(drawings_in("icons"), icons);
+        let mut avatars: Vec<String> = osmena_core::Avatar::ALL
+            .iter()
+            .filter(|avatar| avatar.glyph().is_some())
+            .map(|avatar| file_name(&format!("{avatar:?}")))
+            .collect();
+        avatars.sort();
+        assert_eq!(drawings_in("avatars"), avatars);
     }
 
     #[test]

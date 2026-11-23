@@ -26,6 +26,7 @@ use osmena_core::download::{DownloadState, Downloads, describe_download};
 use osmena_core::extension::SidePanel;
 
 use crate::favicon;
+use crate::icons::{self, Icon};
 use crate::menus::bookmark_label;
 use crate::routing::PanelRects;
 use crate::theme;
@@ -105,12 +106,13 @@ const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
 /// A toolbar button for an extension's action, and the icon inside it.
 const ACTION_SIZE: f32 = 28.0;
 const ACTION_ICON: f32 = 16.0;
+/// The side of a glyph's button on a popup's surface, and of one that
+/// shares a row with small text buttons.
+const POPUP_ACTION: f32 = 24.0;
+const POPUP_SMALL_ACTION: f32 = 20.0;
 /// The padding inside the address bar: a notch taller than a settings
 /// field, so the pill is as tall as the buttons beside it.
 const ADDRESS_MARGIN: Margin = Margin::symmetric(12, 7);
-/// The stroke of the painted toolbar glyphs (the arrows, the reload
-/// arc, the cross).
-const NAV_STROKE: f32 = 1.6;
 /// The widest a folder's name is drawn in the strip.
 const FOLDER_NAME_MAX_CHARS: usize = 18;
 /// How long a tab or chip takes to slide to a new place in the strip.
@@ -147,6 +149,10 @@ const DOWNLOAD_NAME_MAX_CHARS: usize = 44;
 /// The toolbar's avatar button: the disc inside it, and the discs the
 /// profile dialog offers.
 const AVATAR_RADIUS: f32 = 10.0;
+/// The size an avatar's glyph is set at, as a multiple of its disc's
+/// radius. The drawings are made on a grid of 16 for a disc of 20: on
+/// the toolbar's disc a unit of the grid is a point.
+const AVATAR_GLYPH: f32 = 1.6;
 const AVATAR_CHOICE_RADIUS: f32 = 16.0;
 const AVATAR_PREVIEW_RADIUS: f32 = 28.0;
 /// How many avatars per row in the profile dialog.
@@ -1172,27 +1178,21 @@ pub fn draw(
         .show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                if nav_button(ui, &palette, window, NavGlyph::Back, active.can_go_back)
+                if nav_button(ui, &palette, window, Icon::Back, active.can_go_back)
                     .on_hover_text(hint(keymap, CommandKind::Back, "Back"))
                     .clicked()
                 {
                     commands.push(Command::Back(active.id));
                 }
-                if nav_button(
-                    ui,
-                    &palette,
-                    window,
-                    NavGlyph::Forward,
-                    active.can_go_forward,
-                )
-                .on_hover_text(hint(keymap, CommandKind::Forward, "Forward"))
-                .clicked()
+                if nav_button(ui, &palette, window, Icon::Forward, active.can_go_forward)
+                    .on_hover_text(hint(keymap, CommandKind::Forward, "Forward"))
+                    .clicked()
                 {
                     commands.push(Command::Forward(active.id));
                 }
                 // Reload is always available (a hung load must be recoverable);
                 // Stop appears beside it while loading.
-                if nav_button(ui, &palette, window, NavGlyph::Reload, true)
+                if nav_button(ui, &palette, window, Icon::Reload, true)
                     .on_hover_text(hint(keymap, CommandKind::Reload, "Reload"))
                     .clicked()
                 {
@@ -1201,7 +1201,7 @@ pub fn draw(
                 }
                 if active.load == LoadState::Loading {
                     if engine.supports_stop {
-                        if nav_button(ui, &palette, window, NavGlyph::Stop, true)
+                        if nav_button(ui, &palette, window, Icon::Stop, true)
                             .on_hover_text(hint(keymap, CommandKind::Stop, "Stop"))
                             .clicked()
                         {
@@ -1210,13 +1210,14 @@ pub fn draw(
                     } else {
                         // The button shows the state but stays disabled so
                         // the UI does not promise what the engine lacks.
-                        nav_button(ui, &palette, window, NavGlyph::Stop, false)
-                            .on_disabled_hover_text(format!(
+                        nav_button(ui, &palette, window, Icon::Stop, false).on_disabled_hover_text(
+                            format!(
                                 "{} (not supported by {} {})",
                                 hint(keymap, CommandKind::Stop, "Stop"),
                                 engine.name,
                                 engine.version
-                            ));
+                            ),
+                        );
                     }
                 }
 
@@ -1477,7 +1478,9 @@ pub fn draw(
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(text).small());
                         if let Some(dismiss) = dismiss
-                            && ui.small_button("×").on_hover_text("Dismiss").clicked()
+                            && popup_glyph_button(ui, Icon::Close, POPUP_SMALL_ACTION, true)
+                                .on_hover_text("Dismiss")
+                                .clicked()
                         {
                             commands.push(dismiss);
                         }
@@ -2333,12 +2336,12 @@ pub(crate) fn suggestion_row(ui: &mut Ui, entry: &Suggestion, picked: bool) -> e
         rect.center().y,
     );
     match entry.source {
-        SuggestionSource::Bookmark => paint_star(
+        SuggestionSource::Bookmark => icons::paint(
             painter,
+            Icon::StarFilled,
             icon_center,
-            SUGGESTION_ICON / 2.0,
+            icons::SIZE,
             text_color,
-            true,
         ),
         SuggestionSource::History => {
             painter.circle_stroke(
@@ -2616,15 +2619,13 @@ fn find_bar(
                             egui::Label::new(RichText::new(count).small().color(weak)),
                         );
                         let stepping = !find.text.is_empty() && find.total > 0;
-                        if ui
-                            .add_enabled(stepping, Button::new("▲"))
+                        if popup_glyph_button(ui, Icon::ChevronUp, POPUP_ACTION, stepping)
                             .on_hover_text(hint(keymap, CommandKind::FindPrevious, "Previous"))
                             .clicked()
                         {
                             commands.push(Command::FindPrevious(window.id));
                         }
-                        if ui
-                            .add_enabled(stepping, Button::new("▼"))
+                        if popup_glyph_button(ui, Icon::ChevronDown, POPUP_ACTION, stepping)
                             .on_hover_text(hint(keymap, CommandKind::FindNext, "Next"))
                             .clicked()
                         {
@@ -2641,8 +2642,7 @@ fn find_bar(
                                 match_case: !find.match_case,
                             });
                         }
-                        if ui
-                            .add(Button::new("×"))
+                        if popup_glyph_button(ui, Icon::Close, POPUP_ACTION, true)
                             .on_hover_text("Close (Esc)")
                             .clicked()
                         {
@@ -2981,48 +2981,13 @@ fn downloads_button(
     downloads: &Downloads,
 ) -> egui::Response {
     let id = Id::new(("downloads", window.id));
-    let (rect, response, _) = icon_button_rect(ui, palette, id);
+    let (rect, response) = icon_button_rect(ui, palette, id);
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         let ink = ui.visuals().text_color();
         let weak = ui.visuals().weak_text_color();
         let c = rect.center();
-        // The arrow.
-        let stroke = Stroke::new(1.6_f32, ink);
-        painter.line_segment(
-            [Pos2::new(c.x, c.y - 6.0), Pos2::new(c.x, c.y + 2.5)],
-            stroke,
-        );
-        painter.line_segment(
-            [Pos2::new(c.x - 3.5, c.y - 1.0), Pos2::new(c.x, c.y + 2.5)],
-            stroke,
-        );
-        painter.line_segment(
-            [Pos2::new(c.x + 3.5, c.y - 1.0), Pos2::new(c.x, c.y + 2.5)],
-            stroke,
-        );
-        // The tray.
-        painter.line_segment(
-            [
-                Pos2::new(c.x - 6.0, c.y + 6.0),
-                Pos2::new(c.x + 6.0, c.y + 6.0),
-            ],
-            stroke,
-        );
-        painter.line_segment(
-            [
-                Pos2::new(c.x - 6.0, c.y + 3.5),
-                Pos2::new(c.x - 6.0, c.y + 6.0),
-            ],
-            stroke,
-        );
-        painter.line_segment(
-            [
-                Pos2::new(c.x + 6.0, c.y + 3.5),
-                Pos2::new(c.x + 6.0, c.y + 6.0),
-            ],
-            stroke,
-        );
+        icons::paint(painter, Icon::Download, c, icons::SIZE, ink);
         // The ring, while anything is going.
         if downloads.active() > 0 {
             let radius = ACTION_SIZE / 2.0 - 1.0;
@@ -3092,7 +3057,10 @@ fn draw_downloads(
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Downloads").family(FontFamily::Name(theme::MEDIUM.into())));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("×").on_hover_text("Close (Esc)").clicked() {
+                    if popup_glyph_button(ui, Icon::Close, POPUP_ACTION, true)
+                        .on_hover_text("Close (Esc)")
+                        .clicked()
+                    {
                         close = true;
                     }
                 });
@@ -3187,7 +3155,10 @@ fn download_row(
                     }
                 }
                 DownloadState::Complete => {
-                    if ui.small_button("×").on_hover_text("Forget").clicked() {
+                    if popup_glyph_button(ui, Icon::Close, POPUP_SMALL_ACTION, true)
+                        .on_hover_text("Forget")
+                        .clicked()
+                    {
                         commands.push(Command::RemoveDownload(id));
                     }
                     if ui.small_button("Show in folder").clicked() {
@@ -3198,7 +3169,10 @@ fn download_row(
                     }
                 }
                 DownloadState::Cancelled | DownloadState::Interrupted(_) => {
-                    if ui.small_button("×").on_hover_text("Forget").clicked() {
+                    if popup_glyph_button(ui, Icon::Close, POPUP_SMALL_ACTION, true)
+                        .on_hover_text("Forget")
+                        .clicked()
+                    {
                         commands.push(Command::RemoveDownload(id));
                     }
                     if ui.small_button("Retry").clicked() {
@@ -3549,48 +3523,17 @@ fn zoom_chip(ui: &mut Ui, palette: &Palette, window: &Window, percent: u16) -> e
     response
 }
 
-/// The toolbar's star: filled when the page is bookmarked, an outline
+/// The toolbar's star: solid when the page is bookmarked, an outline
 /// otherwise.
 fn star_button(ui: &mut Ui, palette: &Palette, window: &Window, filled: bool) -> egui::Response {
     let id = Id::new(("bookmark-star", window.id));
-    let (rect, response, _) = icon_button_rect(ui, palette, id);
+    let (rect, response) = icon_button_rect(ui, palette, id);
     if ui.is_rect_visible(rect) {
-        paint_star(
-            ui.painter(),
-            rect.center(),
-            7.5,
-            ui.visuals().text_color(),
-            filled,
-        );
+        let icon = if filled { Icon::StarFilled } else { Icon::Star };
+        let ink = ui.visuals().text_color();
+        icons::paint(ui.painter(), icon, rect.center(), icons::SIZE, ink);
     }
     response
-}
-
-/// A five-pointed star of outer radius `radius` at `center`.
-fn paint_star(painter: &egui::Painter, center: Pos2, radius: f32, color: Color32, filled: bool) {
-    let inner = radius * 0.42;
-    let points: Vec<Pos2> = (0..10)
-        .map(|i| {
-            let r = if i % 2 == 0 { radius } else { inner };
-            let angle = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
-            Pos2::new(center.x + r * angle.cos(), center.y + r * angle.sin())
-        })
-        .collect();
-    if filled {
-        // A star is not convex: fill it as a fan of triangles from the
-        // centre, each of which is.
-        for i in 0..points.len() {
-            painter.add(egui::Shape::convex_polygon(
-                vec![center, points[i], points[(i + 1) % points.len()]],
-                color,
-                Stroke::NONE,
-            ));
-        }
-    }
-    painter.add(egui::Shape::closed_line(
-        points,
-        Stroke::new(1.3_f32, color),
-    ));
 }
 
 /// The profile dialog ("Customize your profile", or "Add a profile"): a
@@ -4103,7 +4046,9 @@ fn avatar_tab_for(avatar: Avatar) -> usize {
 }
 
 /// A profile's avatar: a disc of `color` with the avatar's glyph, or the
-/// first letter of `name`, in a colour that reads on it.
+/// first letter of `name`, in a colour that reads on it. The disc is
+/// centred on the pixel grid and the glyph's box set on it, so the
+/// drawing's own grid meets the screen's (see [`AVATAR_GLYPH`]).
 pub fn paint_avatar(
     ui: &Ui,
     center: Pos2,
@@ -4120,20 +4065,27 @@ pub fn paint_avatar(
         Color32::WHITE
     };
     let painter = ui.painter();
+    let ppp = painter.pixels_per_point();
+    let center = center.round_to_pixels(ppp);
     painter.circle_filled(center, radius, fill);
     painter.circle_stroke(
         center,
         radius,
         Stroke::new(1.0_f32, Color32::from_black_alpha(40)),
     );
-    // The emoji font's glyphs are drawn a little smaller than their size
-    // says, so they get more of it than a letter does.
-    let font = if avatar.glyph().is_some() {
-        egui::FontId::new(radius * 1.3, egui::FontFamily::Name(theme::AVATARS.into()))
-    } else {
-        egui::FontId::new(radius * 1.15, egui::FontFamily::Name(theme::MEDIUM.into()))
-    };
-    painter.text(center, Align2::CENTER_CENTER, avatar.text(name), font, ink);
+    match avatar.glyph() {
+        Some(glyph) => {
+            let size = radius * AVATAR_GLYPH;
+            let font = FontId::new(size, FontFamily::Name(theme::AVATARS.into()));
+            let galley = painter.layout_no_wrap(glyph.to_string(), font, ink);
+            let corner = (center - Vec2::splat(size / 2.0)).round_to_pixels(ppp);
+            painter.galley(corner, galley, ink);
+        }
+        None => {
+            let font = FontId::new(radius * 1.15, FontFamily::Name(theme::MEDIUM.into()));
+            painter.text(center, Align2::CENTER_CENTER, avatar.text(name), font, ink);
+        }
+    }
 }
 
 /// One avatar of the profile dialog's choice: the disc, outlined when
@@ -4178,32 +4130,21 @@ fn avatar_button(
     name: &str,
 ) -> egui::Response {
     let id = Id::new(("profile-menu", window.id));
-    let (rect, response, _) = icon_button_rect(ui, palette, id);
+    let (rect, response) = icon_button_rect(ui, palette, id);
     if ui.is_rect_visible(rect) {
         paint_avatar(ui, rect.center(), AVATAR_RADIUS, color, avatar, name);
     }
     response
 }
 
-/// The "☰" button at the toolbar's right end, which opens the window
-/// menu: three lines drawn as strokes, like the window controls, so
-/// it never depends on a font having the glyph.
+/// The button at the toolbar's right end that opens the window menu:
+/// three lines.
 fn menu_button(ui: &mut Ui, palette: &Palette, window: &Window) -> egui::Response {
     let id = Id::new(("window-menu", window.id));
-    let (rect, response, _) = icon_button_rect(ui, palette, id);
+    let (rect, response) = icon_button_rect(ui, palette, id);
     if ui.is_rect_visible(rect) {
-        let c = rect.center();
-        let half = 6.0;
-        let stroke = Stroke::new(1.5_f32, ui.visuals().text_color());
-        for dy in [-4.5, 0.0, 4.5] {
-            ui.painter().line_segment(
-                [
-                    Pos2::new(c.x - half, c.y + dy),
-                    Pos2::new(c.x + half, c.y + dy),
-                ],
-                stroke,
-            );
-        }
+        let ink = ui.visuals().text_color();
+        icons::paint(ui.painter(), Icon::Menu, rect.center(), icons::SIZE, ink);
     }
     response
 }
@@ -4520,7 +4461,13 @@ fn tab_widget(
                     Color32::WHITE,
                 ));
             } else {
-                shapes.extend(globe(slot, faded(ink, alpha / 2)));
+                shapes.push(icons::shape(
+                    ui.painter(),
+                    Icon::Globe,
+                    slot.center(),
+                    FAVICON_SIZE,
+                    faded(ink, alpha / 2),
+                ));
             }
         }
         if let (Some((left, room)), Some(galley)) = (layout.title, galley) {
@@ -4544,7 +4491,7 @@ fn tab_widget(
         }
 
         if let Some(close) = &close {
-            let centre = close_rect.center().round_to_pixel_center(ppp);
+            let centre = close_rect.center();
             if close.hovered() {
                 let ring = if is_active {
                     Color32::from_black_alpha(28)
@@ -4560,7 +4507,13 @@ fn tab_widget(
             } else {
                 1.0
             };
-            shapes.extend(cross(centre, text_color.gamma_multiply(reveal)));
+            shapes.push(icons::shape(
+                ui.painter(),
+                Icon::Close,
+                centre,
+                icons::SIZE,
+                text_color.gamma_multiply(reveal),
+            ));
         }
         if is_active {
             late.extend(shapes);
@@ -4581,49 +4534,6 @@ fn tab_widget(
         None => {}
     }
     (response, close_clicked)
-}
-
-/// The glyph of the close control: two strokes crossing at `centre`.
-fn cross(centre: Pos2, ink: Color32) -> Vec<egui::Shape> {
-    let h = 3.5;
-    let stroke = Stroke::new(1.2_f32, ink);
-    vec![
-        egui::Shape::line_segment(
-            [
-                Pos2::new(centre.x - h, centre.y - h),
-                Pos2::new(centre.x + h, centre.y + h),
-            ],
-            stroke,
-        ),
-        egui::Shape::line_segment(
-            [
-                Pos2::new(centre.x - h, centre.y + h),
-                Pos2::new(centre.x + h, centre.y - h),
-            ],
-            stroke,
-        ),
-    ]
-}
-
-/// A page's stand-in for an icon when it has none: a globe (its outline,
-/// equator and a meridian) in `ink`, filling `slot`.
-pub(crate) fn globe(slot: Rect, ink: Color32) -> Vec<egui::Shape> {
-    use std::f32::consts::TAU;
-    const STEPS: usize = 24;
-    let c = slot.center();
-    let r = slot.width() / 2.0 - 2.0;
-    let stroke = Stroke::new(1.0_f32, ink);
-    let meridian: Vec<Pos2> = (0..STEPS)
-        .map(|i| {
-            let a = TAU * i as f32 / STEPS as f32;
-            Pos2::new(c.x + r * 0.45 * a.cos(), c.y + r * a.sin())
-        })
-        .collect();
-    vec![
-        egui::Shape::circle_stroke(c, r, stroke),
-        egui::Shape::line_segment([Pos2::new(c.x - r, c.y), Pos2::new(c.x + r, c.y)], stroke),
-        egui::Shape::closed_line(meridian, stroke),
-    ]
 }
 
 /// The arc that turns in a loading tab's icon slot: three quarters of a
@@ -4761,48 +4671,56 @@ fn control_button(ui: &mut Ui, palette: &Palette, glyph: ControlGlyph) -> egui::
 /// The disc behind a toolbar icon button, filled only under the
 /// pointer, as Chromium's toolbar buttons are. The id is explicit: the
 /// toolbar's widget count changes with the Stop button, which would
-/// otherwise move the auto ids between frames. Returns the fill the
-/// button sits on, for a glyph that bites into it.
-fn icon_button_rect(ui: &mut Ui, palette: &Palette, id: Id) -> (Rect, egui::Response, Color32) {
+/// otherwise move the auto ids between frames.
+fn icon_button_rect(ui: &mut Ui, palette: &Palette, id: Id) -> (Rect, egui::Response) {
     let (_, rect) = ui.allocate_space(Vec2::splat(ACTION_SIZE));
     let response = ui.interact(rect, id, Sense::click());
     let hovered = response.hovered() || response.is_pointer_button_down_on();
-    let fill = if hovered {
-        palette.hover
-    } else {
-        palette.toolbar
-    };
     if hovered && ui.is_rect_visible(rect) {
         ui.painter()
-            .circle_filled(rect.center(), ACTION_SIZE / 2.0, fill);
+            .circle_filled(rect.center(), ACTION_SIZE / 2.0, palette.hover);
     }
-    (rect, response, fill)
+    (rect, response)
 }
 
-/// The glyph of a navigation button.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum NavGlyph {
-    Back,
-    Forward,
-    Reload,
-    Stop,
+/// A glyph as a button on a popup's surface (the find bar, a popover,
+/// the status line), where the toolbar's palette does not reach: a disc
+/// `side` points across in the style's own hover fill under the
+/// pointer; faded and inert when `enabled` is false.
+fn popup_glyph_button(ui: &mut Ui, icon: Icon, side: f32, enabled: bool) -> egui::Response {
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), sense);
+    if ui.is_rect_visible(rect) {
+        let text = ui.visuals().text_color();
+        if enabled && (response.hovered() || response.is_pointer_button_down_on()) {
+            let fill = ui.visuals().widgets.hovered.bg_fill;
+            ui.painter().circle_filled(rect.center(), side / 2.0, fill);
+        }
+        let ink = if enabled { text } else { faded(text, 72) };
+        icons::paint(ui.painter(), icon, rect.center(), icons::SIZE, ink);
+    }
+    response
 }
 
-/// Back, Forward, Reload and Stop: a painted glyph in a disc that
-/// fills under the pointer; faded and inert when `enabled` is false.
+/// Back, Forward, Reload and Stop: a glyph in a disc that fills under
+/// the pointer; faded and inert when `enabled` is false.
 fn nav_button(
     ui: &mut Ui,
     palette: &Palette,
     window: &Window,
-    glyph: NavGlyph,
+    glyph: Icon,
     enabled: bool,
 ) -> egui::Response {
     let id = Id::new(("nav", glyph, window.id));
-    let (rect, response, _) = if enabled {
+    let (rect, response) = if enabled {
         icon_button_rect(ui, palette, id)
     } else {
         let (_, rect) = ui.allocate_space(Vec2::splat(ACTION_SIZE));
-        (rect, ui.interact(rect, id, Sense::hover()), palette.toolbar)
+        (rect, ui.interact(rect, id, Sense::hover()))
     };
     if ui.is_rect_visible(rect) {
         let ink = if enabled {
@@ -4810,75 +4728,13 @@ fn nav_button(
         } else {
             faded(ui.visuals().text_color(), 72)
         };
-        for shape in nav_glyph(rect.center(), glyph, ink) {
-            ui.painter().add(shape);
-        }
+        icons::paint(ui.painter(), glyph, rect.center(), icons::SIZE, ink);
     }
     response
 }
 
-/// A navigation glyph as shapes about `c`: an arrow with a shaft, an
-/// arc open at the top right with an arrowhead on its leading end, or
-/// a cross, all in [`NAV_STROKE`].
-fn nav_glyph(c: Pos2, glyph: NavGlyph, ink: Color32) -> Vec<egui::Shape> {
-    let stroke = Stroke::new(NAV_STROKE, ink);
-    let line = |points: Vec<Pos2>| egui::Shape::line(points, stroke);
-    match glyph {
-        NavGlyph::Back | NavGlyph::Forward => {
-            // The shaft, and the head as one open polyline so the two
-            // strokes of the head meet without a notch at the tip.
-            let dir = if glyph == NavGlyph::Back { -1.0 } else { 1.0 };
-            let tip = Pos2::new(c.x + dir * 6.0, c.y);
-            vec![
-                egui::Shape::line_segment([Pos2::new(c.x - dir * 6.0, c.y), tip], stroke),
-                line(vec![
-                    Pos2::new(tip.x - dir * 5.0, c.y - 5.0),
-                    tip,
-                    Pos2::new(tip.x - dir * 5.0, c.y + 5.0),
-                ]),
-            ]
-        }
-        NavGlyph::Reload => {
-            use std::f32::consts::TAU;
-            // Three quarters of a turn, clockwise from the top right
-            // around through the left, ending at the right where the
-            // head points up along the arc's tangent.
-            let r = 6.0;
-            let start = -TAU * 0.12;
-            let end = start + TAU * 0.80;
-            let mut points = Vec::with_capacity(20);
-            for i in 0..=18 {
-                let a = start + (end - start) * i as f32 / 18.0;
-                points.push(Pos2::new(c.x + r * a.cos(), c.y + r * a.sin()));
-            }
-            let head = Pos2::new(c.x + r * start.cos(), c.y + r * start.sin());
-            vec![
-                line(points),
-                line(vec![
-                    Pos2::new(head.x - 4.5, head.y - 0.5),
-                    head,
-                    Pos2::new(head.x + 0.5, head.y + 4.5),
-                ]),
-            ]
-        }
-        NavGlyph::Stop => {
-            let h = 5.0;
-            vec![
-                egui::Shape::line_segment(
-                    [Pos2::new(c.x - h, c.y - h), Pos2::new(c.x + h, c.y + h)],
-                    stroke,
-                ),
-                egui::Shape::line_segment(
-                    [Pos2::new(c.x - h, c.y + h), Pos2::new(c.x + h, c.y - h)],
-                    stroke,
-                ),
-            ]
-        }
-    }
-}
-
-/// The strip's "+": a painted plus in a disc that fills under the
-/// pointer, in the strip's text colour.
+/// The strip's "+": the plus in a disc that fills under the pointer,
+/// in the strip's text colour.
 fn plus_button(ui: &mut Ui, palette: &Palette, window: &Window) -> egui::Response {
     let id = Id::new(("new-tab", window.id));
     let (_, rect) = ui.allocate_space(Vec2::new(MENU_WIDTH, TAB_HEIGHT));
@@ -4889,12 +4745,13 @@ fn plus_button(ui: &mut Ui, palette: &Palette, window: &Window) -> egui::Respons
             ui.painter()
                 .circle_filled(c, ACTION_SIZE / 2.0, palette.tab_hover);
         }
-        let stroke = Stroke::new(NAV_STROKE, palette.text_on_strip);
-        let h = 5.5;
-        ui.painter()
-            .line_segment([Pos2::new(c.x - h, c.y), Pos2::new(c.x + h, c.y)], stroke);
-        ui.painter()
-            .line_segment([Pos2::new(c.x, c.y - h), Pos2::new(c.x, c.y + h)], stroke);
+        icons::paint(
+            ui.painter(),
+            Icon::Plus,
+            c,
+            icons::SIZE,
+            palette.text_on_strip,
+        );
     }
     response
 }
@@ -4926,24 +4783,14 @@ fn update_pill(ui: &mut Ui, window: &Window) -> egui::Response {
     response
 }
 
-/// The extensions menu button: a puzzle piece drawn with the painter, so
-/// it never depends on a font having the glyph.
+/// The extensions menu button: a puzzle piece in outline, as the star
+/// is while a page is not bookmarked.
 fn puzzle_button(ui: &mut Ui, palette: &Palette, window: &Window) -> egui::Response {
     let id = Id::new(("extensions-menu", window.id));
-    let (rect, response, fill) = icon_button_rect(ui, palette, id);
+    let (rect, response) = icon_button_rect(ui, palette, id);
     if ui.is_rect_visible(rect) {
-        let painter = ui.painter();
         let ink = ui.visuals().text_color();
-        let c = rect.center();
-        // The body sits a little low and left so the knobs on top and on
-        // the right keep the whole glyph centred.
-        let body = Rect::from_center_size(Pos2::new(c.x - 1.5, c.y + 1.5), Vec2::splat(11.0));
-        painter.rect_filled(body, 2.0, ink);
-        let knob = 2.6;
-        painter.circle_filled(Pos2::new(body.center().x, body.min.y - 0.5), knob, ink);
-        painter.circle_filled(Pos2::new(body.max.x + 0.5, body.center().y), knob, ink);
-        // The socket on the left is a bite of the background.
-        painter.circle_filled(Pos2::new(body.min.x - 0.5, body.center().y), knob, fill);
+        icons::paint(ui.painter(), Icon::Puzzle, rect.center(), icons::SIZE, ink);
     }
     response
 }
@@ -5011,7 +4858,7 @@ fn action_button(
     extension: &Extension,
 ) -> egui::Response {
     let id = Id::new(("extension-action", window.id, &extension.id));
-    let (rect, response, _) = icon_button_rect(ui, palette, id);
+    let (rect, response) = icon_button_rect(ui, palette, id);
     state.action_anchors.insert(extension.id.clone(), rect);
     if ui.is_rect_visible(rect) {
         let slot = Rect::from_center_size(rect.center(), Vec2::splat(ACTION_ICON));
@@ -5184,12 +5031,12 @@ pub fn draw_side_panel_header(
                 .on_hover_text(&title);
             }
         }
-        let centre = layout.close.center().round_to_pixel_center(ppp);
+        let centre = layout.close.center();
         if close.hovered() || close.is_pointer_button_down_on() {
             ui.painter()
                 .circle_filled(centre, theme::SIDE_PANEL_CLOSE / 2.0, colours.hover);
         }
-        ui.painter().extend(cross(centre, colours.ink));
+        icons::paint(ui.painter(), Icon::Close, centre, icons::SIZE, colours.ink);
         // One pixel each: the header's last row, and the panel's first
         // column from the header's top to the view's foot.
         let line = Stroke::new(px, colours.line);
@@ -5686,6 +5533,39 @@ mod tests {
         assert_eq!(palette.strip_at(2.0), palette.toolbar);
     }
     use keyboard_types::Modifiers;
+
+    #[test]
+    fn every_avatar_is_drawn_on_its_disc_at_the_toolbars_size() {
+        // On a ground of the disc's own colour only the glyph shows, and
+        // the faint rim of the disc.
+        let color = ChromeColor::Shell;
+        let [r, g, b] = color.rgb();
+        let ground = Color32::from_rgb(r, g, b);
+        let ink = Color32::from_gray(24);
+        let middle = 14.0;
+        for avatar in Avatar::ALL {
+            let picture = crate::raster::render(1.0, Vec2::splat(28.0), false, ground, |ui| {
+                let center = Pos2::new(middle, middle);
+                paint_avatar(ui, center, AVATAR_RADIUS, color, avatar, "Thomas");
+            });
+            let mut inked = 0.0;
+            for y in 0..picture.height {
+                for x in 0..picture.width {
+                    let covered = picture.coverage(x, y, ground, ink);
+                    let (dx, dy) = (x as f32 + 0.5 - middle, y as f32 + 0.5 - middle);
+                    if dx.hypot(dy) < AVATAR_RADIUS - 1.0 {
+                        inked += covered;
+                    } else {
+                        // The rim is a sixth as dark as the ink; a
+                        // glyph reaching it would be darker.
+                        assert!(covered < 0.3, "{avatar:?} reaches ({x}, {y}): {covered}");
+                    }
+                }
+            }
+            // A glyph that small would be a speck on the disc.
+            assert!(inked > 14.0, "{avatar:?} is hardly drawn: {inked}");
+        }
+    }
 
     #[test]
     fn the_profile_dialog_opens_on_the_current_avatars_tab() {

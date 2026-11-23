@@ -25,10 +25,11 @@ use url::Url;
 
 use crate::chrome::{
     ChromeContext, ChromeState, LAUNCHER_FONT_SIZE, Palette, SUGGESTION_ICON, SUGGESTION_PADDING,
-    SUGGESTION_TITLE_MAX_CHARS, blend, caret_to_end, globe, location_input_to_url, select_range,
+    SUGGESTION_TITLE_MAX_CHARS, blend, caret_to_end, location_input_to_url, select_range,
     site_icon_texture, step_pick, suggestion_row, truncate,
 };
 use crate::favicon;
+use crate::icons::{self, Icon};
 use crate::theme;
 
 /// The panel's widest; narrower windows get what is left of 48 px.
@@ -451,13 +452,19 @@ fn paint_field_icon(
                         Color32::WHITE,
                     );
                 }
-                None => {
-                    ui.painter().extend(globe(slot, weak));
-                }
+                None => icons::paint(ui.painter(), Icon::Globe, c, FIELD_ICON, weak),
             }
         }
-        FieldIcon::Ask => sparkles(ui.painter(), c, scene.palette.accent, FIELD_ICON / 2.0),
-        FieldIcon::Search => magnifier(ui.painter(), c, weak, 6.5),
+        FieldIcon::Ask => {
+            icons::paint(
+                ui.painter(),
+                Icon::Sparkles,
+                c,
+                FIELD_ICON,
+                scene.palette.accent,
+            );
+        }
+        FieldIcon::Search => icons::paint(ui.painter(), Icon::Search, c, FIELD_ICON, weak),
     }
 }
 
@@ -803,40 +810,27 @@ fn select_completion(ui: &Ui, id: Id, launcher: &Launcher) {
 fn head_row(ui: &mut Ui, names: (&str, &str), head: &Head, lit: bool) -> egui::Response {
     let (engine, asked) = names;
     match head {
-        Head::Ask { query, .. } => action_row(
-            ui,
-            lit,
-            query,
-            &format!("Ask {asked}"),
-            |painter, center, ink| sparkles(painter, center, ink, SUGGESTION_ICON / 2.0),
-        ),
+        Head::Ask { query, .. } => {
+            action_row(ui, lit, query, &format!("Ask {asked}"), Icon::Sparkles)
+        }
         Head::Page(suggestion) => suggestion_row(ui, suggestion, lit),
-        Head::Address(url) => action_row(ui, lit, url.as_str(), "Open", |painter, center, ink| {
-            painter.extend(globe(
-                Rect::from_center_size(center, Vec2::splat(SUGGESTION_ICON)),
-                ink,
-            ));
-        }),
-        Head::Search(query) => action_row(
-            ui,
-            lit,
-            query,
-            &format!("Search {engine}"),
-            |painter, center, ink| magnifier(painter, center + Vec2::new(1.0, 1.0), ink, 4.0),
-        ),
+        Head::Address(url) => action_row(ui, lit, url.as_str(), "Open", Icon::Globe),
+        Head::Search(query) => {
+            action_row(ui, lit, query, &format!("Search {engine}"), Icon::Search)
+        }
     }
 }
 
 /// A row of the dropdown shaped like a match row (`suggestion_row`):
-/// `icon` painted at the left in the weak ink, `primary` in the body
-/// size with `secondary` small and weak after it; filled when `lit` or
-/// under the pointer.
+/// `icon` at the left in the weak ink, `primary` in the body size with
+/// `secondary` small and weak after it; filled when `lit` or under the
+/// pointer.
 fn action_row(
     ui: &mut Ui,
     lit: bool,
     primary: &str,
     secondary: &str,
-    icon: impl FnOnce(&egui::Painter, Pos2, Color32),
+    icon: Icon,
 ) -> egui::Response {
     let (body, small) = (
         TextStyle::Body.resolve(ui.style()),
@@ -878,12 +872,14 @@ fn action_row(
     } else if response.hovered() {
         painter.rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill);
     }
-    icon(
+    icons::paint(
         painter,
+        icon,
         Pos2::new(
             rect.left() + SUGGESTION_PADDING + SUGGESTION_ICON / 2.0,
             rect.center().y,
         ),
+        SUGGESTION_ICON,
         weak,
     );
     painter.galley(
@@ -937,67 +933,8 @@ fn bottom_row(ui: &mut Ui, launcher: &mut Launcher, commands: &mut Vec<Command>)
     });
 }
 
-/// One four-pointed star at `c`, `r` from its centre to a point: two
-/// thin diamonds crossed, each convex, so the tessellator keeps their
-/// edges smooth.
-fn sparkle(painter: &egui::Painter, c: Pos2, r: f32, ink: Color32) {
-    let waist = r * 0.3;
-    for (dx, dy) in [(waist, r), (r, waist)] {
-        painter.add(Shape::convex_polygon(
-            vec![
-                Pos2::new(c.x, c.y - dy),
-                Pos2::new(c.x + dx, c.y),
-                Pos2::new(c.x, c.y + dy),
-                Pos2::new(c.x - dx, c.y),
-            ],
-            ink,
-            Stroke::NONE,
-        ));
-    }
-}
-
-/// Sparkles in a box of half-width `r` around `c`: a large star low on
-/// the left and a small one high on the right. What says "ask" where a
-/// magnifier says "search".
-pub(crate) fn sparkles(painter: &egui::Painter, c: Pos2, ink: Color32, r: f32) {
-    sparkle(
-        painter,
-        Pos2::new(c.x - r * 0.2, c.y + r * 0.15),
-        r * 0.8,
-        ink,
-    );
-    sparkle(
-        painter,
-        Pos2::new(c.x + r * 0.62, c.y - r * 0.6),
-        r * 0.38,
-        ink,
-    );
-}
-
-/// A magnifier at `c`: a ring of radius `r` with a handle running down
-/// and right, its strokes in proportion (the field's is 6.5, a row's
-/// icon 4).
-fn magnifier(painter: &egui::Painter, c: Pos2, ink: Color32, r: f32) {
-    let stroke = Stroke::new(r * 0.28, ink);
-    let offset = r * 0.23;
-    let lens = Pos2::new(c.x - offset, c.y - offset);
-    painter.circle_stroke(lens, r, stroke);
-    let along = std::f32::consts::FRAC_PI_4;
-    let (sin, cos) = along.sin_cos();
-    painter.line_segment(
-        [
-            Pos2::new(lens.x + cos * (r + 0.5), lens.y + sin * (r + 0.5)),
-            Pos2::new(lens.x + cos * (r * 1.92), lens.y + sin * (r * 1.92)),
-        ],
-        Stroke::new(r * 0.34, ink),
-    );
-}
-
-/// A gear drawn with the painter, so it never depends on a font having
-/// the glyph: a ring with a hollow hub and seven square-shouldered
-/// teeth standing off it. Radial strokes alone would read as a
-/// steering wheel, so a tooth is a tapered quadrilateral wide enough
-/// to see, and the gap between two teeth is about a tooth wide.
+/// The gear that flips the panel to the Launch Settings: weak at rest,
+/// plain on a tinted square under the pointer.
 fn gear_button(ui: &mut Ui) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(GEAR_SIZE), Sense::click());
     if !ui.is_rect_visible(rect) {
@@ -1013,53 +950,8 @@ fn gear_button(ui: &mut Ui) -> egui::Response {
     } else {
         ui.visuals().weak_text_color()
     };
-    painter.add(gear_shape(rect.center(), 10.0, ink));
+    icons::paint(painter, Icon::Gear, rect.center(), icons::SIZE, ink);
     response
-}
-
-/// The gear as shapes, `reach` points from the centre to a tooth's tip.
-fn gear_shape(center: Pos2, reach: f32, ink: Color32) -> Vec<Shape> {
-    const TEETH: usize = 8;
-    // The ring's centre line and how thick it is drawn; the hub is
-    // whatever the ring leaves empty, so the gear reads as a wheel
-    // with a hole rather than a disc. The teeth stand well clear of
-    // the ring: stubby bumps on a thick ring read as a nut.
-    let ring = reach * 0.50;
-    let thickness = reach * 0.22;
-    // A tooth starts inside the ring's outer edge, so the two meet
-    // with no seam, and narrows towards its tip. Its width is set in
-    // points and turned into angles, so the taper is a taper at every
-    // size rather than a flare.
-    let root = ring + thickness * 0.35;
-    let width = reach * 0.27;
-    let at = |angle: f32, radius: f32| {
-        let (sin, cos) = angle.sin_cos();
-        Pos2::new(center.x + cos * radius, center.y + sin * radius)
-    };
-    let step = std::f32::consts::TAU / TEETH as f32;
-    let root_half = (width * 0.5 / root).asin();
-    let tip_half = (width * 0.40 / reach).asin();
-    let mut shapes: Vec<Shape> = Vec::with_capacity(TEETH + 1);
-    for i in 0..TEETH {
-        // The first tooth points up, which is how a gear icon is drawn.
-        let a = step * i as f32 - std::f32::consts::FRAC_PI_2;
-        shapes.push(Shape::convex_polygon(
-            vec![
-                at(a - root_half, root),
-                at(a - tip_half, reach),
-                at(a + tip_half, reach),
-                at(a + root_half, root),
-            ],
-            ink,
-            Stroke::NONE,
-        ));
-    }
-    shapes.push(Shape::circle_stroke(
-        center,
-        ring,
-        Stroke::new(thickness, ink),
-    ));
-    shapes
 }
 
 /// The union of some circles and a rectangle, as one filled shape.
@@ -1417,23 +1309,7 @@ fn tile_header(ui: &mut Ui, kind: WidgetKind, edit: bool) -> bool {
                 } else {
                     ui.visuals().weak_text_color()
                 };
-                let c = rect.center();
-                let half = 4.0;
-                let stroke = Stroke::new(1.5_f32, ink);
-                ui.painter().line_segment(
-                    [
-                        Pos2::new(c.x - half, c.y - half),
-                        Pos2::new(c.x + half, c.y + half),
-                    ],
-                    stroke,
-                );
-                ui.painter().line_segment(
-                    [
-                        Pos2::new(c.x - half, c.y + half),
-                        Pos2::new(c.x + half, c.y - half),
-                    ],
-                    stroke,
-                );
+                icons::paint(ui.painter(), Icon::Close, rect.center(), icons::SIZE, ink);
                 remove = response.on_hover_text("Remove widget").clicked();
             });
         }

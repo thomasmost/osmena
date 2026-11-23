@@ -49,9 +49,41 @@ All notable changes to the osmena crates. The crates version together.
   passes `--restore` and no `--profile`) when they share the process.
 - The minimum Rust version is 1.89 (the single-instance lock uses
   `File::try_lock`).
+- The profile avatars are redrawn: plain silhouettes made to read on
+  the toolbar's disc of twenty pixels, where the thin outlines of the
+  emoji font they came from since the palettes turned to grey. The
+  whale is the one profiles had before the palettes, as it was drawn.
+  The 24 emoji faces are their features alone, drawn on the disc, which
+  is then the face. Every avatar keeps its name in `settings.toml` and
+  its place in the dialog's tabs. `OsmenaAvatars.ttf` (24 KB) replaces
+  `NotoEmoji-Avatars.ttf`.
+- The chrome's glyphs are drawings on one grid in one weight, sharp at
+  one pixel per point: the toolbar's Back, Forward, Reload and Stop,
+  the star, the downloads' arrow, the menu's three lines, the strip's
+  plus, a tab's close cross and its globe, the Launch Panel's
+  magnifier and sparkles. They were strokes worked out in code, most
+  of them split over two rows of pixels. The extensions button is a
+  puzzle piece in outline, as the star is until a page is bookmarked;
+  it was the only solid glyph in the toolbar. The Launch Settings'
+  gear is a cog; it read as a sun, on a panel with a weather tile.
+  The find bar's previous, next and close, the downloads popover's
+  close and a download's "Forget" are the same glyphs in a disc, where
+  they were characters in button frames, two of them from a fallback
+  font.
 
 ### Added
 
+- `tools/glyphs/build.py` builds the chrome's two glyph fonts
+  (`OsmenaIcons.ttf`, `OsmenaAvatars.ttf`) from the SVG drawings under
+  `osmena-chrome/assets/icons` and `assets/avatars`, reading the code
+  points from `Icon::code` and `Avatar::glyph`. A new glyph is a
+  variant, a drawing named after it, and a rebuild; tests hold the
+  fonts, the variants and the drawings to one another.
+- `cargo test -p osmena-chrome sheet -- --ignored` writes pictures of
+  the chrome, its glyphs, the avatars, the profile dialog, the find
+  bar and the Launch Panel to `target/sheets`, rendered with no window
+  and no GPU (`raster.rs`, test-only): how a glyph is judged by eye,
+  and what the new pixel tests of the glyphs stand on.
 - `--data-dir <dir>` (hidden): every profile under `<dir>` instead of
   the per-user data directory, so a build can run beside the installed
   browser with its own profiles and its own process. Scripted runs
@@ -60,6 +92,12 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Fixed
 
+- The toolbar's Reload is an arrow again: an arc turning clockwise
+  into an arrowhead. It had been drawn as an all but closed ring with
+  a tick on it.
+- A profile's avatar is centred on the pixel grid, the disc and the
+  glyph together; the glyph could sit a fraction of a pixel off its
+  disc.
 - A guest profile's name, and the name of any profile deleted while it
   was open, is not given to a new profile until the browser has quit,
   and what the engine wrote of it after the deletion is removed when

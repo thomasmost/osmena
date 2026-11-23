@@ -389,8 +389,10 @@ impl Avatar {
 
     /// The glyph drawn for the avatar, or `None` for [`Avatar::Initial`],
     /// which draws the name's first letter. Each is one code point (no
-    /// variation selector) of the monochrome emoji font the chrome
-    /// bundles for avatars; a new glyph must be added to that font too.
+    /// variation selector): the emoji the avatar is, and where its
+    /// drawing sits in the font the chrome builds for avatars. That
+    /// font's builder reads the code points off these lines, so a new
+    /// avatar is a line here and a drawing there.
     pub fn glyph(self) -> Option<&'static str> {
         Some(match self {
             Avatar::Initial => return None,

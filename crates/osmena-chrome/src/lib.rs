@@ -12,6 +12,9 @@
 //! - [`input`]: winit input to [`EngineInput`], and the one key-routing
 //!   rule; [`keyutils`]: winit keys to `keyboard-types`.
 //! - [`icon`] and [`fatal`]: the brand's icon and the fatal-error dialog.
+//! - `icons` (private): the chrome's own glyphs, drawings built into a
+//!   font; `raster` and `sheet` (tests only) render the chrome into
+//!   pictures to judge them by.
 //!
 //! [`Command`]: osmena_core::Command
 //! [`EngineInput`]: osmena_core::EngineInput
@@ -21,12 +24,17 @@ pub mod chrome;
 pub mod fatal;
 mod favicon;
 pub mod icon;
+mod icons;
 pub mod input;
 pub mod keyutils;
 mod launch;
 pub mod menus;
 pub mod native_menu;
+#[cfg(test)]
+mod raster;
 pub mod routing;
+#[cfg(test)]
+mod sheet;
 pub mod theme;
 
 pub use keyboard_types;

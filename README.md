@@ -29,7 +29,7 @@ Dependencies point only downwards.
 | --- | --- | --- | --- |
 | `osmena-core` | model | `Browser`/`Window`/`Tab`, `Command` and `dispatch`, `EngineEvent` and `apply`, `EngineInput`, keymap, settings, profiles, `Brand`, `EngineInfo`. Pure and unit-tested. | serde, url, keyboard-types |
 | `osmena-engine` | engine contract | The `Engine`, `TabHost`, and `Surface` traits, `PagePaint`, `Waker`, `EngineError`; with the `glutin` feature, a `Surface` for engines that paint into memory. | osmena-core, glow, raw-window-handle |
-| `osmena-chrome` | chrome | The egui tab strip, toolbar, status overlay and crash panel; the theme (Inter, bundled under `assets/fonts` with its SIL Open Font License, and the shared style); the window, tab and page menus and the macOS menu bar as data and as native menus; pointer and key routing; the icon and the fatal-error dialog. | osmena-core, egui, winit, muda |
+| `osmena-chrome` | chrome | The egui tab strip, toolbar, status overlay and crash panel; the theme (Inter, bundled under `assets/fonts` with its SIL Open Font License, and the shared style); the chrome's own glyphs and the profile avatars, drawn as SVGs under `assets/icons` and `assets/avatars` and built into two small fonts; the window, tab and page menus and the macOS menu bar as data and as native menus; pointer and key routing; the icon and the fatal-error dialog. | osmena-core, egui, winit, muda |
 | `osmena-shell` | shell | The winit `App`, `BrowserWindow`, `SettingsWindow`, the process glue, and `run`. Generic over `Engine`. | osmena-chrome, osmena-engine, egui_glow |
 | `osmena-xtask` | tool | `icons`: renders a browser's `assets/logo.svg` into its icon set, the `.icns` from `assets/logo-macos.svg` when the browser has one (macOS icons sit on Apple's grid, inset in a transparent canvas, which would look small on Windows). | resvg |
 
@@ -489,9 +489,11 @@ The engine contract, in `osmena-engine`:
   "Manage Profiles…" (a dialog with a row per profile: open, edit or
   delete it, and the two ways to add one). The dialog asks for
   the name, the theme colour and the avatar (the name's initial, or a
-  flat monochrome glyph from three tabs: sea creatures, the 24 most
-  used emoji, and an assorted set; the colour is one of seven hues, each
-  in a pastel, a middle and a deep shade) and,
+  plain silhouette drawn to read on the toolbar's small disc, from
+  three tabs: sea creatures, the 24 most used emoji, whose faces are
+  their features on the disc itself, and an assorted set; the colour
+  is one of seven hues, each in a pastel, a middle and a deep shade)
+  and,
   for any profile but the default one, whether to share
   the default profile's bookmarks (one list both keep) and whether to
   copy its extensions (installed here, then independent; only when
@@ -649,7 +651,36 @@ minute. The pins on winit, egui, and glow are exact because the engines
 share a GL context and window handles with them; a browser resolves to the
 same versions through its dependency on these crates.
 
+### Glyphs
+
+The chrome's glyphs and the profile avatars are SVG drawings on a
+16-unit grid, `crates/osmena-chrome/assets/icons` and `assets/avatars`,
+one file per variant of `icons::Icon` and of `osmena_core::Avatar`
+(`StarFilled` is `star-filled.svg`). They reach the chrome as two
+fonts, which the text renderer rasterises at whatever scale the
+display has. After changing or adding a drawing:
+
+- `python tools/glyphs/build.py` rebuilds `OsmenaIcons.ttf` and
+  `OsmenaAvatars.ttf` (it needs `fonttools` and `skia-pathops`; the
+  script's own header says what a drawing may contain and has the
+  `--preview` option). Commit the fonts with the drawings.
+- `cargo test -p osmena-chrome sheet -- --ignored` writes pictures of
+  the chrome with the new fonts to `target/sheets`, magnified ones
+  among them: look at the glyph at its real size before believing it.
+
+An icon is drawn at 16 points, where a grid unit is a pixel on an
+unscaled display: a line that should be sharp runs along a row of
+pixels (its centre on a half unit), in the set's weight of a unit and a
+half with round ends. An avatar is a solid silhouette inside the circle
+its disc leaves it, with nothing finer than a pixel; a face is its
+features only. The tests fail for a variant without a drawing, a
+drawing without a variant, a glyph missing from its font, an icon that
+leaves its box, and an avatar that reaches the rim of its disc.
+
 ## Licence
 
 MIT or Apache-2.0, at your option. `osmena-chrome/src/keyutils.rs` is
 adapted from Servo's reference shell and keeps its MPL-2.0 header.
+`OsmenaAvatars.ttf` is under the SIL Open Font License, because its
+whale is Noto Emoji's (`assets/fonts/LICENSE-OsmenaAvatars.txt`); the
+other drawings in it are this project's own.
