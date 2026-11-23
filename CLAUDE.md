@@ -720,10 +720,14 @@ real `chrome::draw` rendered in software at one pixel per point, and
 the icons also at 1.25, 1.5 and 2): the toolbar light and dark on two
 swatches, the find bar, the Launch Panel, the profile dialog on each
 of its three tabs, every avatar at the three sizes the chrome draws.
+And in a debug Nautilus built against this checkout on Windows at 100%
+scale, started on a scratch `--data-dir` whose `settings.toml` named
+the whale and captured with `PrintWindow`: the toolbar as the sheets
+have it, pixel for pixel to the eye (the arrow, the outlines, the
+whale on its disc).
 
-Not verified: a GPU's own rounding against the software fill (the
-shader's arithmetic is copied, its filtering is not exercised by
-text); macOS; the avatars on every swatch (two were looked at); the
+Not verified: macOS; a scaled display in a real browser (the sheets
+only); the avatars on every swatch (two were looked at); the
 glyph buttons' hover discs, which need a pointer; the downloads
 popover and the status line's dismiss with the new close glyph by eye
 (the same button as the find bar's, which was looked at).

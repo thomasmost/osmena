@@ -155,11 +155,12 @@ fn fonts() -> FontDefinitions {
     fonts
         .families
         .insert(FontFamily::Name(AVATARS.into()), avatars);
-    // The icons stand alone: a glyph the font lacks is a mistake a
-    // test catches, not something another face should paper over.
-    fonts
-        .families
-        .insert(FontFamily::Name(ICONS.into()), vec![ICONS.to_owned()]);
+    // Likewise the icons: a family with no replacement glyph makes
+    // egui warn at every start, and a test checks the font alone has
+    // every glyph the chrome names.
+    let mut icons = vec![ICONS.to_owned()];
+    icons.extend(fonts.families[&FontFamily::Proportional].iter().cloned());
+    fonts.families.insert(FontFamily::Name(ICONS.into()), icons);
     fonts
 }
 
@@ -291,17 +292,23 @@ mod tests {
     }
 
     #[test]
-    fn the_icon_font_has_every_icon_and_stands_alone() {
-        let definitions = fonts();
+    fn the_icon_font_has_every_icon() {
+        let mut definitions = fonts();
         assert_eq!(
-            definitions.families[&FontFamily::Name(ICONS.into())],
-            vec![ICONS.to_owned()]
+            definitions.families[&FontFamily::Name(ICONS.into())][0],
+            ICONS
         );
+        // The font alone, without the fallbacks behind it.
+        definitions
+            .families
+            .insert(FontFamily::Name("alone".into()), vec![ICONS.to_owned()]);
         let mut fonts = egui::epaint::text::Fonts::new(Default::default(), definitions);
-        let font = FontId::new(crate::icons::SIZE, FontFamily::Name(ICONS.into()));
+        let font = FontId::new(crate::icons::SIZE, FontFamily::Name("alone".into()));
         for icon in crate::icons::Icon::ALL {
             assert!(fonts.has_glyph(&font, icon.code()), "{icon:?}");
         }
+        // And nothing else: a letter is not an icon.
+        assert!(!fonts.has_glyph(&font, 'a'));
     }
 
     /// The name of a variant as its drawing's file has it:
