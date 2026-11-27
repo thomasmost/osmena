@@ -58,19 +58,89 @@ pub fn note_focus<W: Copy + PartialEq>(recent: &mut Vec<W>, window: W) {
     recent.insert(0, window);
 }
 
-/// The place of a window made for tabs dragged out of the window at
-/// `source`: the source's size, with its corner at `origin` (the
-/// chrome's `TabDrop::origin`, in points from the source's corner at
-/// `scale` pixels a point), which puts the tabs under the pointer as
-/// they were held. Never maximized: it is a window let go at a point.
-pub fn torn_off_place(source: WindowGeometry, origin: (f32, f32), scale: f64) -> WindowGeometry {
-    let pixels = |points: f32| (f64::from(points) * scale).round() as i32;
+/// A monitor in physical pixels, with its scale factor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Screen {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub scale: f64,
+}
+
+/// The size a window opens at when it is given no place, in logical
+/// points: the default of `BrowserWindow::open`.
+pub const NEW_WINDOW_SIZE: (f64, f64) = (1024.0, 768.0);
+
+/// Where tabs were let go off a window, as the source and the chrome saw
+/// it at the drop.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TornOff {
+    /// The source's outer top-left corner and inner size, in physical
+    /// pixels. `maximized` is set when the source is maximized or full
+    /// screen: its size is then not one a window should copy.
+    pub source: WindowGeometry,
+    /// The source's scale factor (physical pixels a point).
+    pub source_scale: f64,
+    /// From the source's outer corner to its content's, in physical
+    /// pixels: the system frame's left and top, or zero without a frame.
+    pub frame: (i32, i32),
+    /// Where the new window's content corner goes, in points from the
+    /// source's content corner (`TabDrop::origin`), so that the tabs stay
+    /// under the pointer as they were held.
+    pub origin: (f32, f32),
+}
+
+/// The place of a window made for tabs torn off as `torn`, on the monitor
+/// `screen` under the drop. The window is the size it was in points,
+/// scaled to that monitor, unless the source was maximized, when it is
+/// [`NEW_WINDOW_SIZE`]; it is never larger than the monitor, and pulled
+/// back onto the monitor if the drop was near its edge. Its outer corner
+/// is placed (`set_outer_position`, which means the same on every
+/// platform), so its content corner is where the origin puts it.
+pub fn torn_off_place(torn: &TornOff, screen: Screen) -> WindowGeometry {
+    let source = torn.source;
+    let (points_width, points_height) = if source.maximized {
+        NEW_WINDOW_SIZE
+    } else {
+        (
+            f64::from(source.width) / torn.source_scale,
+            f64::from(source.height) / torn.source_scale,
+        )
+    };
+    let fit =
+        |points: f64, span: u32| ((points * screen.scale).round() as u32).clamp(1, span.max(1));
+    let width = fit(points_width, screen.width);
+    let height = fit(points_height, screen.height);
+
+    // The content corner, in the physical pixels of the screen: the source's
+    // content corner moved by the origin, which is in the source's points.
+    let content_x = f64::from(source.x) + f64::from(torn.frame.0);
+    let content_y = f64::from(source.y) + f64::from(torn.frame.1);
+    let content_x = content_x + f64::from(torn.origin.0) * torn.source_scale;
+    let content_y = content_y + f64::from(torn.origin.1) * torn.source_scale;
+    // The outer corner is that less the frame, which is measured in the
+    // monitor's pixels.
+    let frame_scale = screen.scale / torn.source_scale;
+    let x = (content_x - f64::from(torn.frame.0) * frame_scale).round() as i64;
+    let y = (content_y - f64::from(torn.frame.1) * frame_scale).round() as i64;
+
     WindowGeometry {
-        x: source.x.saturating_add(pixels(origin.0)),
-        y: source.y.saturating_add(pixels(origin.1)),
+        x: fit_on(x, screen.x, screen.width, width),
+        y: fit_on(y, screen.y, screen.height, height),
+        width,
+        height,
         maximized: false,
-        ..source
     }
+}
+
+/// `at`, moved so that a span of `size` starting there lies within the
+/// `span` that starts at `start`, as far as it can (a span larger than the
+/// monitor starts at its edge).
+fn fit_on(at: i64, start: i32, span: u32, size: u32) -> i32 {
+    let low = i64::from(start);
+    let high = (low + i64::from(span) - i64::from(size)).max(low);
+    at.clamp(low, high) as i32
 }
 
 #[cfg(test)]
@@ -165,24 +235,122 @@ mod tests {
         assert_eq!(frontmost(&[9], &recent), Some(9));
     }
 
+    fn source(x: i32, y: i32, width: u32, height: u32, maximized: bool) -> WindowGeometry {
+        WindowGeometry {
+            x,
+            y,
+            width,
+            height,
+            maximized,
+        }
+    }
+
+    fn screen(width: u32, height: u32, scale: f64) -> Screen {
+        Screen {
+            x: 0,
+            y: 0,
+            width,
+            height,
+            scale,
+        }
+    }
+
+    fn torn(source: WindowGeometry, source_scale: f64, origin: (f32, f32)) -> TornOff {
+        TornOff {
+            source,
+            source_scale,
+            frame: (0, 0),
+            origin,
+        }
+    }
+
+    /// A maximized source is 3840 by 2160 pixels at scale 2, which is 1920
+    /// by 1080 points; a window torn off it is the size a new window opens
+    /// at, 1024 by 768 points, at the scale of the monitor it lands on.
     #[test]
-    fn a_torn_off_window_takes_the_sources_size_at_the_drop() {
-        let source = WindowGeometry {
-            x: 100,
-            y: 50,
-            width: 2048,
-            height: 1536,
-            maximized: true,
-        };
-        assert_eq!(
-            torn_off_place(source, (300.5, -20.0), 2.0),
-            WindowGeometry {
-                x: 701,
-                y: 10,
-                width: 2048,
-                height: 1536,
-                maximized: false,
-            }
+    fn a_torn_off_window_from_a_maximized_source_opens_at_the_default_size() {
+        let maximized = source(0, 0, 3840, 2160, true);
+        let place = torn_off_place(
+            &torn(maximized, 2.0, (300.0, 40.0)),
+            screen(3840, 2160, 2.0),
         );
+        assert_eq!(
+            (place.width, place.height),
+            (2048, 1536),
+            "the default size, in the monitor's pixels"
+        );
+        assert!(!place.maximized);
+        assert_eq!(
+            (place.x, place.y),
+            (600, 80),
+            "300 and 40 points at scale 2"
+        );
+    }
+
+    /// A window that was not maximized keeps its size in points, so it is
+    /// the same window on a monitor of another scale.
+    #[test]
+    fn a_torn_off_window_keeps_its_size_in_points_on_another_scale() {
+        let window = source(100, 50, 2400, 1600, false);
+        let place = torn_off_place(&torn(window, 2.0, (0.0, 0.0)), screen(3840, 2160, 1.5));
+        assert_eq!((place.width, place.height), (1800, 1200));
+    }
+
+    /// Bigger than the monitor it lands on: the monitor's size, not more.
+    #[test]
+    fn a_torn_off_window_is_never_larger_than_its_monitor() {
+        let maximized = source(0, 0, 1280, 720, true);
+        let place = torn_off_place(&torn(maximized, 1.0, (10.0, 10.0)), screen(1280, 720, 1.0));
+        assert_eq!((place.width, place.height), (1024, 720));
+    }
+
+    /// A drop near the right edge of a 1920 by 1080 monitor: the window's
+    /// 1024 points would run off it, so it is pulled back until it fits.
+    #[test]
+    fn a_drop_near_a_monitors_edge_pulls_the_window_back_onto_it() {
+        let window = source(1200, 100, 800, 600, false);
+        let place = torn_off_place(&torn(window, 1.0, (700.0, 40.0)), screen(1920, 1080, 1.0));
+        assert_eq!(place.width, 800);
+        assert_eq!(place.x, 1920 - 800, "the right edge is on the monitor's");
+        assert_eq!(place.y, 140, "its top is where the origin put it");
+        // And near the bottom: the same, for a window that would run off it.
+        let tall = source(100, 900, 800, 600, false);
+        let place = torn_off_place(&torn(tall, 1.0, (50.0, 300.0)), screen(1920, 1080, 1.0));
+        assert_eq!(place.height, 600);
+        assert_eq!(place.y, 1080 - 600);
+    }
+
+    /// The outer corner is placed so that the content corner is where the
+    /// origin says, on a system frame of 8 pixels left and 31 on top.
+    #[test]
+    fn a_system_frame_is_taken_off_the_content_corner() {
+        let window = source(100, 50, 800, 600, false);
+        let framed = TornOff {
+            frame: (8, 31),
+            ..torn(window, 1.0, (300.0, 20.0))
+        };
+        let place = torn_off_place(&framed, screen(3840, 2160, 1.0));
+        assert_eq!(
+            (place.x + 8, place.y + 31),
+            (408, 101),
+            "the content corner is 300 and 20 points from the source's"
+        );
+        assert_eq!((place.x, place.y), (400, 70));
+    }
+
+    /// On a monitor of another scale the frame is measured in that
+    /// monitor's pixels, and the content corner still lands where it should.
+    #[test]
+    fn a_system_frame_is_taken_off_in_the_monitors_pixels() {
+        let window = source(100, 50, 800, 600, false);
+        let framed = TornOff {
+            frame: (8, 31),
+            ..torn(window, 1.0, (300.0, 20.0))
+        };
+        let place = torn_off_place(&framed, screen(3840, 2160, 2.0));
+        // The content corner is at (408, 101) in the source's pixels; the
+        // frame is 16 by 62 of this monitor's, so the outer corner is
+        // (408 - 16, 101 - 62).
+        assert_eq!((place.x, place.y), (392, 39));
     }
 }

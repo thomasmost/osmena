@@ -182,6 +182,15 @@ All notable changes to the osmena crates. The crates version together.
   pointer decides, the source included. Dropping every tab of a window
   over it still changes nothing, and now only when that window is in
   front.
+- A window torn off a maximized one opens at the size a new window
+  does, not at the maximized size, and never larger than the monitor
+  under the drop; a drop near a monitor's edge pulls it back onto the
+  monitor. A window not maximized keeps its size in points, so it is
+  the same window on a monitor of another scale. Its frame is taken
+  off its content corner in the monitor's pixels, and the window is
+  placed by its outer corner on every platform (`set_outer_position`;
+  `with_position` meant the content's corner on macOS). The placement
+  is `tab_drop::torn_off_place`, a pure function.
 - A dragged tab keeps the point it was taken by under the pointer.
   An inactive tab becomes the active one as its drag begins and, in a
   crowded strip, grows from 40 points to 64; the hold was measured on

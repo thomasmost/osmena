@@ -20,6 +20,7 @@ use osmena_core::{
 };
 use osmena_engine::{Engine, StripSnapshot, TabHost, Waker};
 use url::Url;
+use winit::dpi::PhysicalPosition;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 
@@ -32,7 +33,7 @@ use crate::media_prompt;
 use crate::profiles;
 use crate::repaint;
 use crate::settings_window::{SettingsOutcome, SettingsWindow};
-use crate::tab_drop::{DropTarget, drop_destination, note_focus};
+use crate::tab_drop::{DropTarget, Screen, drop_destination, note_focus, torn_off_place};
 use crate::update::{self, Updater};
 use crate::window::{BrowserWindow, DroppedTabs};
 
@@ -627,6 +628,26 @@ impl<E: Engine> ProfileApp<E> {
         self.session_final = true;
     }
 
+    /// The monitor under `point` (physical pixels), for placing a window
+    /// there; `None` when the point is on none.
+    fn screen_at(event_loop: &ActiveEventLoop, point: PhysicalPosition<f64>) -> Option<Screen> {
+        event_loop.available_monitors().find_map(|monitor| {
+            let origin = monitor.position();
+            let size = monitor.size();
+            let inside = point.x >= f64::from(origin.x)
+                && point.y >= f64::from(origin.y)
+                && point.x < f64::from(origin.x) + f64::from(size.width)
+                && point.y < f64::from(origin.y) + f64::from(size.height);
+            inside.then(|| Screen {
+                x: origin.x,
+                y: origin.y,
+                width: size.width,
+                height: size.height,
+                scale: monitor.scale_factor(),
+            })
+        })
+    }
+
     /// `geometry`, unless its top-left corner is off every monitor (one
     /// was unplugged): then only the size is kept.
     fn on_a_monitor(event_loop: &ActiveEventLoop, geometry: WindowGeometry) -> WindowGeometry {
@@ -850,6 +871,7 @@ impl<E: Engine> ProfileApp<E> {
     /// the rule).
     fn tab_drop_command(
         &self,
+        event_loop: &ActiveEventLoop,
         source: winit::window::WindowId,
         drop: DroppedTabs,
     ) -> Option<Command> {
@@ -877,8 +899,10 @@ impl<E: Engine> ProfileApp<E> {
                 })
             }
             DropTarget::NewWindow => Some(Command::MoveTabsToNewWindow {
+                // Off every monitor, the place is left to the system.
+                place: Self::screen_at(event_loop, drop.point)
+                    .map(|screen| torn_off_place(&drop.torn, screen)),
                 tabs: drop.tabs,
-                place: drop.place,
                 folder: drop.folder,
             }),
             DropTarget::Nothing => None,
@@ -2118,7 +2142,7 @@ impl<E: Engine> ProfileApp<E> {
             let drop = window.take_tab_drop();
             self.run_commands(commands, event_loop);
             if let Some(drop) = drop
-                && let Some(command) = self.tab_drop_command(window_id, drop)
+                && let Some(command) = self.tab_drop_command(event_loop, window_id, drop)
             {
                 self.run_commands(vec![command], event_loop);
             }

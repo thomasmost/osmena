@@ -36,7 +36,7 @@ use winit::window::{CursorIcon, Fullscreen, ResizeDirection, Window, WindowAttri
 use crate::page::PageTexture;
 use crate::pinch::ZoomSteps;
 use crate::repaint::RepaintSchedule;
-use crate::tab_drop::torn_off_place;
+use crate::tab_drop::{NEW_WINDOW_SIZE, TornOff};
 
 /// How close to a frameless window's edge (physical pixels at 1x) the
 /// pointer resizes it instead of acting on what is under it.
@@ -58,9 +58,9 @@ pub struct DroppedTabs {
     /// Where the pointer was, in physical screen pixels (it may have
     /// been outside the window).
     pub point: PhysicalPosition<f64>,
-    /// Where a window made for the tabs goes: the size of the one they
-    /// left, placed so they stay under the pointer.
-    pub place: Option<WindowGeometry>,
+    /// The window they left, for the window made for the tabs: placed
+    /// by the shell once the monitor under the point is known.
+    pub torn: TornOff,
     /// The folder the tabs were dragged as, by its chip.
     pub folder: Option<osmena_core::FolderId>,
 }
@@ -142,7 +142,7 @@ impl<E: Engine> BrowserWindow<E> {
     ) -> Result<BrowserWindow<E>, EngineError> {
         let mut attributes = Window::default_attributes()
             .with_title(title)
-            .with_inner_size(LogicalSize::new(1024.0, 768.0))
+            .with_inner_size(LogicalSize::new(NEW_WINDOW_SIZE.0, NEW_WINDOW_SIZE.1))
             .with_min_inner_size(LogicalSize::new(400.0, 300.0))
             .with_window_icon(icon::window_icon(brand));
         // Where the window was last time, when the session says; a
@@ -151,14 +151,19 @@ impl<E: Engine> BrowserWindow<E> {
             attributes = attributes
                 .with_inner_size(PhysicalSize::new(g.width.max(400), g.height.max(300)))
                 .with_maximized(g.maximized);
-            if g.x != i32::MIN {
-                attributes = attributes.with_position(PhysicalPosition::new(g.x, g.y));
-            }
         }
         let attributes = frameless_attributes(attributes, frameless);
         let window = event_loop
             .create_window(attributes)
             .map_err(|e| EngineError(format!("creating window: {e}")))?;
+        // The position is the window's outer corner, as `geometry` records
+        // it. `with_position` means the content's corner on macOS and the
+        // outer one elsewhere, so it is set once the window exists.
+        if let Some(g) = geometry
+            && g.x != i32::MIN
+        {
+            window.set_outer_position(PhysicalPosition::new(g.x, g.y));
+        }
         // The title bar macOS keeps over the strip must not take a press
         // on a tab for a move of the window.
         if crate::titlebar::content_refuses_window_moves(frameless, cfg!(target_os = "macos")) {
@@ -606,18 +611,30 @@ impl<E: Engine> BrowserWindow<E> {
     /// known.
     pub fn take_tab_drop(&mut self) -> Option<DroppedTabs> {
         let drop = self.chrome.take_tab_drop()?;
-        let origin = self.window.inner_position().ok()?;
+        let content = self.window.inner_position().ok()?;
+        let outer = self.window.outer_position().ok()?;
+        let size = self.window.inner_size();
         let scale = self.window.scale_factor();
         Some(DroppedTabs {
             tabs: drop.tabs,
             folder: drop.folder,
             point: PhysicalPosition::new(
-                f64::from(origin.x) + f64::from(drop.pointer.x) * scale,
-                f64::from(origin.y) + f64::from(drop.pointer.y) * scale,
+                f64::from(content.x) + f64::from(drop.pointer.x) * scale,
+                f64::from(content.y) + f64::from(drop.pointer.y) * scale,
             ),
-            place: self
-                .geometry()
-                .map(|source| torn_off_place(source, (drop.origin.x, drop.origin.y), scale)),
+            torn: TornOff {
+                source: WindowGeometry {
+                    x: outer.x,
+                    y: outer.y,
+                    width: size.width,
+                    height: size.height,
+                    // Full screen is no size to copy either.
+                    maximized: self.window.is_maximized() || self.window.fullscreen().is_some(),
+                },
+                source_scale: scale,
+                frame: (content.x - outer.x, content.y - outer.y),
+                origin: (drop.origin.x, drop.origin.y),
+            },
         })
     }
 
