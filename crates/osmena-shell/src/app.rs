@@ -32,7 +32,7 @@ use crate::media_prompt;
 use crate::profiles;
 use crate::repaint;
 use crate::settings_window::{SettingsOutcome, SettingsWindow};
-use crate::tab_drop::{DropTarget, drop_target, frontmost, note_focus};
+use crate::tab_drop::{DropTarget, drop_destination, note_focus};
 use crate::update::{self, Updater};
 use crate::window::{BrowserWindow, DroppedTabs};
 
@@ -846,38 +846,36 @@ impl<E: Engine> ProfileApp<E> {
 
     /// The command for tabs dragged off the strip of `source` and let go:
     /// to the other browser window of this profile under the pointer, or
-    /// to a new window where they were dropped ([`drop_target`] has the
-    /// rule).
+    /// to a new window where they were dropped ([`drop_destination`] has
+    /// the rule).
     fn tab_drop_command(
         &self,
         source: winit::window::WindowId,
         drop: DroppedTabs,
     ) -> Option<Command> {
+        // The source is among the windows under the point: whether it is
+        // in front of another one there decides the drop.
         let under: Vec<winit::window::WindowId> = self
             .windows
             .iter()
-            .filter(|(id, w)| **id != source && w.contains_screen_point(drop.point))
+            .filter(|(_, w)| w.contains_screen_point(drop.point))
             .map(|(id, _)| *id)
             .collect();
-        let other = frontmost(&under, &self.focus_order).and_then(|id| self.windows.get(&id));
-        let index = other.and_then(|w| w.strip_drop_index(drop.point));
-        let other = other.map(BrowserWindow::core_id);
-        let source = self.windows.get(&source)?;
+        let source_window = self.windows.get(&source)?;
         let whole_window = self
             .browser
-            .window(source.core_id())
+            .window(source_window.core_id())
             .is_some_and(|w| w.tabs.iter().all(|tab| drop.tabs.contains(&tab.id)));
-        match drop_target(
-            other,
-            source.contains_screen_point(drop.point),
-            whole_window,
-        ) {
-            DropTarget::Window(window) => Some(Command::MoveTabsToWindow {
-                tabs: drop.tabs,
-                window,
-                index,
-                folder: drop.folder,
-            }),
+        match drop_destination(&under, &self.focus_order, source, whole_window) {
+            DropTarget::Window(id) => {
+                let other = self.windows.get(&id)?;
+                Some(Command::MoveTabsToWindow {
+                    tabs: drop.tabs,
+                    window: other.core_id(),
+                    index: other.strip_drop_index(drop.point),
+                    folder: drop.folder,
+                })
+            }
             DropTarget::NewWindow => Some(Command::MoveTabsToNewWindow {
                 tabs: drop.tabs,
                 place: drop.place,

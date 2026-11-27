@@ -402,10 +402,12 @@ No engine is needed; the workspace builds in under a minute.
   (with `origin`, where a new window's corner goes for the tabs to
   stay under the pointer, and `folder`). The shell turns a `TabDrop`
   into a command with three pure functions in `tab_drop.rs`:
-  `drop_target` (another window of the profile takes the tabs;
-  otherwise a new window, also over the source, unless the tabs are
-  all the source has), `frontmost` (of overlapping windows, the one
-  that last had the keyboard: winit tells no stacking order) and
+  `drop_destination` (over the windows the pointer is over, the source
+  among them: the front one takes the tabs if it is another window;
+  when the source is in front, the drop is a new window, or nothing
+  when the tabs are all the source has), `frontmost` (of overlapping
+  windows, the one that last had the keyboard: winit tells no stacking
+  order) and
   `torn_off_place` (the `WindowGeometry` for `PlaceWindow`). A drop
   on another window asks that window's `ChromeState::strip_drop_index`
   for the gap, from `StripPlaces`, which `strip_row` records every
@@ -781,7 +783,7 @@ the CHANGELOG has an entry for each):
 - `osmena-shell/src/titlebar.rs` (new): `content_refuses_window_moves`
   and, on macOS, `keep_presses`. `window.rs` calls it after
   `create_window`; `DroppedTabs`, `take_tab_drop`, `strip_drop_index`.
-- `osmena-shell/src/tab_drop.rs` (new): `drop_target`, `frontmost`,
+- `osmena-shell/src/tab_drop.rs` (new): `drop_destination`, `frontmost`,
   `note_focus`, `torn_off_place`. `app.rs`: `tab_drop_command` over
   them, `focus_order`.
 - `osmena-chrome/src/chrome.rs`: `TabDrag` (`folder`, `held`, `grab`

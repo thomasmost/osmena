@@ -14,20 +14,28 @@ pub enum DropTarget<W> {
     Nothing,
 }
 
-/// What a drop does, from what is under the pointer: `other` is another
-/// window of this profile there (the front one, when several are),
-/// `over_source` whether the pointer is over the window the tabs came
-/// from, and `whole_window` whether the tabs are all that window has.
+/// Where a drop of tabs goes. `under` are the windows of the profile the
+/// pointer is over, the source among them when it is; `recent` is the
+/// focus order (see [`frontmost`]); `source` is the window the tabs came
+/// from; `whole_window` says the tabs are all that window has.
 ///
-/// Another window takes the tabs. Anywhere else they are torn off into
-/// a new window, over their own window too (the drag was detached from
-/// its strip, or it would have been a reorder); except that every tab
-/// of a window dropped on that window is torn from nothing, and stays.
-pub fn drop_target<W>(other: Option<W>, over_source: bool, whole_window: bool) -> DropTarget<W> {
-    match other {
-        Some(window) => DropTarget::Window(window),
-        None if over_source && whole_window => DropTarget::Nothing,
-        None => DropTarget::NewWindow,
+/// The front window among `under`, source included, decides. Another
+/// window in front takes the tabs. Otherwise they are torn off into a
+/// new window where they were dropped, over the source too (the drag was
+/// detached from its strip, or it would have been a reorder), except that
+/// when the source is in front and the tabs are all it has, nothing moves:
+/// a window dropped on itself keeps what it has. A source behind another
+/// window under the pointer is not the drop's: the window in front is.
+pub fn drop_destination<W: Copy + PartialEq>(
+    under: &[W],
+    recent: &[W],
+    source: W,
+    whole_window: bool,
+) -> DropTarget<W> {
+    match frontmost(under, recent) {
+        Some(window) if window != source => DropTarget::Window(window),
+        Some(_) if whole_window => DropTarget::Nothing,
+        _ => DropTarget::NewWindow,
     }
 }
 
@@ -69,28 +77,74 @@ pub fn torn_off_place(source: WindowGeometry, origin: (f32, f32), scale: f64) ->
 mod tests {
     use super::*;
 
+    /// Window 1 is the source; 7 is another window of the profile.
     #[test]
-    fn another_window_under_the_pointer_takes_the_tabs() {
-        assert_eq!(drop_target(Some(7), false, false), DropTarget::Window(7));
-        // Whatever else is true: it is in front of the source, or the
-        // tabs are all the source has.
-        assert_eq!(drop_target(Some(7), true, true), DropTarget::Window(7));
-    }
-
-    #[test]
-    fn tabs_dropped_on_no_other_window_are_torn_off() {
-        assert_eq!(drop_target::<u8>(None, false, false), DropTarget::NewWindow);
+    fn a_window_under_the_pointer_takes_the_tabs_when_the_source_is_not_there() {
         assert_eq!(
-            drop_target::<u8>(None, true, false),
-            DropTarget::NewWindow,
-            "over their own window's page too"
+            drop_destination(&[7], &[7], 1, false),
+            DropTarget::Window(7)
         );
-        assert_eq!(drop_target::<u8>(None, false, true), DropTarget::NewWindow);
+        assert_eq!(drop_destination(&[7], &[7], 1, true), DropTarget::Window(7));
+    }
+
+    /// Window 7 is hidden behind the source, and the pointer is over both.
+    /// The source had the keyboard, so it is in front: the drop is on the
+    /// source, not on the window behind it.
+    #[test]
+    fn the_source_in_front_of_another_window_takes_the_drop_itself() {
+        assert_eq!(
+            drop_destination(&[1, 7], &[1, 7], 1, false),
+            DropTarget::NewWindow
+        );
+        assert_eq!(
+            drop_destination(&[1, 7], &[1, 7], 1, true),
+            DropTarget::Nothing,
+            "every tab of the source, dropped over it, stays"
+        );
+    }
+
+    /// The source is behind window 7 under the pointer: 7 is in front, and
+    /// takes the tabs, whether or not they are all of the source's.
+    #[test]
+    fn the_source_behind_another_window_hands_the_tabs_to_it() {
+        assert_eq!(
+            drop_destination(&[1, 7], &[7, 1], 1, false),
+            DropTarget::Window(7)
+        );
+        assert_eq!(
+            drop_destination(&[1, 7], &[7, 1], 1, true),
+            DropTarget::Window(7)
+        );
     }
 
     #[test]
-    fn every_tab_of_a_window_dropped_on_it_stays() {
-        assert_eq!(drop_target::<u8>(None, true, true), DropTarget::Nothing);
+    fn the_source_alone_under_the_pointer_is_its_own_drop() {
+        assert_eq!(
+            drop_destination(&[1], &[1], 1, false),
+            DropTarget::NewWindow
+        );
+        assert_eq!(drop_destination(&[1], &[1], 1, true), DropTarget::Nothing);
+    }
+
+    #[test]
+    fn nothing_under_the_pointer_tears_the_tabs_off_whatever_the_source_holds() {
+        assert_eq!(
+            drop_destination::<u8>(&[], &[7], 1, false),
+            DropTarget::NewWindow
+        );
+        assert_eq!(
+            drop_destination::<u8>(&[], &[7], 1, true),
+            DropTarget::NewWindow
+        );
+    }
+
+    /// A window that never had the keyboard is behind the source, which did.
+    #[test]
+    fn a_window_that_never_had_the_keyboard_is_behind_the_source() {
+        assert_eq!(
+            drop_destination(&[1, 7], &[1], 1, false),
+            DropTarget::NewWindow
+        );
     }
 
     #[test]

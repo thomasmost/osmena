@@ -177,6 +177,11 @@ All notable changes to the osmena crates. The crates version together.
   key stays the drag's, and a click later is not taken for the drop.
   Before, the drag held on, and the next click tore the tabs off the
   window.
+- Tabs dropped over their own window, with another window behind it,
+  no longer go to that window behind: the window in front under the
+  pointer decides, the source included. Dropping every tab of a window
+  over it still changes nothing, and now only when that window is in
+  front.
 - A dragged tab keeps the point it was taken by under the pointer.
   An inactive tab becomes the active one as its drag begins and, in a
   crowded strip, grows from 40 points to 64; the hold was measured on
