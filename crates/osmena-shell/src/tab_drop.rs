@@ -182,6 +182,14 @@ pub fn recorded_corner(
     }
 }
 
+/// The monitor a window torn off a source is placed on: the one under the
+/// drop, else the source's own, since a drop can land off every monitor
+/// (where the tabs were is still on one). `None` leaves the window
+/// unplaced, for the system to place, when neither is on a monitor.
+pub fn torn_off_screen(at_drop: Option<Screen>, at_source: Option<Screen>) -> Option<Screen> {
+    at_drop.or(at_source)
+}
+
 /// The place of a window made for tabs torn off as `torn`, on the monitor
 /// `screen` under the drop. The window is the size it was in points,
 /// scaled to that monitor, unless the source was maximized, when it is
@@ -392,6 +400,30 @@ mod tests {
             tab_drop_target(&overlapping(), (5000.0, 5000.0), &[1], 1, &[10], &[10]),
             DropTarget::NewWindow
         );
+    }
+
+    /// A drop on a monitor places the window there. A drop off every monitor
+    /// places it on the source's monitor, which is where the tabs were.
+    #[test]
+    fn a_drop_off_every_monitor_places_the_window_on_the_sources() {
+        let drop = Some(screen(1920, 1080, 1.0));
+        let source = Some(Screen {
+            x: 1920,
+            ..screen(2560, 1440, 2.0)
+        });
+        assert_eq!(torn_off_screen(drop, source), drop);
+        assert_eq!(torn_off_screen(None, source), source);
+    }
+
+    /// A drop on a monitor takes precedence over the source's, and when
+    /// neither is on a monitor the window is left unplaced (None): the
+    /// system chooses its place, as for a window with no geometry.
+    #[test]
+    fn a_drop_on_a_monitor_is_placed_there_and_neither_leaves_it_unplaced() {
+        let drop = Some(screen(1920, 1080, 1.0));
+        let other = Some(screen(3840, 2160, 2.0));
+        assert_eq!(torn_off_screen(drop, other), drop);
+        assert_eq!(torn_off_screen(None, None), None);
     }
 
     /// A window whose frame is not known is under no point.

@@ -34,7 +34,7 @@ use crate::profiles;
 use crate::repaint;
 use crate::settings_window::{SettingsOutcome, SettingsWindow};
 use crate::tab_drop::{
-    DropTarget, Screen, WindowFrame, note_focus, tab_drop_target, torn_off_place,
+    DropTarget, Screen, WindowFrame, note_focus, tab_drop_target, torn_off_place, torn_off_screen,
 };
 use crate::update::{self, Updater};
 use crate::window::{BrowserWindow, DroppedTabs};
@@ -915,13 +915,23 @@ impl<E: Engine> ProfileApp<E> {
                     folder: drop.folder,
                 })
             }
-            DropTarget::NewWindow => Some(Command::MoveTabsToNewWindow {
-                // Off every monitor, the place is left to the system.
-                place: Self::screen_at(event_loop, drop.point)
-                    .map(|screen| torn_off_place(&drop.torn, screen)),
-                tabs: drop.tabs,
-                folder: drop.folder,
-            }),
+            DropTarget::NewWindow => {
+                // The monitor under the drop, else the source's (see
+                // `torn_off_screen`); on neither, the place is left to the system.
+                let source_corner = PhysicalPosition::new(
+                    f64::from(drop.torn.source.x),
+                    f64::from(drop.torn.source.y),
+                );
+                let screen = torn_off_screen(
+                    Self::screen_at(event_loop, drop.point),
+                    Self::screen_at(event_loop, source_corner),
+                );
+                Some(Command::MoveTabsToNewWindow {
+                    place: screen.map(|screen| torn_off_place(&drop.torn, screen)),
+                    tabs: drop.tabs,
+                    folder: drop.folder,
+                })
+            }
             DropTarget::Nothing => None,
         }
     }
