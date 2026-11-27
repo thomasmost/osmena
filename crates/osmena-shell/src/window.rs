@@ -61,6 +61,8 @@ pub struct DroppedTabs {
     /// Where a window made for the tabs goes: the size of the one they
     /// left, placed so they stay under the pointer.
     pub place: Option<WindowGeometry>,
+    /// The folder the tabs were dragged as, by its chip.
+    pub folder: Option<osmena_core::FolderId>,
 }
 
 pub struct BrowserWindow<E: Engine> {
@@ -608,6 +610,7 @@ impl<E: Engine> BrowserWindow<E> {
         let scale = self.window.scale_factor();
         Some(DroppedTabs {
             tabs: drop.tabs,
+            folder: drop.folder,
             point: PhysicalPosition::new(
                 f64::from(origin.x) + f64::from(drop.pointer.x) * scale,
                 f64::from(origin.y) + f64::from(drop.pointer.y) * scale,

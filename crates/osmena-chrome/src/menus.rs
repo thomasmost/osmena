@@ -668,6 +668,7 @@ pub fn menu_bar(input: &MenuBarInput<'_>) -> Vec<MenuEntry> {
                     Command::MoveTabsToNewWindow {
                         tabs: vec![tab],
                         place: None,
+                        folder: None,
                     }
                 }),
                 on_tab("Move Tab to Folder…", true, |tab| {
@@ -1276,6 +1277,7 @@ pub fn tab_menu(
             Command::MoveTabsToNewWindow {
                 tabs: targets.to_vec(),
                 place: None,
+                folder: None,
             },
         ),
         MenuEntry::Submenu {
@@ -1291,6 +1293,7 @@ pub fn tab_menu(
                             tabs: targets.to_vec(),
                             window: *id,
                             index: None,
+                            folder: None,
                         },
                     )
                 })
@@ -2147,7 +2150,7 @@ mod tests {
         assert_eq!(labels(windows), vec!["Other"]);
         assert!(matches!(
             &windows[0],
-            MenuEntry::Item { command: Command::MoveTabsToWindow { tabs, window: WindowId(7), index: None }, .. }
+            MenuEntry::Item { command: Command::MoveTabsToWindow { tabs, window: WindowId(7), index: None, folder: None }, .. }
                 if *tabs == vec![TabId(2)]
         ));
         let MenuEntry::Submenu {
@@ -2890,7 +2893,8 @@ mod page_menu_tests {
             command(tab, "Move Tab to New Window"),
             Command::MoveTabsToNewWindow {
                 tabs: vec![TabId(1)],
-                place: None
+                place: None,
+                folder: None,
             }
         );
         assert!(is_enabled(tab, "Show Next Tab"));

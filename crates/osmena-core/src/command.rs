@@ -53,19 +53,27 @@ pub enum Command {
     /// page reloads and its history and form state are lost. `place` is
     /// where the window goes when the tabs were dropped somewhere (a
     /// drag out of the strip): a `PlaceWindow` action then comes before
-    /// the `OpenWindow`. `None` leaves the place to the system.
+    /// the `OpenWindow`. `None` leaves the place to the system. `folder`
+    /// names the folder the tabs are moved as (a folder dragged out by
+    /// its chip): the new tabs are then in a folder of that name,
+    /// expanded or not as it was. `None` moves them as loose tabs.
     MoveTabsToNewWindow {
         tabs: Vec<TabId>,
         place: Option<WindowGeometry>,
+        folder: Option<FolderId>,
     },
     /// Move these tabs to `window`'s strip, the same way: to `index`
     /// among the tabs it has (as `MoveTabs` counts, with its rule for
     /// folders: between two tabs of one folder they join it), or to the
-    /// end, outside any folder, when `index` is `None`.
+    /// end, outside any folder, when `index` is `None`. With `folder`
+    /// (see `MoveTabsToNewWindow`) they arrive as a folder of that name
+    /// and state, placed as `MoveFolder` places one: beside another
+    /// folder, never inside it.
     MoveTabsToWindow {
         tabs: Vec<TabId>,
         window: WindowId,
         index: Option<usize>,
+        folder: Option<FolderId>,
     },
     /// Reorder: put these tabs, together and in strip order, at `index`
     /// among their window's other tabs (0 is first; the count of the
@@ -926,14 +934,17 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             remember_closed(browser, tabs);
             close_tabs(browser, tabs)
         }
-        Command::MoveTabsToNewWindow { tabs, place } => {
-            move_tabs_to_new_window(browser, tabs, *place)
-        }
+        Command::MoveTabsToNewWindow {
+            tabs,
+            place,
+            folder,
+        } => move_tabs_to_new_window(browser, tabs, *place, *folder),
         Command::MoveTabsToWindow {
             tabs,
             window,
             index,
-        } => move_tabs_to_window(browser, tabs, *window, *index),
+            folder,
+        } => move_tabs_to_window(browser, tabs, *window, *index, *folder),
         Command::MoveTabs { tabs, index } => {
             move_tabs(browser, tabs, *index);
             Vec::new()
@@ -2641,11 +2652,14 @@ fn move_tabs_to_new_window(
     browser: &mut Browser,
     tabs: &[TabId],
     place: Option<WindowGeometry>,
+    folder: Option<FolderId>,
 ) -> Vec<EngineAction> {
     let moving = moving_tabs(browser, tabs);
     let Some((_, first_url, _)) = moving.first() else {
         return Vec::new();
     };
+    // Read before the originals close and take their folder with them.
+    let folder = folder_to_carry(browser, folder);
     let opened = open_window(browser, first_url.clone());
     let window = browser
         .windows
@@ -2661,6 +2675,9 @@ fn move_tabs_to_new_window(
         .collect();
     actions.extend(opened);
     actions.extend(place_moved_tabs(browser, window, &moving, 1));
+    if let Some(folder) = folder {
+        fold_arrived(browser, window, 0, folder);
+    }
     actions
 }
 
@@ -2669,6 +2686,7 @@ fn move_tabs_to_window(
     tabs: &[TabId],
     window: WindowId,
     index: Option<usize>,
+    folder: Option<FolderId>,
 ) -> Vec<EngineAction> {
     let Some(before) = browser.window(window).map(|w| w.tabs.len()) else {
         return Vec::new();
@@ -2680,21 +2698,61 @@ fn move_tabs_to_window(
     if moving.is_empty() {
         return Vec::new();
     }
+    let folder = folder_to_carry(browser, folder);
     let actions = place_moved_tabs(browser, window, &moving, 0);
-    // They were made at the end; a drop on the strip names the place.
-    if let Some(index) = index {
-        let arrived: Vec<TabId> = browser
-            .window(window)
-            .map(|w| {
-                w.tabs[before.min(w.tabs.len())..]
-                    .iter()
-                    .map(|t| t.id)
-                    .collect()
-            })
-            .unwrap_or_default();
-        move_tabs(browser, &arrived, index);
+    // They were made at the end, as loose tabs. A folder dragged here
+    // is a folder again; a drop on the strip names the place.
+    match (folder, index) {
+        (Some(folder), index) => {
+            let id = fold_arrived(browser, window, before, folder);
+            if let Some(index) = index {
+                move_folder(browser, id, index);
+            }
+        }
+        (None, Some(index)) => {
+            let arrived: Vec<TabId> = browser
+                .window(window)
+                .map(|w| {
+                    w.tabs[before.min(w.tabs.len())..]
+                        .iter()
+                        .map(|t| t.id)
+                        .collect()
+                })
+                .unwrap_or_default();
+            move_tabs(browser, &arrived, index);
+        }
+        (None, None) => {}
     }
     actions
+}
+
+/// The name and expanded state of `folder`, to make it again around
+/// its tabs in the window they move to. `None` when no folder is being
+/// moved, or it is not there.
+fn folder_to_carry(browser: &Browser, folder: Option<FolderId>) -> Option<(String, bool)> {
+    let folder = folder?;
+    let window = browser.window(browser.window_of_folder(folder)?)?;
+    window.folder(folder).map(|f| (f.name.clone(), f.expanded))
+}
+
+/// Put `window`'s tabs from `from` on (the ones that just arrived, at
+/// its end) in a new folder of this name and state, as a restored
+/// session makes its folders. Returns the folder's id.
+fn fold_arrived(
+    browser: &mut Browser,
+    window: WindowId,
+    from: usize,
+    (name, expanded): (String, bool),
+) -> FolderId {
+    let id = browser.allocate_folder_id();
+    if let Some(w) = browser.window_mut(window) {
+        w.folders.push(Folder { id, name, expanded });
+        for tab in w.tabs.iter_mut().skip(from) {
+            tab.folder = Some(id);
+        }
+        w.prune_folders();
+    }
+    id
 }
 
 /// Reorder within a window: see `Command::MoveTabs`. Only the tabs of
@@ -4135,6 +4193,136 @@ mod tests {
         assert_eq!(w.folder_tabs(g), [t[3], t[4], t[5]]);
     }
 
+    #[test]
+    fn a_folder_moved_to_a_new_window_is_a_folder_there() {
+        let (mut b, window, t, f, g) = two_folders();
+        dispatch(
+            &mut b,
+            &Command::SetFolderExpanded {
+                folder: f,
+                expanded: true,
+            },
+        );
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToNewWindow {
+                tabs: vec![t[1], t[2]],
+                place: None,
+                folder: Some(f),
+            },
+        );
+        let new = &b.windows[1];
+        assert_eq!(new.tabs.len(), 2);
+        assert_eq!(new.folders.len(), 1);
+        let folder = &new.folders[0];
+        assert_eq!((folder.name.as_str(), folder.expanded), ("F", true));
+        assert!(new.tabs.iter().all(|tab| tab.folder == Some(folder.id)));
+        // Where it came from it is gone, and the other folder is not.
+        let old = b.window(window).unwrap();
+        assert!(old.folder(f).is_none());
+        assert_eq!(old.folder_tabs(g), [t[4], t[5]]);
+        assert_eq!(order(&b, window), [t[0], t[3], t[4], t[5]]);
+
+        // A collapsed one stays collapsed; a folder that is not there
+        // moves the tabs as loose tabs.
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToNewWindow {
+                tabs: vec![t[4], t[5]],
+                place: None,
+                folder: Some(g),
+            },
+        );
+        let new = &b.windows[2];
+        assert_eq!(new.folders.len(), 1);
+        assert_eq!(
+            (new.folders[0].name.as_str(), new.folders[0].expanded),
+            ("G", false)
+        );
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToNewWindow {
+                tabs: vec![t[0]],
+                place: None,
+                folder: Some(FolderId(99)),
+            },
+        );
+        let new = &b.windows[3];
+        assert!(new.folders.is_empty());
+        assert_eq!(new.tabs[0].folder, None);
+    }
+
+    #[test]
+    fn a_folder_moved_to_another_window_lands_as_a_folder_beside_the_ones_there() {
+        // The source: a window of three, two of them in "Moved".
+        let (mut b, _window, [a, bb, _c]) = three_tabs();
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToFolder {
+                tabs: vec![a, bb],
+                folder: FolderTarget::New {
+                    name: "Moved".to_string(),
+                },
+            },
+        );
+        let moved = b.tab(a).unwrap().folder.expect("in a folder");
+        // The target: four tabs, the middle two in "There".
+        let other = dispatch(&mut b, &Command::NewWindow);
+        let EngineAction::OpenWindow { window: other, .. } = other[0].clone() else {
+            panic!("NewWindow opens a window");
+        };
+        for _ in 0..3 {
+            dispatch(
+                &mut b,
+                &Command::NewTab {
+                    window: other,
+                    url: Some(url("https://there.example/")),
+                },
+            );
+        }
+        let stay = order(&b, other);
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToFolder {
+                tabs: vec![stay[1], stay[2]],
+                folder: FolderTarget::New {
+                    name: "There".to_string(),
+                },
+            },
+        );
+        let there = b.tab(stay[1]).unwrap().folder.expect("in a folder");
+        // Dropped between the two tabs of "There": at its front, which
+        // is as near as its end.
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToWindow {
+                tabs: vec![a, bb],
+                window: other,
+                index: Some(2),
+                folder: Some(moved),
+            },
+        );
+        let target = b.window(other).unwrap();
+        let urls: Vec<&str> = target.tabs.iter().map(|t| t.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            [
+                stay_url(&b, stay[0]),
+                "https://a.example/",
+                "https://b.example/",
+                "https://there.example/",
+                "https://there.example/",
+                "https://there.example/"
+            ]
+        );
+        assert_eq!(target.folder_tabs(there), [stay[1], stay[2]]);
+        let arrived = target.tabs[1].folder.expect("the moved tabs are a folder");
+        assert_ne!(arrived, there);
+        assert_eq!(target.tabs[2].folder, Some(arrived));
+        assert_eq!(target.folder(arrived).unwrap().name, "Moved");
+        assert!(b.window_of_folder(moved).is_none(), "the old one is gone");
+    }
+
     /// A selection is dragged as tabs, whatever folders its tabs were
     /// in: they all take the folder of the place they land.
     #[test]
@@ -4254,6 +4442,7 @@ mod tests {
             &Command::MoveTabsToNewWindow {
                 tabs: vec![c, a],
                 place: None,
+                folder: None,
             },
         );
         assert_eq!(b.windows.len(), 2);
@@ -4296,6 +4485,7 @@ mod tests {
             &Command::MoveTabsToNewWindow {
                 tabs: vec![a],
                 place: Some(geometry),
+                folder: None,
             },
         );
         let new = b.windows[1].id;
@@ -4314,6 +4504,7 @@ mod tests {
             &Command::MoveTabsToNewWindow {
                 tabs: vec![a],
                 place: None,
+                folder: None,
             },
         );
         assert!(
@@ -4331,6 +4522,7 @@ mod tests {
             &Command::MoveTabsToNewWindow {
                 tabs: vec![a, bb, c],
                 place: None,
+                folder: None,
             },
         );
         assert_eq!(b.windows.len(), 1);
@@ -4352,6 +4544,7 @@ mod tests {
                 tabs: vec![a, c],
                 window: other,
                 index: None,
+                folder: None,
             },
         );
         let target = b.window(other).unwrap();
@@ -4372,6 +4565,7 @@ mod tests {
                     tabs: vec![moved, TabId(99)],
                     window: other,
                     index: None,
+                    folder: None,
                 },
             )
             .is_empty()
@@ -4383,6 +4577,7 @@ mod tests {
                     tabs: vec![a],
                     window: WindowId(99),
                     index: None,
+                    folder: None,
                 },
             )
             .is_empty()
@@ -4412,6 +4607,7 @@ mod tests {
                 tabs: vec![c, a],
                 window: other,
                 index: Some(1),
+                folder: None,
             },
         );
         let target = b.window(other).unwrap();
@@ -4440,6 +4636,7 @@ mod tests {
                 tabs: vec![a],
                 window: other,
                 index: Some(9),
+                folder: None,
             },
         );
         let target = b.window(other).unwrap();
@@ -4479,6 +4676,7 @@ mod tests {
                 tabs: vec![a],
                 window: other,
                 index: Some(1),
+                folder: None,
             },
         );
         let target = b.window(other).unwrap();
@@ -4491,6 +4689,7 @@ mod tests {
                 tabs: vec![bb],
                 window: other,
                 index: None,
+                folder: None,
             },
         );
         let target = b.window(other).unwrap();
@@ -4684,6 +4883,7 @@ mod tests {
             &Command::MoveTabsToNewWindow {
                 tabs: vec![a],
                 place: None,
+                folder: None,
             },
         );
         assert!(b.closed_tabs.is_empty(), "a moved tab is not a closed tab");
@@ -5703,6 +5903,10 @@ mod tests {
             tabs.push(b.window(window).unwrap().active);
         }
         (b, window, tabs)
+    }
+
+    fn stay_url(b: &Browser, tab: TabId) -> &str {
+        b.tab(tab).unwrap().url.as_str()
     }
 
     fn order(b: &Browser, window: WindowId) -> Vec<TabId> {
@@ -7449,6 +7653,7 @@ mod tests {
             &Command::MoveTabsToNewWindow {
                 tabs: vec![t[1]],
                 place: None,
+                folder: None,
             },
         );
         assert!(

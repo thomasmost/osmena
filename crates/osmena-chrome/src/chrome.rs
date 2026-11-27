@@ -848,6 +848,9 @@ pub enum MenuRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabDrop {
     pub tabs: Vec<TabId>,
+    /// The folder the tabs were dragged as, by its chip: they are to
+    /// stay one where they go. `None` for a drag of tabs.
+    pub folder: Option<FolderId>,
     pub pointer: Pos2,
     /// Where the top-left corner of a window made for these tabs goes,
     /// in the same points, for them to stay under the pointer as they
@@ -2216,6 +2219,7 @@ fn drop_drag(state: &mut ChromeState, drag: TabDrag, pointer: Pos2, commands: &m
     if drag.detached {
         state.tab_drop = Some(TabDrop {
             tabs: drag.tabs,
+            folder: drag.folder,
             pointer,
             origin: drag.origin,
         });

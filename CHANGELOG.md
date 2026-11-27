@@ -6,6 +6,12 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- `Command::MoveTabsToNewWindow` and `Command::MoveTabsToWindow` each
+  have one more field, `folder: Option<FolderId>`: the folder the tabs
+  are moved as. With it the tabs arrive in a new folder of the same
+  name, expanded or not as it was; `None` moves loose tabs, as before.
+  Every literal needs the field. `TabDrop` carries the same field.
+
 - `Command::MoveTabsToWindow` has a third field, `index:
   Option<usize>`: where the tabs go among the target window's own, as
   `MoveTabs` counts and with its rule for folders. `None` is the end,
@@ -90,6 +96,13 @@ All notable changes to the osmena crates. The crates version together.
   font.
 
 ### Added
+
+- A folder dragged off the strip moves as a folder. Let go over
+  nothing it gets a window of its own; over another window of the
+  profile it goes there, at the gap of the strip it was dropped on
+  (beside a folder already there, never inside it) or at the end.
+  Either way it is made again around its tabs with its name and
+  whether it was expanded.
 
 - A folder is dragged by its chip. A press on the chip that travels
   takes the whole folder along the strip, the chip riding with its

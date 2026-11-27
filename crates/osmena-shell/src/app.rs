@@ -876,10 +876,12 @@ impl<E: Engine> ProfileApp<E> {
                 tabs: drop.tabs,
                 window,
                 index,
+                folder: drop.folder,
             }),
             DropTarget::NewWindow => Some(Command::MoveTabsToNewWindow {
                 tabs: drop.tabs,
                 place: drop.place,
+                folder: drop.folder,
             }),
             DropTarget::Nothing => None,
         }

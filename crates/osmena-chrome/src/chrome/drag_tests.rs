@@ -685,3 +685,30 @@ fn a_click_on_a_chip_still_lists_its_tabs() {
     assert_eq!(rig.state.tab_drag, None);
     assert_eq!(rig.order(), vec![1, 2, 3, 4, 5]);
 }
+
+/// A folder pulled off the strip and let go is the shell's to place,
+/// as a folder: the drop names it.
+#[test]
+fn a_detached_folder_drag_is_dropped_as_a_folder() {
+    let mut rig = Rig::new(5);
+    rig.folder(7, &[2, 3], true);
+    let from = rig.chip_rect(7).center();
+    let to = Pos2::new(from.x + 80.0, 300.0);
+    rig.press(from);
+    rig.drag(from, to);
+    assert!(rig.state.tab_drag.as_ref().is_some_and(|d| d.detached));
+    assert!(
+        rig.chip_rect(7).contains(to),
+        "the chip rides with the pointer off the strip"
+    );
+    rig.release(to);
+    let drop = rig.state.take_tab_drop().expect("a drop for the shell");
+    assert_eq!(drop.tabs, vec![TabId(2), TabId(3)]);
+    assert_eq!(drop.folder, Some(FolderId(7)));
+    assert_eq!(rig.order(), vec![1, 2, 3, 4, 5]);
+    assert!(
+        rig.answered
+            .iter()
+            .all(|c| !matches!(c, Command::MoveFolder { .. } | Command::MoveTabs { .. }))
+    );
+}
