@@ -76,14 +76,17 @@ pub const NEW_WINDOW_SIZE: (f64, f64) = (1024.0, 768.0);
 /// it at the drop.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TornOff {
-    /// The source's outer top-left corner and inner size, in physical
-    /// pixels. `maximized` is set when the source is maximized or full
-    /// screen: its size is then not one a window should copy.
+    /// The source's corner that winit's `with_position` takes, and its
+    /// inner size, in physical pixels (see [`recorded_corner`]: the outer
+    /// corner, or on macOS the content corner). `maximized` is set when
+    /// the source is maximized or full screen: its size is then not one a
+    /// window should copy.
     pub source: WindowGeometry,
     /// The source's scale factor (physical pixels a point).
     pub source_scale: f64,
-    /// From the source's outer corner to its content's, in physical
-    /// pixels: the system frame's left and top, or zero without a frame.
+    /// From `source`'s corner to the source's content corner, in physical
+    /// pixels: the system frame's left and top where that corner is the
+    /// outer one, zero where it is the content one.
     pub frame: (i32, i32),
     /// Where the new window's content corner goes, in points from the
     /// source's content corner (`TabDrop::origin`), so that the tabs stay
@@ -91,13 +94,39 @@ pub struct TornOff {
     pub origin: (f32, f32),
 }
 
+/// The corner of a window that winit's `with_position` takes: the outer
+/// corner on Windows, X11 and Wayland, and on macOS the content corner
+/// when the window has the system frame (a frameless one has no frame, so
+/// both are the same there).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PositionCorner {
+    Outer,
+    Content,
+}
+
+/// The corner of a source window that a window torn off it is placed by,
+/// and the frame from that corner to the content: given the window's
+/// `content` and `outer` corners in physical pixels and the platform's
+/// [`PositionCorner`]. Returns `(corner, frame)`.
+pub fn recorded_corner(
+    position: PositionCorner,
+    content: (i32, i32),
+    outer: (i32, i32),
+) -> ((i32, i32), (i32, i32)) {
+    match position {
+        PositionCorner::Outer => (outer, (content.0 - outer.0, content.1 - outer.1)),
+        PositionCorner::Content => (content, (0, 0)),
+    }
+}
+
 /// The place of a window made for tabs torn off as `torn`, on the monitor
 /// `screen` under the drop. The window is the size it was in points,
 /// scaled to that monitor, unless the source was maximized, when it is
 /// [`NEW_WINDOW_SIZE`]; it is never larger than the monitor, and pulled
-/// back onto the monitor if the drop was near its edge. Its outer corner
-/// is placed (`set_outer_position`, which means the same on every
-/// platform), so its content corner is where the origin puts it.
+/// back onto the monitor if the drop was near its edge. It is placed by
+/// the corner `torn.frame` measures from (see [`recorded_corner`]), which
+/// is the corner `with_position` takes, so its content corner is where the
+/// origin puts it.
 pub fn torn_off_place(torn: &TornOff, screen: Screen) -> WindowGeometry {
     let source = torn.source;
     let (points_width, points_height) = if source.maximized {
@@ -119,8 +148,9 @@ pub fn torn_off_place(torn: &TornOff, screen: Screen) -> WindowGeometry {
     let content_y = f64::from(source.y) + f64::from(torn.frame.1);
     let content_x = content_x + f64::from(torn.origin.0) * torn.source_scale;
     let content_y = content_y + f64::from(torn.origin.1) * torn.source_scale;
-    // The outer corner is that less the frame, which is measured in the
-    // monitor's pixels.
+    // The corner placed is that less the frame, which is measured in the
+    // monitor's pixels. On a platform whose corner is the content one the
+    // frame is zero, and the content corner is placed.
     let frame_scale = screen.scale / torn.source_scale;
     let x = (content_x - f64::from(torn.frame.0) * frame_scale).round() as i64;
     let y = (content_y - f64::from(torn.frame.1) * frame_scale).round() as i64;
@@ -352,5 +382,53 @@ mod tests {
         // frame is 16 by 62 of this monitor's, so the outer corner is
         // (408 - 16, 101 - 62).
         assert_eq!((place.x, place.y), (392, 39));
+    }
+
+    /// Where `with_position` takes a window, per platform, is an input: on
+    /// Windows and X11 the outer corner, so the frame is the offset from
+    /// the outer corner to the content one.
+    #[test]
+    fn where_the_position_is_the_outer_corner_the_frame_is_the_offset_to_the_content() {
+        assert_eq!(
+            recorded_corner(PositionCorner::Outer, (108, 81), (100, 50)),
+            ((100, 50), (8, 31))
+        );
+    }
+
+    /// On macOS, `with_position` takes the content corner: the recorded
+    /// corner is the content one, and there is no frame to take off.
+    #[test]
+    fn where_the_position_is_the_content_corner_the_frame_is_zero() {
+        assert_eq!(
+            recorded_corner(PositionCorner::Content, (108, 81), (100, 50)),
+            ((108, 81), (0, 0))
+        );
+    }
+
+    /// The macOS rule end to end: the source's content corner is recorded,
+    /// and the window torn off it is placed by its content corner, which
+    /// is where the origin puts it.
+    #[test]
+    fn where_the_position_is_the_content_corner_the_window_is_placed_by_it() {
+        let (corner, frame) = recorded_corner(PositionCorner::Content, (108, 81), (100, 50));
+        let source = WindowGeometry {
+            x: corner.0,
+            y: corner.1,
+            width: 800,
+            height: 600,
+            maximized: false,
+        };
+        let torn = TornOff {
+            source,
+            source_scale: 1.0,
+            frame,
+            origin: (300.0, 20.0),
+        };
+        let place = torn_off_place(&torn, screen(3840, 2160, 1.0));
+        assert_eq!(
+            (place.x, place.y),
+            (408, 101),
+            "the content corner: 300 and 20 points from the source's, on macOS"
+        );
     }
 }

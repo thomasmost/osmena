@@ -36,7 +36,7 @@ use winit::window::{CursorIcon, Fullscreen, ResizeDirection, Window, WindowAttri
 use crate::page::PageTexture;
 use crate::pinch::ZoomSteps;
 use crate::repaint::RepaintSchedule;
-use crate::tab_drop::{NEW_WINDOW_SIZE, TornOff};
+use crate::tab_drop::{NEW_WINDOW_SIZE, PositionCorner, TornOff, recorded_corner};
 
 /// How close to a frameless window's edge (physical pixels at 1x) the
 /// pointer resizes it instead of acting on what is under it.
@@ -151,19 +151,14 @@ impl<E: Engine> BrowserWindow<E> {
             attributes = attributes
                 .with_inner_size(PhysicalSize::new(g.width.max(400), g.height.max(300)))
                 .with_maximized(g.maximized);
+            if g.x != i32::MIN {
+                attributes = attributes.with_position(PhysicalPosition::new(g.x, g.y));
+            }
         }
         let attributes = frameless_attributes(attributes, frameless);
         let window = event_loop
             .create_window(attributes)
             .map_err(|e| EngineError(format!("creating window: {e}")))?;
-        // The position is the window's outer corner, as `geometry` records
-        // it. `with_position` means the content's corner on macOS and the
-        // outer one elsewhere, so it is set once the window exists.
-        if let Some(g) = geometry
-            && g.x != i32::MIN
-        {
-            window.set_outer_position(PhysicalPosition::new(g.x, g.y));
-        }
         // Only a frameless window on macOS has a title bar over its content,
         // which would take a press on a tab for a move of the window; with
         // the system's frame the title bar is above the content and the
@@ -617,6 +612,16 @@ impl<E: Engine> BrowserWindow<E> {
         let outer = self.window.outer_position().ok()?;
         let size = self.window.inner_size();
         let scale = self.window.scale_factor();
+        // On macOS winit's `with_position` takes the content corner (with the
+        // system frame; a frameless window has no frame, so both corners are
+        // the same), so the window is recorded by its content corner there and
+        // has no frame to take off. Elsewhere it is the outer corner.
+        let position = if cfg!(target_os = "macos") {
+            PositionCorner::Content
+        } else {
+            PositionCorner::Outer
+        };
+        let (corner, frame) = recorded_corner(position, (content.x, content.y), (outer.x, outer.y));
         Some(DroppedTabs {
             tabs: drop.tabs,
             folder: drop.folder,
@@ -626,15 +631,15 @@ impl<E: Engine> BrowserWindow<E> {
             ),
             torn: TornOff {
                 source: WindowGeometry {
-                    x: outer.x,
-                    y: outer.y,
+                    x: corner.0,
+                    y: corner.1,
                     width: size.width,
                     height: size.height,
                     // Full screen is no size to copy either.
                     maximized: self.window.is_maximized() || self.window.fullscreen().is_some(),
                 },
                 source_scale: scale,
-                frame: (content.x - outer.x, content.y - outer.y),
+                frame,
                 origin: (drop.origin.x, drop.origin.y),
             },
         })
