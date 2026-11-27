@@ -5532,6 +5532,179 @@ title = "B"
         }
     }
 
+    /// A source window of `A` and `D` (D deferred, by the restore) and a
+    /// target of `X` and `Y` (Y deferred); `blocked` is a site blocked
+    /// before the session comes back.
+    fn source_and_target(blocked: Option<&str>) -> (Browser, WindowId, WindowId) {
+        use crate::session::{SessionTab, SessionWindow};
+        let tab = |page: &str, title: &str| SessionTab {
+            url: url(page),
+            title: title.to_string(),
+            folder: None,
+            folder_index: None,
+        };
+        let window = |tabs: Vec<SessionTab>| SessionWindow {
+            active: 0,
+            geometry: None,
+            folders: Vec::new(),
+            tabs,
+        };
+        let mut b = browser();
+        if let Some(site) = blocked {
+            b.blocked.add(site);
+        }
+        restore_session(
+            &mut b,
+            &Session {
+                closed_tabs: Vec::new(),
+                windows: vec![
+                    window(vec![
+                        tab("https://a.example/", "A"),
+                        tab("https://d.example/", "D"),
+                    ]),
+                    window(vec![
+                        tab("https://x.example/", "X"),
+                        tab("https://y.example/", "Y"),
+                    ]),
+                ],
+            },
+        );
+        let source = b.windows[0].id;
+        let target = b.windows[1].id;
+        (b, source, target)
+    }
+
+    /// The addresses of `window`'s tabs in strip order. A tab that arrives
+    /// is made again at its address, so its title is not what it was.
+    fn urls_of(b: &Browser, window: WindowId) -> Vec<String> {
+        b.window(window)
+            .expect("the window is open")
+            .tabs
+            .iter()
+            .map(|t| t.url.to_string())
+            .collect()
+    }
+
+    /// A deferred tab (it has never been loaded) moved to another window
+    /// arrives as a live tab of its address, at the index it was dropped
+    /// on, and takes the focus there. The deferred tab it was is gone.
+    #[test]
+    fn a_deferred_tab_moved_to_an_index_arrives_live_there() {
+        let (mut b, source, target) = source_and_target(None);
+        let d = b.window(source).unwrap().tabs[1].id;
+        assert!(b.tab(d).unwrap().deferred);
+        let actions = dispatch(
+            &mut b,
+            &Command::MoveTabsToWindow {
+                tabs: vec![d],
+                window: target,
+                index: Some(1),
+                folder: None,
+            },
+        );
+        assert_eq!(
+            urls_of(&b, target),
+            vec![
+                "https://x.example/",
+                "https://d.example/",
+                "https://y.example/"
+            ]
+        );
+        let arrived = b.window(target).unwrap().tabs[1].clone();
+        assert!(
+            !arrived.deferred && !arrived.warming,
+            "made live, not woken"
+        );
+        assert_eq!(arrived.url, url("https://d.example/"));
+        assert_eq!(b.window(target).unwrap().active, arrived.id);
+        assert!(actions.contains(&EngineAction::CreateTab {
+            window: target,
+            tab: arrived.id,
+            url: url("https://d.example/"),
+        }));
+        assert!(
+            !actions.contains(&EngineAction::CloseTab(d)),
+            "a deferred tab has no engine tab for the engine to close"
+        );
+        assert!(b.tab(d).is_none(), "the deferred original is gone");
+    }
+
+    /// A tab warming out of sight (its engine tab loading hidden for its
+    /// title) moved to an index: the hidden engine tab is closed with the
+    /// original, and the tab that arrives is not warming.
+    #[test]
+    fn a_warming_tab_moved_to_an_index_closes_its_hidden_engine_tab() {
+        let (mut b, source, target) = source_and_target(None);
+        let d = b.window(source).unwrap().tabs[1].id;
+        dispatch(&mut b, &Command::WarmTab(d));
+        assert!(b.tab(d).unwrap().warming);
+        let actions = dispatch(
+            &mut b,
+            &Command::MoveTabsToWindow {
+                tabs: vec![d],
+                window: target,
+                index: Some(0),
+                folder: None,
+            },
+        );
+        assert_eq!(
+            urls_of(&b, target),
+            vec![
+                "https://d.example/",
+                "https://x.example/",
+                "https://y.example/"
+            ]
+        );
+        let arrived = b.window(target).unwrap().tabs[0].clone();
+        assert!(!arrived.deferred && !arrived.warming);
+        assert!(
+            actions.contains(&EngineAction::CloseTab(d)),
+            "the hidden engine tab goes with the original: {actions:?}"
+        );
+    }
+
+    /// A deferred tab on a blocked site, moved to an index: it arrives
+    /// blocked, keeping its address, and loads `about:blank` behind the
+    /// block page, as a new tab on a blocked site does.
+    #[test]
+    fn a_blocked_tab_moved_to_an_index_arrives_blocked_there() {
+        let (mut b, source, target) = source_and_target(Some("d.example"));
+        let d = b.window(source).unwrap().tabs[1].id;
+        assert!(
+            b.tab(d).unwrap().blocked.is_some(),
+            "blocked before the move"
+        );
+        let actions = dispatch(
+            &mut b,
+            &Command::MoveTabsToWindow {
+                tabs: vec![d],
+                window: target,
+                index: Some(2),
+                folder: None,
+            },
+        );
+        assert_eq!(
+            urls_of(&b, target),
+            vec![
+                "https://x.example/",
+                "https://y.example/",
+                "https://d.example/"
+            ]
+        );
+        let arrived = b.window(target).unwrap().tabs[2].clone();
+        assert!(arrived.blocked.is_some(), "still blocked over there");
+        assert_eq!(
+            arrived.url,
+            url("https://d.example/"),
+            "the address is kept"
+        );
+        assert!(actions.contains(&EngineAction::CreateTab {
+            window: target,
+            tab: arrived.id,
+            url: crate::model::about_blank(),
+        }));
+    }
+
     #[test]
     fn a_session_comes_back_with_deferred_tabs_that_load_when_shown() {
         let mut b = browser();
