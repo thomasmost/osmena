@@ -6684,3 +6684,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod drag_tests;
