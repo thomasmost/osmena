@@ -675,8 +675,9 @@ No engine is needed; the workspace builds in under a minute.
   (`NSView`'s default for a view that is not opaque, which winit's
   is). `titlebar::keep_presses` adds that method to winit's view
   class, answering no (`class_addMethod`: an override of the inherited
-  method, nothing of winit's replaced, a no-op the second time), for
-  the windows `content_refuses_window_moves` names. So on macOS the
+  method, nothing of winit's replaced, a no-op the second time), and
+  `BrowserWindow::open` calls it for a frameless window on macOS, the
+  only kind whose title bar lies over its content. So on macOS the
   window moves only through `WindowRequest::Drag`
   (`Window::drag_window`, which hands AppKit `NSApp.currentEvent`
   after the frame), the double-click's zoom and the traffic lights;
