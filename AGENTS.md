@@ -391,7 +391,12 @@ No engine is needed; the workspace builds in under a minute.
   the window), with the row's gap closed. Escape is read at the top
   of `strip_row`, before any tab is drawn, since egui drops its own
   drag on the same key and a tab would take that for a drop;
-  `takes_every_key` counts a drag so the shell sends the key. The
+  `takes_every_key` counts a drag so the shell sends the key.
+  `ChromeState::cancel_drag` ends a drag with no drop and ends egui's
+  hold with it, for the cases where no release comes: Escape, the
+  window losing the keyboard (`BrowserWindow`'s `Focused(false)`), and
+  full screen (no strip is drawn). A drag must never outlive its hold
+  in egui, or the next click is taken for the drop. The
   release is `drop_drag`, the one place a drag ends in a command:
   `MoveTabs` or `MoveFolder` in the row, a `TabDrop` when detached
   (with `origin`, where a new window's corner goes for the tabs to

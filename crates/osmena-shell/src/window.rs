@@ -795,6 +795,9 @@ impl<E: Engine> BrowserWindow<E> {
                     self.host.close_extension_popups();
                 } else {
                     self.release_held(browser);
+                    // A drag of tabs has no release coming now; see
+                    // `ChromeState::cancel_drag`.
+                    self.chrome.cancel_drag(&self.egui.egui_ctx);
                 }
                 if let Some(view) = self.keyboard_view(browser) {
                     self.host.set_focused(view, *focused);

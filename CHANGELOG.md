@@ -171,6 +171,12 @@ All notable changes to the osmena crates. The crates version together.
   that follows does nothing. `ChromeState::takes_every_key` is true
   while a drag is on, so the key reaches the chrome whatever has the
   keyboard.
+- A drag of tabs is called off when its release can no longer come:
+  the window loses the keyboard (Alt+Tab, a modal dialog) or goes full
+  screen, where no strip is drawn. The tabs stay where they were, no
+  key stays the drag's, and a click later is not taken for the drop.
+  Before, the drag held on, and the next click tore the tabs off the
+  window.
 - A dragged tab keeps the point it was taken by under the pointer.
   An inactive tab becomes the active one as its drag begins and, in a
   crowded strip, grows from 40 points to 64; the hold was measured on

@@ -64,6 +64,8 @@ struct Rig {
     modifiers: Modifiers,
     /// Every command the chrome has answered so far.
     answered: Vec<Command>,
+    /// Whether the window has the keyboard, as each frame's input says.
+    focused: bool,
 }
 
 impl Rig {
@@ -100,6 +102,7 @@ impl Rig {
             frameless: true,
             modifiers: Modifiers::NONE,
             answered: Vec::new(),
+            focused: true,
         };
         // Until the widths and the offsets have settled.
         for _ in 0..30 {
@@ -135,7 +138,7 @@ impl Rig {
             time: Some(self.time),
             events,
             modifiers: self.modifiers,
-            focused: true,
+            focused: self.focused,
             ..RawInput::default()
         };
         let site_icons = HashMap::new();
@@ -236,6 +239,22 @@ impl Rig {
         for _ in 0..30 {
             self.frame(Vec::new());
         }
+    }
+
+    /// The window loses the keyboard mid-drag, as on Alt+Tab or when a
+    /// modal dialog opens: egui hears `WindowFocused(false)` and no
+    /// button release follows.
+    fn lose_focus(&mut self) {
+        self.focused = false;
+        // The shell's `Focused(false)` handler calls the cancel before
+        // egui hears the event, as here.
+        self.state.cancel_drag(&self.ctx);
+        self.frame(vec![Event::WindowFocused(false)]);
+    }
+
+    fn regain_focus(&mut self) {
+        self.focused = true;
+        self.frame(vec![Event::WindowFocused(true)]);
     }
 
     fn moves(&self) -> Vec<Command> {
@@ -467,6 +486,59 @@ fn a_drag_takes_every_key() {
     assert!(rig.state.takes_every_key());
     rig.release(to);
     assert!(!rig.state.takes_every_key());
+}
+
+/// A drag whose window loses the keyboard mid-drag has lost its release
+/// for good: the drag must end there, and no key may stay the drag's,
+/// and the next click elsewhere must not be taken for the drop.
+#[test]
+fn a_drag_stuck_by_a_focus_loss_is_cancelled() {
+    let mut rig = Rig::new(4);
+    let from = rig.tab_rect(2).center();
+    let to = Pos2::new(rig.tab_rect(4).right() - 4.0, from.y);
+    rig.press(from);
+    rig.drag(from, to);
+    assert!(rig.state.takes_every_key(), "the drag is on");
+    rig.lose_focus();
+    // The pointer goes on reporting where it is, with no release.
+    rig.frame(vec![Event::PointerGone]);
+    for _ in 0..30 {
+        rig.frame(Vec::new());
+    }
+    assert_eq!(rig.state.tab_drag, None, "losing focus ends the drag");
+    assert!(!rig.state.takes_every_key(), "no key is the drag's");
+    rig.regain_focus();
+    // Egui was never told the button came up, so a move now must not
+    // resume the drag.
+    let elsewhere = Pos2::new(300.0, 300.0);
+    rig.drag(from, elsewhere);
+    assert_eq!(rig.state.tab_drag, None, "a move does not resume the drag");
+    rig.press(elsewhere);
+    rig.release(elsewhere);
+    assert_eq!(rig.state.take_tab_drop(), None, "no drop for a click");
+    assert_eq!(rig.moves(), Vec::new());
+    assert_eq!(rig.order(), vec![1, 2, 3, 4]);
+}
+
+/// Full screen starts mid-drag: no strip is drawn there, so nothing sees
+/// the release. The drag ends when full screen does, and no key stays the
+/// drag's for the rest of it.
+#[test]
+fn a_drag_ends_when_the_window_goes_full_screen() {
+    let mut rig = Rig::new(4);
+    let from = rig.tab_rect(2).center();
+    let to = Pos2::new(rig.tab_rect(4).right() - 4.0, from.y);
+    rig.press(from);
+    rig.drag(from, to);
+    assert!(rig.state.takes_every_key(), "the drag is on");
+    rig.browser.windows[0].fullscreen = true;
+    rig.frame(Vec::new());
+    assert_eq!(rig.state.tab_drag, None, "full screen ends the drag");
+    assert!(!rig.state.takes_every_key(), "no key is the drag's");
+    rig.release(to);
+    assert_eq!(rig.moves(), Vec::new());
+    assert_eq!(rig.state.take_tab_drop(), None);
+    assert_eq!(rig.order(), vec![1, 2, 3, 4]);
 }
 
 /// A press that does not travel is a click: it activates and drags

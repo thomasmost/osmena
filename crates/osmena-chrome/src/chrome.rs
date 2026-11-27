@@ -822,6 +822,18 @@ impl ChromeState {
     pub fn takes_every_key(&self) -> bool {
         self.downloads_open || self.has_launcher() || self.has_prompt() || self.tab_drag.is_some()
     }
+
+    /// Calls off a drag of tabs without dropping it, for when its release
+    /// will never come: Escape, the window losing the keyboard (Alt+Tab,
+    /// a modal dialog), or full screen, which has no strip to release on.
+    /// The tabs stay where they were. Egui's hold is ended too, because
+    /// it lives on in egui with no release: a later move would resume the
+    /// drag and a later click would drop it. `stop_dragging` clears the
+    /// hold and the chrome's drag together, so neither outlives the other.
+    pub fn cancel_drag(&mut self, ctx: &egui::Context) {
+        self.tab_drag = None;
+        ctx.stop_dragging();
+    }
 }
 
 /// A menu the chrome wants shown, with where to put it (egui points of
@@ -1096,6 +1108,9 @@ pub fn draw(
 
     // Full screen shows the page alone; every shortcut still works.
     if window.fullscreen {
+        // No strip is drawn, so no release can end a drag: it is called off
+        // here, or every key would stay the drag's until full screen ends.
+        state.cancel_drag(ui.ctx());
         state.strip_places = StripPlaces::default();
         return commands;
     }
@@ -1757,8 +1772,7 @@ fn strip_row(
     // the tabs are drawn, since egui lets go of its own drag on the same
     // key and the tab would take that for a drop.
     if state.tab_drag.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-        state.tab_drag = None;
-        ui.ctx().stop_dragging();
+        state.cancel_drag(ui.ctx());
     }
     if let Some(drag) = state.tab_drag.as_mut()
         && let Some(pointer) = ui.ctx().pointer_latest_pos()
