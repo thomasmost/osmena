@@ -32,7 +32,7 @@ use crate::media_prompt;
 use crate::profiles;
 use crate::repaint;
 use crate::settings_window::{SettingsOutcome, SettingsWindow};
-use crate::tab_drop::{DropTarget, drop_target};
+use crate::tab_drop::{DropTarget, drop_target, frontmost, note_focus};
 use crate::update::{self, Updater};
 use crate::window::{BrowserWindow, DroppedTabs};
 
@@ -191,6 +191,10 @@ pub struct ProfileApp<E: Engine> {
     /// Where a window about to open goes (`EngineAction::PlaceWindow`
     /// arrives before its `OpenWindow`).
     pending_geometry: HashMap<WindowId, WindowGeometry>,
+    /// The browser windows in the order they last had the keyboard,
+    /// latest first: which of two overlapping windows is in front, for
+    /// tabs dropped on them (`tab_drop::frontmost`).
+    focus_order: Vec<winit::window::WindowId>,
     /// The session was written for this exit already (before the
     /// windows went), so `exiting` leaves it alone.
     session_final: bool,
@@ -270,6 +274,7 @@ impl<E: Engine> ProfileApp<E> {
             warm_next: None,
             warms: HashMap::new(),
             pending_geometry: HashMap::new(),
+            focus_order: Vec::new(),
             session_final: false,
             started: Instant::now(),
             startup_tab: homepage_tab,
@@ -848,11 +853,15 @@ impl<E: Engine> ProfileApp<E> {
         source: winit::window::WindowId,
         drop: DroppedTabs,
     ) -> Option<Command> {
-        let other = self
+        let under: Vec<winit::window::WindowId> = self
             .windows
             .iter()
-            .find(|(id, w)| **id != source && w.contains_screen_point(drop.point))
-            .map(|(_, w)| w.core_id());
+            .filter(|(id, w)| **id != source && w.contains_screen_point(drop.point))
+            .map(|(id, _)| *id)
+            .collect();
+        let other = frontmost(&under, &self.focus_order).and_then(|id| self.windows.get(&id));
+        let index = other.and_then(|w| w.strip_drop_index(drop.point));
+        let other = other.map(BrowserWindow::core_id);
         let source = self.windows.get(&source)?;
         let whole_window = self
             .browser
@@ -866,6 +875,7 @@ impl<E: Engine> ProfileApp<E> {
             DropTarget::Window(window) => Some(Command::MoveTabsToWindow {
                 tabs: drop.tabs,
                 window,
+                index,
             }),
             DropTarget::NewWindow => Some(Command::MoveTabsToNewWindow {
                 tabs: drop.tabs,
@@ -1086,6 +1096,7 @@ impl<E: Engine> ProfileApp<E> {
             }
             EngineAction::CloseWindow(window) => {
                 self.windows.retain(|_, w| w.core_id() != window);
+                self.focus_order.retain(|id| self.windows.contains_key(id));
             }
             EngineAction::CreateTab { window, tab, url } => {
                 if let Some(w) = self.window_for_core_id(window) {
@@ -2082,6 +2093,7 @@ impl<E: Engine> ProfileApp<E> {
                 // window, another application) leaves none focused.
                 let id = self.windows[&window_id].core_id();
                 if *focused {
+                    note_focus(&mut self.focus_order, window_id);
                     self.browser.focused = Some(id);
                 } else if self.browser.focused == Some(id) {
                     self.browser.focused = None;

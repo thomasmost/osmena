@@ -618,6 +618,18 @@ impl<E: Engine> BrowserWindow<E> {
         })
     }
 
+    /// Where tabs dropped at `point` (physical screen pixels) would go
+    /// among this window's tabs: the gap of its strip under the point,
+    /// or `None` when the point is not over the strip.
+    pub fn strip_drop_index(&self, point: PhysicalPosition<f64>) -> Option<usize> {
+        let origin = self.window.inner_position().ok()?;
+        let scale = self.window.scale_factor();
+        self.chrome.strip_drop_index(pos2(
+            ((point.x - f64::from(origin.x)) / scale) as f32,
+            ((point.y - f64::from(origin.y)) / scale) as f32,
+        ))
+    }
+
     /// Whether `point` (physical screen pixels) is over this window, frame
     /// included. False if the window's position is not known.
     pub fn contains_screen_point(&self, point: PhysicalPosition<f64>) -> bool {

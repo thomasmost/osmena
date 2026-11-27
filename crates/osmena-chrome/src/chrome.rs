@@ -627,9 +627,12 @@ pub struct ChromeState {
     menu_anchor: Option<Rect>,
     /// The drag of tabs along the strip in progress, if any.
     tab_drag: Option<TabDrag>,
-    /// Set when a drag of tabs ends outside the window; the window takes
-    /// it and works out where the tabs were dropped.
+    /// Set when a drag of tabs ends off the strip; the window takes it
+    /// and works out where the tabs were dropped.
     tab_drop: Option<TabDrop>,
+    /// How the strip stood in the last frame, for a drop that comes from
+    /// another window.
+    strip_places: StripPlaces,
     /// Set when the user asks for a menu; the window shows it as a native
     /// popup (`native_menu`) once the frame is painted.
     menu_request: Option<MenuRequest>,
@@ -701,6 +704,14 @@ impl ChromeState {
     /// The tab drag that ended since the last call, if any.
     pub fn take_tab_drop(&mut self) -> Option<TabDrop> {
         self.tab_drop.take()
+    }
+
+    /// Where tabs dropped at `point` (egui points of this window) from
+    /// another window's strip would go among this window's tabs: the
+    /// `index` of `Command::MoveTabsToWindow`. `None` when the point is
+    /// not over the strip (the tabs then go to the end).
+    pub fn strip_drop_index(&self, point: Pos2) -> Option<usize> {
+        self.strip_places.drop_index(point)
     }
 
     /// The menu the user asked for since the last call, if any.
@@ -842,6 +853,38 @@ pub struct TabDrop {
     /// in the same points, for them to stay under the pointer as they
     /// were held: such a window lays its strip out as this one does.
     pub origin: Pos2,
+}
+
+/// Where the strip's tabs stood in a frame: enough to say where a drop
+/// from elsewhere falls among them.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct StripPlaces {
+    /// The strip from top to foot, as a range of heights; `None` until
+    /// a strip is drawn (and while the window is full screen).
+    band: Option<(f32, f32)>,
+    /// Each tab (or collapsed chip, standing for its tabs) by the
+    /// middle of where it is drawn, with how many tabs come before it.
+    places: Vec<(f32, usize)>,
+    /// How many tabs the window has.
+    count: usize,
+}
+
+impl StripPlaces {
+    /// The gap `point` is over: before the first tab whose middle is
+    /// right of it, as a drag along the strip judges it. `None` off the
+    /// strip.
+    fn drop_index(&self, point: Pos2) -> Option<usize> {
+        let (top, bottom) = self.band?;
+        if !(top..=bottom).contains(&point.y) {
+            return None;
+        }
+        Some(
+            self.places
+                .iter()
+                .find(|(middle, _)| *middle >= point.x)
+                .map_or(self.count, |(_, before)| *before),
+        )
+    }
 }
 
 /// A drag of tabs along the strip: the tabs (in strip order), the tab
@@ -1012,6 +1055,7 @@ pub fn draw(
 
     // Full screen shows the page alone; every shortcut still works.
     if window.fullscreen {
+        state.strip_places = StripPlaces::default();
         return commands;
     }
 
@@ -1762,6 +1806,19 @@ fn strip_row(
         Vec2::new((total - spacing).max(0.0), TAB_HEIGHT),
         Sense::hover(),
     );
+
+    // For a drop that comes from another window: where each tab stands,
+    // the strip being everything from the top of the content down to
+    // the row's foot.
+    state.strip_places = StripPlaces {
+        band: Some((0.0, row.bottom())),
+        places: slots
+            .iter()
+            .filter(|slot| !slot.dragged && slot.stands_for_tabs())
+            .map(|slot| (row.left() + slot.compact + slot.width / 2.0, slot.tab_index))
+            .collect(),
+        count: tab_count,
+    };
 
     // Where the dragged tabs are, and where they would land: before the
     // first slot whose centre is right of their first tab's.

@@ -572,3 +572,36 @@ fn a_detached_drag_dropped_inside_the_window_is_a_tab_drop() {
         drop.origin
     );
 }
+
+/// Tabs dropped on another window's strip land between the tabs there:
+/// that window says where, from how its strip stood in its last frame.
+#[test]
+fn a_point_over_the_strip_names_the_gap_there() {
+    let rig = Rig::new(4);
+    let y = rig.tab_rect(1).center().y;
+    let at = |x: f32| rig.state.strip_drop_index(Pos2::new(x, y));
+    assert_eq!(at(rig.tab_rect(1).left() + 2.0), Some(0));
+    assert_eq!(at(rig.tab_rect(2).right() - 4.0), Some(2));
+    assert_eq!(at(rig.tab_rect(3).left() + 4.0), Some(2));
+    assert_eq!(at(rig.tab_rect(4).center().x + 1.0), Some(4));
+    assert_eq!(at(SIZE.x - 1.0), Some(4), "right of every tab is the end");
+    // Over the top margin of the strip counts; over the page does not.
+    let x = rig.tab_rect(3).left();
+    assert_eq!(rig.state.strip_drop_index(Pos2::new(x, 1.0)), Some(2));
+    let under = rig.tab_rect(1).bottom() + 4.0;
+    assert_eq!(rig.state.strip_drop_index(Pos2::new(x, under)), None);
+    assert_eq!(rig.state.strip_drop_index(Pos2::new(x, 300.0)), None);
+}
+
+/// A collapsed folder's chip stands for its tabs: a drop past it lands
+/// after all of them.
+#[test]
+fn a_point_past_a_collapsed_folder_counts_its_hidden_tabs() {
+    let mut rig = Rig::new(5);
+    rig.folder(7, &[2, 3], false);
+    let y = rig.tab_rect(1).center().y;
+    let chip = rig.chip_rect(7);
+    let at = |x: f32| rig.state.strip_drop_index(Pos2::new(x, y));
+    assert_eq!(at(chip.left() + 2.0), Some(1));
+    assert_eq!(at(chip.right() - 2.0), Some(3));
+}

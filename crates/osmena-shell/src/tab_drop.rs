@@ -31,6 +31,25 @@ pub fn drop_target<W>(other: Option<W>, over_source: bool, whole_window: bool) -
     }
 }
 
+/// The window in front among `under` (those the pointer is over), going
+/// by `recent`, the windows in the order they last had the keyboard,
+/// latest first: the stand-in for the system's stacking order, which
+/// winit does not tell. A window that never had the keyboard is behind
+/// the ones that did.
+pub fn frontmost<W: Copy + PartialEq>(under: &[W], recent: &[W]) -> Option<W> {
+    recent
+        .iter()
+        .find(|window| under.contains(window))
+        .or(under.first())
+        .copied()
+}
+
+/// `window` got the keyboard: it is now the first of `recent`.
+pub fn note_focus<W: Copy + PartialEq>(recent: &mut Vec<W>, window: W) {
+    recent.retain(|w| *w != window);
+    recent.insert(0, window);
+}
+
 /// The place of a window made for tabs dragged out of the window at
 /// `source`: the source's size, with its corner at `origin` (the
 /// chrome's `TabDrop::origin`, in points from the source's corner at
@@ -72,6 +91,24 @@ mod tests {
     #[test]
     fn every_tab_of_a_window_dropped_on_it_stays() {
         assert_eq!(drop_target::<u8>(None, true, true), DropTarget::Nothing);
+    }
+
+    #[test]
+    fn the_window_that_last_had_the_keyboard_is_the_one_in_front() {
+        let mut recent = Vec::new();
+        note_focus(&mut recent, 1);
+        note_focus(&mut recent, 2);
+        note_focus(&mut recent, 3);
+        note_focus(&mut recent, 2);
+        assert_eq!(recent, vec![2, 3, 1]);
+        assert_eq!(frontmost(&[1, 3], &recent), Some(3));
+        assert_eq!(frontmost(&[1, 2, 3], &recent), Some(2));
+        assert_eq!(frontmost(&[1], &recent), Some(1));
+        assert_eq!(frontmost(&[], &recent), None);
+        // One that never had the keyboard is behind the rest, but is
+        // still a window the tabs can go to.
+        assert_eq!(frontmost(&[9, 1], &recent), Some(1));
+        assert_eq!(frontmost(&[9], &recent), Some(9));
     }
 
     #[test]

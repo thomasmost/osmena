@@ -1290,6 +1290,7 @@ pub fn tab_menu(
                         Command::MoveTabsToWindow {
                             tabs: targets.to_vec(),
                             window: *id,
+                            index: None,
                         },
                     )
                 })
@@ -2146,7 +2147,7 @@ mod tests {
         assert_eq!(labels(windows), vec!["Other"]);
         assert!(matches!(
             &windows[0],
-            MenuEntry::Item { command: Command::MoveTabsToWindow { tabs, window: WindowId(7) }, .. }
+            MenuEntry::Item { command: Command::MoveTabsToWindow { tabs, window: WindowId(7), index: None }, .. }
                 if *tabs == vec![TabId(2)]
         ));
         let MenuEntry::Submenu {

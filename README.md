@@ -311,7 +311,8 @@ The engine contract, in `osmena-engine`:
   folder, dropped anywhere else it leaves one. Pulled more than a tab's
   height off the strip the drag is detached: the row closes up, the
   tabs ride with the pointer, and let go they move to the window of
-  the profile under the pointer or, anywhere else, to a new window
+  the profile under the pointer (into the gap of its strip they were
+  dropped on, else to its end) or, anywhere else, to a new window
   that opens under them, the size of the one they left. The drag
   holds while the pointer is outside the window, and Escape calls it
   off. Tabs also slide to their places after a close or a reorder.

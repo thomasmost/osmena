@@ -6,6 +6,14 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- `Command::MoveTabsToWindow` has a third field, `index:
+  Option<usize>`: where the tabs go among the target window's own, as
+  `MoveTabs` counts and with its rule for folders. `None` is the end,
+  as before; every literal needs the field.
+- Of several windows of the profile under dropped tabs, the one that
+  last had the keyboard takes them (it was whichever the shell came to
+  first).
+
 - `Command::MoveTabsToNewWindow` is a struct variant, `{ tabs, place }`
   (it was `MoveTabsToNewWindow(Vec<TabId>)`): `place` is an optional
   `WindowGeometry` for the new window, and when it is `Some`,
@@ -82,6 +90,11 @@ All notable changes to the osmena crates. The crates version together.
   font.
 
 ### Added
+
+- Tabs dropped on another window's strip land in the gap they were
+  dropped on, joining a folder when that is between two of its tabs
+  (`ChromeState::strip_drop_index`, from how that strip stood in its
+  last frame). Dropped anywhere else on the window they go to the end.
 
 - Tabs tear off. A drag pulled more than a tab's height above or below
   the strip is detached, as in Chromium: the gap it held in the row

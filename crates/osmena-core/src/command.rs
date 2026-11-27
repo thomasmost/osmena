@@ -58,10 +58,14 @@ pub enum Command {
         tabs: Vec<TabId>,
         place: Option<WindowGeometry>,
     },
-    /// Move these tabs to the end of `window`'s strip, the same way.
+    /// Move these tabs to `window`'s strip, the same way: to `index`
+    /// among the tabs it has (as `MoveTabs` counts, with its rule for
+    /// folders: between two tabs of one folder they join it), or to the
+    /// end, outside any folder, when `index` is `None`.
     MoveTabsToWindow {
         tabs: Vec<TabId>,
         window: WindowId,
+        index: Option<usize>,
     },
     /// Reorder: put these tabs, together and in strip order, at `index`
     /// among their window's other tabs (0 is first; the count of the
@@ -915,7 +919,11 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
         Command::MoveTabsToNewWindow { tabs, place } => {
             move_tabs_to_new_window(browser, tabs, *place)
         }
-        Command::MoveTabsToWindow { tabs, window } => move_tabs_to_window(browser, tabs, *window),
+        Command::MoveTabsToWindow {
+            tabs,
+            window,
+            index,
+        } => move_tabs_to_window(browser, tabs, *window, *index),
         Command::MoveTabs { tabs, index } => {
             move_tabs(browser, tabs, *index);
             Vec::new()
@@ -2646,10 +2654,11 @@ fn move_tabs_to_window(
     browser: &mut Browser,
     tabs: &[TabId],
     window: WindowId,
+    index: Option<usize>,
 ) -> Vec<EngineAction> {
-    if browser.window(window).is_none() {
+    let Some(before) = browser.window(window).map(|w| w.tabs.len()) else {
         return Vec::new();
-    }
+    };
     let moving: Vec<_> = moving_tabs(browser, tabs)
         .into_iter()
         .filter(|(tab, _, _)| browser.window_of_tab(*tab) != Some(window))
@@ -2657,7 +2666,21 @@ fn move_tabs_to_window(
     if moving.is_empty() {
         return Vec::new();
     }
-    place_moved_tabs(browser, window, &moving, 0)
+    let actions = place_moved_tabs(browser, window, &moving, 0);
+    // They were made at the end; a drop on the strip names the place.
+    if let Some(index) = index {
+        let arrived: Vec<TabId> = browser
+            .window(window)
+            .map(|w| {
+                w.tabs[before.min(w.tabs.len())..]
+                    .iter()
+                    .map(|t| t.id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        move_tabs(browser, &arrived, index);
+    }
+    actions
 }
 
 /// Reorder within a window: see `Command::MoveTabs`. Only the tabs of
@@ -4114,6 +4137,7 @@ mod tests {
             &Command::MoveTabsToWindow {
                 tabs: vec![a, c],
                 window: other,
+                index: None,
             },
         );
         let target = b.window(other).unwrap();
@@ -4133,6 +4157,7 @@ mod tests {
                 &Command::MoveTabsToWindow {
                     tabs: vec![moved, TabId(99)],
                     window: other,
+                    index: None,
                 },
             )
             .is_empty()
@@ -4143,11 +4168,123 @@ mod tests {
                 &Command::MoveTabsToWindow {
                     tabs: vec![a],
                     window: WindowId(99),
+                    index: None,
                 },
             )
             .is_empty()
         );
         assert_eq!(b.windows, before);
+    }
+
+    #[test]
+    fn tabs_moved_to_another_window_at_an_index_land_there_in_strip_order() {
+        let (mut b, _window, [a, _bb, c]) = three_tabs();
+        let other = dispatch(&mut b, &Command::NewWindow);
+        let EngineAction::OpenWindow { window: other, .. } = other[0].clone() else {
+            panic!("NewWindow opens a window");
+        };
+        let second = Url::parse("https://second.example/").unwrap();
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window: other,
+                url: Some(second),
+            },
+        );
+        let stay: Vec<TabId> = b.window(other).unwrap().tabs.iter().map(|t| t.id).collect();
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToWindow {
+                tabs: vec![c, a],
+                window: other,
+                index: Some(1),
+            },
+        );
+        let target = b.window(other).unwrap();
+        let urls: Vec<&str> = target.tabs.iter().map(|t| t.url.as_str()).collect();
+        assert_eq!(
+            urls[1..],
+            [
+                "https://a.example/",
+                "https://c.example/",
+                "https://second.example/"
+            ]
+        );
+        assert_eq!(target.tabs[0].id, stay[0]);
+        assert_eq!(target.tabs[3].id, stay[1]);
+        // The tab that was active where it came from is the active one.
+        assert_eq!(target.active_tab().url.as_str(), "https://c.example/");
+        // An index past the end is the end.
+        let (mut b, _window, [a, _bb, _c]) = three_tabs();
+        let other = dispatch(&mut b, &Command::NewWindow);
+        let EngineAction::OpenWindow { window: other, .. } = other[0].clone() else {
+            panic!("NewWindow opens a window");
+        };
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToWindow {
+                tabs: vec![a],
+                window: other,
+                index: Some(9),
+            },
+        );
+        let target = b.window(other).unwrap();
+        assert_eq!(target.tabs.len(), 2);
+        assert_eq!(target.tabs[1].url.as_str(), "https://a.example/");
+    }
+
+    #[test]
+    fn tabs_moved_into_another_windows_folder_join_it() {
+        let (mut b, _window, [a, bb, _c]) = three_tabs();
+        let other = dispatch(&mut b, &Command::NewWindow);
+        let EngineAction::OpenWindow { window: other, .. } = other[0].clone() else {
+            panic!("NewWindow opens a window");
+        };
+        dispatch(
+            &mut b,
+            &Command::NewTab {
+                window: other,
+                url: Some(Url::parse("https://second.example/").unwrap()),
+            },
+        );
+        let stay: Vec<TabId> = b.window(other).unwrap().tabs.iter().map(|t| t.id).collect();
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToFolder {
+                tabs: stay.clone(),
+                folder: FolderTarget::New {
+                    name: "Reading".to_string(),
+                },
+            },
+        );
+        let folder = b.window(other).unwrap().folders[0].id;
+        // Between the folder's two tabs: in the folder.
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToWindow {
+                tabs: vec![a],
+                window: other,
+                index: Some(1),
+            },
+        );
+        let target = b.window(other).unwrap();
+        assert_eq!(target.tabs[1].url.as_str(), "https://a.example/");
+        assert_eq!(target.tabs[1].folder, Some(folder));
+        // With no index: at the end, outside it.
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToWindow {
+                tabs: vec![bb],
+                window: other,
+                index: None,
+            },
+        );
+        let target = b.window(other).unwrap();
+        assert_eq!(
+            target.tabs.last().unwrap().url.as_str(),
+            "https://b.example/"
+        );
+        assert_eq!(target.tabs.last().unwrap().folder, None);
     }
 
     #[test]
