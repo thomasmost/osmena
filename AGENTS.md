@@ -783,12 +783,14 @@ What changed, by file (the convention bullets "A drag of tabs is one
 state" and "The native window is asked" say how it hangs together;
 the CHANGELOG has an entry for each):
 
-- `osmena-shell/src/titlebar.rs` (new): `content_refuses_window_moves`
-  and, on macOS, `keep_presses`. `window.rs` calls it after
-  `create_window`; `DroppedTabs`, `take_tab_drop`, `strip_drop_index`.
+- `osmena-shell/src/titlebar.rs` (new): `keep_presses`, which
+  `BrowserWindow::open` calls on macOS for a frameless window after
+  `create_window`. `window.rs`: `DroppedTabs` (carrying `TornOff`),
+  `take_tab_drop`, `strip_drop_index`.
 - `osmena-shell/src/tab_drop.rs` (new): `drop_destination`, `frontmost`,
-  `note_focus`, `torn_off_place`. `app.rs`: `tab_drop_command` over
-  them, `focus_order`.
+  `note_focus`, `torn_off_place` (over `TornOff` and the `Screen` under
+  the drop). `app.rs`: `tab_drop_command` over them, `screen_at`,
+  `focus_order`.
 - `osmena-chrome/src/chrome.rs`: `TabDrag` (`folder`, `held`, `grab`
   as a share, `grab_y`, `pointer`, `detached`, `origin`), `Held`,
   `Ride`, `StripPlaces`, `drop_drag`, `drag_scroll`; `strip_row`,
@@ -806,9 +808,16 @@ Made on the branch `tab-drag` in a worktree
 not pushed.
 
 Verified: `cargo test --workspace --features osmena-engine/glutin`
-(588 tests, 7 ignored: the six sheets and the location test; the
+(603 tests, 7 ignored: the six sheets and the location test; the
 three reproductions of `chrome/drag_tests.rs` are un-ignored and
 pass), clippy with `-D warnings`, `cargo fmt --all --check`. The
+review's fixes (2026-11-27, the second round) each came with a test
+that failed before its change: a drag ended by a focus loss or full
+screen (`drag_tests.rs`), a drop over the source with another window
+behind it (`tab_drop.rs`), a torn-off window's size and edge and
+frame (`tab_drop.rs`), two folders of one name through a session and
+a folder apart in a file (`command.rs`), and a tab moved to an index
+as deferred, warming and blocked (`command.rs`). The
 rig in `drag_tests.rs` runs the real `chrome::draw` with pointer
 events: a drag across a `PointerGone`, Escape, a crowded strip's
 grown tab under the pointer, detach and re-attach, the detached drop
@@ -827,6 +836,15 @@ taught to refuse)`.
 
 Not verified, because no pointer can be scripted on this Mac (no
 Accessibility permission) and nobody dragged: everything by hand.
+Also the torn-off window's place on a real screen: the outer-corner
+placement (`set_outer_position`, which replaced `with_position` for
+every window: winit's `with_position` is the content corner on macOS
+and the outer one on Windows and X11), the frame offset taken from
+`inner_position` less `outer_position`, a monitor of another scale
+under the drop, and the window's size there. Nothing was run on
+Windows, X11 or Wayland for the placement. Whether the strip sat a
+title bar off before (the reviewer's M3) was not seen; the code no
+longer depends on which corner `with_position` means.
 Above all that AppKit really leaves the press to the view now (the
 hit test says so; no press was made); that the window still moves by
 the grip and the empty stretch, which is now `drag_window` alone
@@ -866,11 +884,9 @@ Left, and known:
   happens; anywhere else they still get a new window (now at the
   drop) and the old one closes, pages reloaded. Chromium moves the
   window instead; not in this change.
-- A window torn off a maximized one takes its size, unmaximized, at
-  the drop point, so most of it may be off screen.
-- A folder moved to a window that has a folder of the same name
-  makes a second one of that name; a session restore joins folders
-  by name.
+- On Wayland `inner_position` fails, so `take_tab_drop` gives nothing
+  and a tab let go off the strip does nothing, even inside its own
+  window (README, the limits of tab dragging).
 - `frontmost` goes by the keyboard's history, not the screen's
   stacking: a window raised without being given the keyboard is not
   seen as in front.

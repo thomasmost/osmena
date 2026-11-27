@@ -315,11 +315,31 @@ The engine contract, in `osmena-engine`:
   tabs ride with the pointer, and let go they move to the window of
   the profile under the pointer (into the gap of its strip they were
   dropped on, else to its end) or, anywhere else, to a new window
-  that opens under them, the size of the one they left; a folder
+  that opens under them, the size of the one they left (the default
+  size, from a maximized one), on the monitor under the drop; a folder
   dragged out by its chip arrives as a folder. Held near an end of a
-  row that scrolls, a drag scrolls it that way. The drag
-  holds while the pointer is outside the window, and Escape calls it
-  off. Tabs also slide to their places after a close or a reorder.
+  row that scrolls, a drag scrolls it that way. The drag holds while
+  the pointer is outside the window; Escape, losing the keyboard (Alt+Tab,
+  a dialog) or full screen calls it off, and the tabs stay where they
+  were. Tabs also slide to their places after a close or a reorder.
+  Limits of tab dragging:
+  - On Wayland a window cannot say where it is, so a tab let go off the
+    strip does nothing there, not even inside its own window.
+  - A tab that changes window is made again at its address: the page
+    reloads, and its history and form state are lost.
+  - Dragging every tab of a window over that window does nothing; any
+    other place gets a new window and the old one closes, its pages
+    reloaded (Chromium moves the window instead).
+  - "In front" is decided by the keyboard's history, not the screen's
+    stacking: a window raised without the keyboard is not seen as in
+    front.
+  - The window that takes dropped tabs shows no gap while the drag is
+    over it, and the dragged tabs are not drawn outside the window (a
+    note at its edge stands in for them).
+  - A torn-off window is placed from the source's frame and scale, and
+    the monitor under the drop. That is not yet checked on real displays:
+    a monitor of another scale, a system title bar on macOS, and the
+    outer-corner placement there.
 - **Chromium's shortcuts**, with Cmd for Ctrl on macOS: tabs (`Ctrl+T`,
   `Ctrl+W`/`Ctrl+F4`, `Ctrl+Shift+T` reopens the last closed, `Ctrl+Tab`
   and `Ctrl+PgDn`/`Ctrl+PgUp` cycle, `Ctrl+1`–`Ctrl+8` and `Ctrl+9` jump),

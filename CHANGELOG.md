@@ -6,26 +6,24 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
-- `Command::MoveTabsToNewWindow` and `Command::MoveTabsToWindow` each
-  have one more field, `folder: Option<FolderId>`: the folder the tabs
-  are moved as. With it the tabs arrive in a new folder of the same
-  name, expanded or not as it was; `None` moves loose tabs, as before.
-  Every literal needs the field. `TabDrop` carries the same field.
+- `Command::MoveTabsToNewWindow` is a struct variant, `{ tabs, place,
+  folder }` (it was `MoveTabsToNewWindow(Vec<TabId>)`), and
+  `Command::MoveTabsToWindow` is `{ tabs, window, index, folder }` (it
+  was `{ tabs, window }`). `place` is an optional `WindowGeometry` for
+  the new window: when it is `Some`, `dispatch` emits
+  `EngineAction::PlaceWindow` ahead of the `OpenWindow`, as a restored
+  session does. `index` is where the tabs go among the target window's
+  own, as `MoveTabs` counts, with its rule for folders; `None` is the
+  end, as before. `folder` is the folder the tabs are moved as: they
+  arrive in a new folder of that name, expanded or not as it was;
+  `None` moves loose tabs. Every literal needs the new fields, and
+  `None` throughout is the old behaviour. `TabDrop` carries `folder`
+  too.
 
-- `Command::MoveTabsToWindow` has a third field, `index:
-  Option<usize>`: where the tabs go among the target window's own, as
-  `MoveTabs` counts and with its rule for folders. `None` is the end,
-  as before; every literal needs the field.
-- Of several windows of the profile under dropped tabs, the one that
-  last had the keyboard takes them (it was whichever the shell came to
-  first).
+- Of several windows of the profile under dropped tabs, the one in
+  front takes them: the one that last had the keyboard, since winit
+  tells no stacking order (it was whichever the shell came to first).
 
-- `Command::MoveTabsToNewWindow` is a struct variant, `{ tabs, place }`
-  (it was `MoveTabsToNewWindow(Vec<TabId>)`): `place` is an optional
-  `WindowGeometry` for the new window, and when it is `Some`,
-  `dispatch` emits `EngineAction::PlaceWindow` ahead of the
-  `OpenWindow`, as a restored session does. Every literal needs the
-  field; `None` is the old behaviour.
 - Tabs dragged off the strip and dropped over their own window (over
   the page, say) now open a new window there; it used to do nothing.
   Every tab of a window dropped on that window still does nothing.
@@ -43,6 +41,7 @@ All notable changes to the osmena crates. The crates version together.
   Closing a profile's last window closes that profile and leaves the
   others; the browser quits with the last one. Quit quits every open
   profile, each through its own guard for downloads still going.
+
 - For a browser: `StartEngine` is now `Box<dyn FnMut(&Profile,
   Arc<dyn Waker>) -> Result<E, EngineError>>`. It takes the profile
   (where it took the engine directory, which is `profile.engine_dir`)
@@ -54,6 +53,7 @@ All notable changes to the osmena crates. The crates version together.
   `Profile::shared_engine_data` name the one directory such an engine
   may keep every profile under and a profile's part of it
   (`profile-<name>`); deleting a profile removes that too.
+
 - With `profiles_in_process`, the browser is one process per data
   directory: a second start hands its command line (the profile, the
   addresses, `--restore`) to the running browser over a loopback port
@@ -61,6 +61,7 @@ All notable changes to the osmena crates. The crates version together.
   window when no address was given. The lock is `instance.lock` in the
   brand's data directory, with the port and a token in `instance.toml`
   (readable by the user alone).
+
 - `--profile` has no default any more (`CliArgs::profile` is an
   `Option<String>`). Without it, a browser that runs profiles together
   opens the profile that was in front at the last quit, and behind it
@@ -69,10 +70,13 @@ All notable changes to the osmena crates. The crates version together.
   `open-profiles.toml` in the brand's data directory. With nothing to
   go by, and for any other engine, it is the default profile as
   before.
+
 - The update's restart brings back every profile that was open (it
   passes `--restore` and no `--profile`) when they share the process.
+
 - The minimum Rust version is 1.89 (the single-instance lock uses
   `File::try_lock`).
+
 - The profile avatars are redrawn: plain silhouettes made to read on
   the toolbar's disc of twenty pixels, where the thin outlines of the
   emoji font they came from since the palettes turned to grey. The
@@ -81,6 +85,7 @@ All notable changes to the osmena crates. The crates version together.
   is then the face. Every avatar keeps its name in `settings.toml` and
   its place in the dialog's tabs. `OsmenaAvatars.ttf` (24 KB) replaces
   `NotoEmoji-Avatars.ttf`.
+
 - The chrome's glyphs are drawings on one grid in one weight, sharp at
   one pixel per point: the toolbar's Back, Forward, Reload and Stop,
   the star, the downloads' arrow, the menu's three lines, the strip's
@@ -157,11 +162,15 @@ All notable changes to the osmena crates. The crates version together.
   title bar a frameless window keeps lies over the upper part of the
   strip, and a press there moved the window instead of starting a drag
   of the tab, because winit's content view left
-  `mouseDownCanMoveWindow` at AppKit's default. The shell now makes
-  that answer "no" for a frameless window's content view, so the
-  window is moved by the strip's empty stretch and its grip alone
-  (still zoomed by a double-click there; the traffic lights are
-  untouched). A window with the system title bar is as before.
+  `mouseDownCanMoveWindow` at AppKit's default. The shell makes that
+  answer "no" on winit's view class, so every winit view in the
+  process answers no: a frameless browser window's content view, which
+  is the one this is for, and also the settings window's and a
+  system-framed browser window's views, whose title bars sit above
+  their content and never asked. A frameless window is moved by the
+  strip's empty stretch and its grip alone (still zoomed by a
+  double-click there; the traffic lights are untouched). A window with
+  the system title bar is as before.
 - A drag of tabs no longer dies when its pointer leaves the window.
   The system reports the pointer gone as an event apart from its
   moves, and the strip took a frame without a pointer for the end of
