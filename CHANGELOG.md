@@ -136,8 +136,9 @@ All notable changes to the osmena crates. The crates version together.
   back over the strip puts them in the row again. Let go while
   detached, they get a window of their own, the size of the one they
   left and placed so the tabs are under the pointer where they were
-  held (`TabDrop::origin`; a place off every monitor is left to the
-  system, as for a restored window).
+  held (`TabDrop::origin`). A drop off every monitor places it on the
+  source's monitor; only when neither is on a monitor is it left to the
+  system.
 
 - `tools/glyphs/build.py` builds the chrome's two glyph fonts
   (`OsmenaIcons.ttf`, `OsmenaAvatars.ttf`) from the SVG drawings under
@@ -192,14 +193,18 @@ All notable changes to the osmena crates. The crates version together.
   over it still changes nothing, and now only when that window is in
   front.
 - A window torn off a maximized one opens at the size a new window
-  does, not at the maximized size, and never larger than the monitor
-  under the drop; a drop near a monitor's edge pulls it back onto the
+  does, not at the maximized size, and never larger than the monitor it
+  is placed on; a drop near a monitor's edge pulls it back onto the
   monitor. A window not maximized keeps its size in points, so it is
   the same window on a monitor of another scale. Its frame is taken
-  off its content corner in the monitor's pixels, and the window is
-  placed by its outer corner on every platform (`set_outer_position`;
-  `with_position` meant the content's corner on macOS). The placement
-  is `tab_drop::torn_off_place`, a pure function.
+  off its content corner in the monitor's pixels, and it is placed by
+  the corner the platform's position takes: its content corner on macOS
+  (the system frame's), its outer corner elsewhere. The placement is
+  `tab_drop::torn_off_place`, a pure function.
+- Tabs dropped over a minimized window (macOS keeps a minimized
+  window's frame, so the pointer seemed to be over it) no longer go to
+  that window: the drop goes to the window in front that is shown, or
+  tears off.
 - Two folders of one name in a window stay two folders through a
   session file: each tab names its folder by its place in the window's
   list (`SessionTab::folder_index`), which is written beside the name.

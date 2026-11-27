@@ -336,10 +336,16 @@ The engine contract, in `osmena-engine`:
   - The window that takes dropped tabs shows no gap while the drag is
     over it, and the dragged tabs are not drawn outside the window (a
     note at its edge stands in for them).
-  - A torn-off window is placed from the source's frame and scale, and
-    the monitor under the drop. That is not yet checked on real displays:
-    a monitor of another scale, a system title bar on macOS, and the
-    outer-corner placement there.
+  - A torn-off window is placed from the source's frame and scale, on
+    the monitor under the drop or, when no monitor is under it, on the
+    source's; only when neither is on a monitor is it left to the system.
+    On macOS, winit's physical coordinates are each monitor's own logical
+    coordinates times that monitor's scale, so they are not one space
+    across monitors of different scales: on a second monitor of another
+    scale the monitor found under a drop can be the wrong one. Not checked
+    on real displays: that, a system title bar on macOS (where the window
+    is placed by its content corner), and the outer-corner placement on
+    Windows and X11.
 - **Chromium's shortcuts**, with Cmd for Ctrl on macOS: tabs (`Ctrl+T`,
   `Ctrl+W`/`Ctrl+F4`, `Ctrl+Shift+T` reopens the last closed, `Ctrl+Tab`
   and `Ctrl+PgDn`/`Ctrl+PgUp` cycle, `Ctrl+1`–`Ctrl+8` and `Ctrl+9` jump),
@@ -390,6 +396,9 @@ The engine contract, in `osmena-engine`:
   names no live process), a bar under the toolbar offers the last
   session: Restore brings it back and closes the home-page window,
   Dismiss forgets it. "Reopen closed tab" works across a restart.
+  Known limitation: on macOS a window with the system title bar comes
+  back a title bar lower each restart, since its place is saved by its
+  outer corner and restored by winit's content corner.
 - **Downloads**, when the engine downloads (`EngineInfo::downloads`).
   A file goes to the downloads directory (the system's Downloads folder,
   or the one Settings names) under its suggested name, made unique, or

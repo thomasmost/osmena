@@ -788,10 +788,11 @@ the CHANGELOG has an entry for each):
   `BrowserWindow::open` calls on macOS for a frameless window after
   `create_window`. `window.rs`: `DroppedTabs` (carrying `TornOff`),
   `take_tab_drop`, `strip_drop_index`.
-- `osmena-shell/src/tab_drop.rs` (new): `drop_destination`, `frontmost`,
-  `note_focus`, `torn_off_place` (over `TornOff` and the `Screen` under
-  the drop). `app.rs`: `tab_drop_command` over them, `screen_at`,
-  `focus_order`.
+- `osmena-shell/src/tab_drop.rs` (new): `tab_drop_target` (over
+  `WindowFrame`s, `under_point`, `drop_destination`), `frontmost`,
+  `note_focus`, `recorded_corner` (`PositionCorner`), `torn_off_screen`,
+  `torn_off_place` (over `TornOff` and the `Screen` under the drop).
+  `app.rs`: `tab_drop_command` over them, `screen_at`, `focus_order`.
 - `osmena-chrome/src/chrome.rs`: `TabDrag` (`folder`, `held`, `grab`
   as a share, `grab_y`, `pointer`, `detached`, `origin`), `Held`,
   `Ride`, `StripPlaces`, `drop_drag`, `drag_scroll`; `strip_row`,
@@ -809,7 +810,7 @@ Made on the branch `tab-drag` in a worktree
 not pushed.
 
 Verified: `cargo test --workspace --features osmena-engine/glutin`
-(603 tests, 7 ignored: the six sheets and the location test; the
+(614 tests, 7 ignored, after the third round: the six sheets and the location test; the
 three reproductions of `chrome/drag_tests.rs` are un-ignored and
 pass), clippy with `-D warnings`, `cargo fmt --all --check`. The
 review's fixes (2026-11-27, the second round) each came with a test
@@ -818,7 +819,12 @@ screen (`drag_tests.rs`), a drop over the source with another window
 behind it (`tab_drop.rs`), a torn-off window's size and edge and
 frame (`tab_drop.rs`), two folders of one name through a session and
 a folder apart in a file (`command.rs`), and a tab moved to an index
-as deferred, warming and blocked (`command.rs`). The
+as deferred, warming and blocked (`command.rs`). The review's third
+round (2026-11-27, the placement and drop round): each new pure test
+failed first (a function not yet written, or the minimized window's
+assertion before its filter), and restored windows are placed as at
+`da359c0` (checked by the diff of `BrowserWindow::open`; no test, as a
+window needs a live winit one). The
 rig in `drag_tests.rs` runs the real `chrome::draw` with pointer
 events: a drag across a `PointerGone`, Escape, a crowded strip's
 grown tab under the pointer, detach and re-attach, the detached drop
@@ -837,15 +843,17 @@ taught to refuse)`.
 
 Not verified, because no pointer can be scripted on this Mac (no
 Accessibility permission) and nobody dragged: everything by hand.
-Also the torn-off window's place on a real screen: the outer-corner
-placement (`set_outer_position`, which replaced `with_position` for
-every window: winit's `with_position` is the content corner on macOS
-and the outer one on Windows and X11), the frame offset taken from
-`inner_position` less `outer_position`, a monitor of another scale
-under the drop, and the window's size there. Nothing was run on
-Windows, X11 or Wayland for the placement. Whether the strip sat a
-title bar off before (the reviewer's M3) was not seen; the code no
-longer depends on which corner `with_position` means.
+Also the torn-off window's place on a real screen: the corner it is
+placed by (its content corner on macOS, its outer one on Windows and
+X11: `recorded_corner`), the frame offset taken from `inner_position`
+less `outer_position`, a monitor of another scale under the drop, and
+the window's size there. On macOS the monitor under a drop is found
+from winit's physical coordinates, which are not one space across
+monitors of different scales, so `screen_at` can pick the wrong monitor
+or none (then the source's is used): not seen. Nothing was run on
+Windows, X11 or Wayland for the placement, nor is a restored window's
+placement there seen (it is `with_position` at creation again, as at
+`da359c0`).
 Above all that AppKit really leaves the press to the view now (the
 hit test says so; no press was made); that the window still moves by
 the grip and the empty stretch, which is now `drag_window` alone
@@ -893,6 +901,10 @@ Left, and known:
   seen as in front.
 - Out of the window the dragged tabs cannot be drawn; a note at the
   window's edge ("Move 2 tabs") stands in for them.
+- Pre-existing, not changed here: on macOS a window with the system
+  title bar comes back a title bar lower each restart, since its place
+  is saved by its outer corner and `with_position` takes its content
+  corner there (as at `da359c0`). Also in README, session restore.
 
 ## Status and handoff (2026-11-22)
 
