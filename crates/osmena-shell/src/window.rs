@@ -164,9 +164,11 @@ impl<E: Engine> BrowserWindow<E> {
         {
             window.set_outer_position(PhysicalPosition::new(g.x, g.y));
         }
-        // The title bar macOS keeps over the strip must not take a press
-        // on a tab for a move of the window.
-        if crate::titlebar::content_refuses_window_moves(frameless, cfg!(target_os = "macos")) {
+        // Only a frameless window on macOS has a title bar over its content,
+        // which would take a press on a tab for a move of the window; with
+        // the system's frame the title bar is above the content and the
+        // window is left as it is (see `titlebar`).
+        if frameless && cfg!(target_os = "macos") {
             #[cfg(target_os = "macos")]
             crate::titlebar::keep_presses(&window);
         }

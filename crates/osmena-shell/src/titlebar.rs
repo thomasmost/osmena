@@ -15,15 +15,6 @@
 //! traffic lights are views of their own, which never asked the content
 //! view anything.
 
-/// Whether a window's content view must refuse to move its window on a
-/// press: only where the content lies under a title bar that would
-/// otherwise take the press, which is a frameless window on macOS. A
-/// window with the system's frame has its title bar above the content
-/// and is left as it is.
-pub fn content_refuses_window_moves(frameless: bool, macos: bool) -> bool {
-    frameless && macos
-}
-
 /// How far under a window's top edge the probe of [`keep_presses`]
 /// looks: inside the title bar's 28 points and inside a tab.
 #[cfg(target_os = "macos")]
@@ -122,20 +113,4 @@ pub fn keep_presses(window: &winit::window::Window) {
         },
         class.name().to_string_lossy(),
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_a_frameless_window_on_macos_refuses_to_move_on_a_press() {
-        assert!(content_refuses_window_moves(true, true));
-        assert!(
-            !content_refuses_window_moves(false, true),
-            "the system's title bar is above the content and keeps moving the window"
-        );
-        assert!(!content_refuses_window_moves(true, false));
-        assert!(!content_refuses_window_moves(false, false));
-    }
 }
