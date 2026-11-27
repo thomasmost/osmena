@@ -1929,7 +1929,7 @@ fn strip_row(
         let grab = before + drag.grab * held_width;
         (drag.pointer.x - grab, drag.pointer.y - drag.grab_y)
     });
-    // Chromium's rule: more than a tab's height above or below the
+    // The rule other browsers have: more than a tab's height above or below the
     // strip (or out of the window) the drag is detached. The row closes
     // up behind it, and it comes back by coming back.
     if let (Some(drag), Some((left, top))) = (state.tab_drag.as_mut(), drag_at) {

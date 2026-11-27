@@ -5,7 +5,15 @@ model, the egui chrome, and the winit application, generic over an engine
 trait. The browsers are separate repositories that depend on these crates by
 git revision. `README.md` has the crate table and the engine contract.
 
-_Last updated: 2026-11-22 (the chrome's glyphs and the profile avatars
+_Last updated: 2026-11-27 (tab dragging: on macOS a press on the strip
+is the chrome's and not the title bar's, `titlebar.rs`; a drag that
+outlives a lost pointer, ends on Escape, detaches off the strip and
+tears off into a window under the pointer; drops at the gap of another
+window's strip; folders dragged by their chips, `Command::MoveFolder`;
+a drag that scrolls a crowded strip; `MoveTabsToNewWindow` and
+`MoveTabsToWindow` with new fields; see the convention "A drag of tabs
+is one state" and the status section of that date; before that
+2026-11-22, the chrome's glyphs and the profile avatars
 are drawings: SVGs under `osmena-chrome/assets`, built into two fonts
 by `tools/glyphs/build.py`, with `icons.rs`, the test-only `raster.rs`
 and the sheets; see the convention "A glyph is a drawing" and the
@@ -251,8 +259,8 @@ No engine is needed; the workspace builds in under a minute.
   painted by `BrowserWindow::frame` like the crash panel, with
   `content_is_egui` keeping input in the chrome; while an open prompt is
   up, egui takes every key (`ChromeState::takes_every_key`, which is how
-  Escape reaches a buttons-only prompt; the downloads popover and the
-  Launch Panel count too), and page-bound key presses are dropped while
+  Escape reaches a buttons-only prompt; the downloads popover, the
+  Launch Panel and a drag of tabs count too), and page-bound key presses are dropped while
   the chrome owns the content area). What the model never
   sees, links, scripts and redirects, the engine's before-navigate hook
   cancels before any request and reports as
@@ -342,12 +350,12 @@ No engine is needed; the workspace builds in under a minute.
 - **The strip's row is laid out by hand.** `strip_row` measures every
   tab and chip (`Slot`), places each at an animated offset
   (`Context::animate_value_with_time` keyed by the tab or folder id, so
-  a tab slides to its place after any reorder), and draws the tabs being
+  a tab slides to its place after any reorder), and draws what is being
   dragged (`ChromeState::tab_drag`) last, riding with the pointer, with
-  a gap opened at the index `Command::MoveTabs` would get. A drop inside
-  the window is that command; outside it is a `TabDrop` for the
-  application. A tab's widget id is `("tab", id)` every frame, which is
-  what lets egui keep the drag while the tab moves. Everything in
+  a gap opened at the index `Command::MoveTabs` would get (the next
+  bullet has the drag). A tab's widget id is `("tab", id)` and a chip's
+  `("chip", folder)` every frame, which is what lets egui keep the drag
+  while they move. Everything in
   the strip sits on the pixel grid: a slot's rect is rounded to
   pixels before it is drawn, the strip's edge is one pixel row
   (`strip_edge_y`), the active tab's body (`active_tab_body`) opens
@@ -365,6 +373,47 @@ No engine is needed; the workspace builds in under a minute.
   of a descender, measured from `TEXT_BAND` rather than from the
   label, so titles without descenders keep the same height as the
   rest.
+- **A drag of tabs is one state, `ChromeState::tab_drag`, and egui's
+  hold decides whether it is on.** `TabDrag` names the tabs, the
+  folder when a chip is dragged (`folder`), what was pressed (`Held`,
+  whose widget egui is dragging), the hold as a share of the pressed
+  slot's width (`grab`, measured from `press_origin`: widths change
+  under the pointer, the active tab's above all), the pointer as last
+  seen, the gap (`index`) and whether the drag is `detached`. The
+  drag lives while `Context::is_being_dragged(drag.source())`: never
+  judge it by whether a pointer position arrived this frame, because
+  the system reports the pointer leaving the window apart from its
+  moves and a frame without one is ordinary. So the dragged widgets
+  must be drawn every frame of the drag, wherever they are: in the
+  row at the pointer's x while attached; in a `Tooltip`-order child
+  `Ui` cut to the whole window while detached, which is Chromium's
+  rule of more than `TAB_HEIGHT` above or below the row (or out of
+  the window), with the row's gap closed. Escape is read at the top
+  of `strip_row`, before any tab is drawn, since egui drops its own
+  drag on the same key and a tab would take that for a drop;
+  `takes_every_key` counts a drag so the shell sends the key. The
+  release is `drop_drag`, the one place a drag ends in a command:
+  `MoveTabs` or `MoveFolder` in the row, a `TabDrop` when detached
+  (with `origin`, where a new window's corner goes for the tabs to
+  stay under the pointer, and `folder`). The shell turns a `TabDrop`
+  into a command with three pure functions in `tab_drop.rs`:
+  `drop_target` (another window of the profile takes the tabs;
+  otherwise a new window, also over the source, unless the tabs are
+  all the source has), `frontmost` (of overlapping windows, the one
+  that last had the keyboard: winit tells no stacking order) and
+  `torn_off_place` (the `WindowGeometry` for `PlaceWindow`). A drop
+  on another window asks that window's `ChromeState::strip_drop_index`
+  for the gap, from `StripPlaces`, which `strip_row` records every
+  frame. A dragged folder may land only where
+  `Slot::stands_between_folders` (and `move_folder` snaps to a
+  folder's nearer end for whoever sends another index). Near an end
+  of a row with tabs out of sight, `drag_scroll` scrolls it. A tab
+  that changes window is still recreated at its URL
+  (`place_moved_tabs`): keeping the page needs new `osmena-engine`
+  methods. The tests are `chrome/drag_tests.rs`: the real
+  `chrome::draw`, frame by frame, with pointer events and every
+  command through `dispatch`; add to it for any change here, since
+  nothing else moves a pointer.
 - **Folders are contiguous runs of tabs.** `Tab::folder` names the
   folder; `Window::gather_folder` keeps a folder's tabs together where
   its first tab is, `prune_folders` drops a folder whose last tab went
@@ -610,6 +659,20 @@ No engine is needed; the workspace builds in under a minute.
   way it records a `MenuRequest`; `BrowserWindow` acts on it after the
   frame. Frameless windows handle their own resize borders
   (`routing::resize_edge`), except on macOS where the system keeps them.
+  On macOS a frameless window still has a transparent title bar over
+  the top of the strip, and AppKit moves a window on a press there
+  whenever the view under it answers yes to `mouseDownCanMoveWindow`
+  (`NSView`'s default for a view that is not opaque, which winit's
+  is). `titlebar::keep_presses` adds that method to winit's view
+  class, answering no (`class_addMethod`: an override of the inherited
+  method, nothing of winit's replaced, a no-op the second time), for
+  the windows `content_refuses_window_moves` names. So on macOS the
+  window moves only through `WindowRequest::Drag`
+  (`Window::drag_window`, which hands AppKit `NSApp.currentEvent`
+  after the frame), the double-click's zoom and the traffic lights;
+  a debug line at window creation says what a press in the strip did
+  before and does now. A winit that defines the method itself would
+  make the addition a silent no-op: that line would then read `true`.
 - **Menus are native, the rest of the chrome is egui.** A menu is a
   `Vec<MenuEntry>` from `menus.rs`, shown by `native_menu::NativeMenu`
   after the frame is painted; the chrome only records a `MenuRequest`.
@@ -686,6 +749,123 @@ No engine is needed; the workspace builds in under a minute.
 - Commit to `main` unless asked for a branch. Conventional Commits.
 - The browsers' own docs (`README.md`, `CLAUDE.md`) describe what each one
   adds; the shared behaviour is documented here only.
+
+## Status and handoff (2026-11-27, tab dragging)
+
+The owner's report: on macOS (Nautilus) tabs could not be dragged, and
+dragging should be better than it was: folders, tear-off, a drop
+between another window's tabs.
+
+The causes, as the investigation found them. The probable main one:
+the transparent title bar a frameless window keeps on macOS lies over
+the upper 28 points of the strip, and winit's content view answers
+`mouseDownCanMoveWindow` with `NSView`'s default (yes, for a view that
+is not opaque), so a press on most of a tab moved the window and egui
+never saw a drag. Then four in the chrome: a drag died on any frame
+that saw the pointer gone (`CursorLeft` is an event of its own); a
+chip sensed only clicks; Escape did nothing (egui dropped its own
+drag on it, which the tab took for a drop); and the hold was measured
+in points on the tab's old width, from where the pointer had got to
+when the press became a drag, so a tab that grew as it became the
+active one rode off-centre.
+
+What changed, by file (the convention bullets "A drag of tabs is one
+state" and "The native window is asked" say how it hangs together;
+the CHANGELOG has an entry for each):
+
+- `osmena-shell/src/titlebar.rs` (new): `content_refuses_window_moves`
+  and, on macOS, `keep_presses`. `window.rs` calls it after
+  `create_window`; `DroppedTabs`, `take_tab_drop`, `strip_drop_index`.
+- `osmena-shell/src/tab_drop.rs` (new): `drop_target`, `frontmost`,
+  `note_focus`, `torn_off_place`. `app.rs`: `tab_drop_command` over
+  them, `focus_order`.
+- `osmena-chrome/src/chrome.rs`: `TabDrag` (`folder`, `held`, `grab`
+  as a share, `grab_y`, `pointer`, `detached`, `origin`), `Held`,
+  `Ride`, `StripPlaces`, `drop_drag`, `drag_scroll`; `strip_row`,
+  `strip_tab` and `strip_folder` around them; `TabDrop::origin` and
+  `folder`; `takes_every_key`.
+- `osmena-core/src/command.rs`: `MoveTabsToNewWindow { tabs, place,
+  folder }`, `MoveTabsToWindow { tabs, window, index, folder }`,
+  `MoveFolder { folder, index }`; `move_folder`, `folder_to_carry`,
+  `fold_arrived`. No trait of `osmena-engine` changed. Neither browser
+  names these commands in its own code; both only need their pins
+  moved.
+
+Made on the branch `tab-drag` in a worktree
+(`.worktrees/tab-drag/osmena` in the parent workspace), not merged,
+not pushed.
+
+Verified: `cargo test --workspace --features osmena-engine/glutin`
+(588 tests, 7 ignored: the six sheets and the location test; the
+three reproductions of `chrome/drag_tests.rs` are un-ignored and
+pass), clippy with `-D warnings`, `cargo fmt --all --check`. The
+rig in `drag_tests.rs` runs the real `chrome::draw` with pointer
+events: a drag across a `PointerGone`, Escape, a crowded strip's
+grown tab under the pointer, detach and re-attach, the detached drop
+and its `origin`, the gap under a point of another strip, a folder by
+its chip (expanded, collapsed, over another folder, a click still a
+click, detached), the scroll both ways. In core: the place before
+the open, the index and the folder rule in another window, a folder
+as a unit and at a nearer end, a folder made again in a new and in
+another window, a selection across folders. In Nautilus's bundle on
+the Mac, built against this branch and started on a scratch
+`--data-dir` with `--exit-after`: exit 0, no panic, the window
+captured and its strip and page as they should be, and the line
+`strip press 22 points under the top: lands on WinitView, could move
+the window before: true, can now: false (the class of WinitView
+taught to refuse)`.
+
+Not verified, because no pointer can be scripted on this Mac (no
+Accessibility permission) and nobody dragged: everything by hand.
+Above all that AppKit really leaves the press to the view now (the
+hit test says so; no press was made); that the window still moves by
+the grip and the empty stretch, which is now `drag_window` alone
+where the title bar used to do most of it (see Left); the
+double-click zoom; the traffic lights; a drag across a real window
+edge; the new window's place on a real screen, on a second monitor,
+at a scale other than the source's; the drop on another window's
+strip; overlapping windows; two profiles' windows. Windows and Linux:
+nothing was run there (the chrome and core changes are shared, the
+shell's are plain winit).
+
+Left, and known:
+
+- `Window::drag_window` on macOS passes `NSApp.currentEvent` to
+  `performWindowDragWithEvent:`, whose header asks for "the original
+  mouseDown event". The chrome asks for the drag on
+  `drag_started_by`, a few points into the movement, and the shell
+  acts after the frame, so the current event is by then a
+  mouse-dragged one (or whatever arrived since). Nobody has seen
+  it work or fail here: before this change the title bar took nearly
+  every press on the strip first. It is now the only way the window
+  moves, so it is the first thing to try by hand. If it fails, ask
+  for the drag on the press (`is_pointer_button_down_on`) instead of
+  on `drag_started_by`.
+- The method is added to winit's class, so every winit view in the
+  process answers no, the settings window's and a system-framed
+  browser window's too. Their title bars are above the content and
+  never asked it; nothing of theirs should change, and nothing was
+  seen to.
+- A tab that changes window is recreated at its URL: the page
+  reloads, its history and form state are lost (the engine contract
+  has no way to hand a page to another window).
+- The window that takes dropped tabs shows no gap while the drag is
+  over it: it does not know of a drag in another window. The tabs
+  land at the gap all the same.
+- Dragging every tab of a window: over the window itself nothing
+  happens; anywhere else they still get a new window (now at the
+  drop) and the old one closes, pages reloaded. Chromium moves the
+  window instead; not in this change.
+- A window torn off a maximized one takes its size, unmaximized, at
+  the drop point, so most of it may be off screen.
+- A folder moved to a window that has a folder of the same name
+  makes a second one of that name; a session restore joins folders
+  by name.
+- `frontmost` goes by the keyboard's history, not the screen's
+  stacking: a window raised without being given the keyboard is not
+  seen as in front.
+- Out of the window the dragged tabs cannot be drawn; a note at the
+  window's edge ("Move 2 tabs") stands in for them.
 
 ## Status and handoff (2026-11-22)
 

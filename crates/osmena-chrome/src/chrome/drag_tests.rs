@@ -507,7 +507,7 @@ fn escape_cancels_a_drag() {
 }
 
 /// A drag pulled more than a tab's height off the strip is detached,
-/// as in Chromium: the gap closes behind it, the tab rides with the
+/// as in other browsers: the gap closes behind it, the tab rides with the
 /// pointer wherever that goes, and moving back over the strip puts it
 /// in the row again.
 #[test]
