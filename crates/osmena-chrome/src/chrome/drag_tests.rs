@@ -791,6 +791,10 @@ fn a_detached_folder_drag_is_dropped_as_a_folder() {
 #[test]
 fn a_drag_held_at_the_rows_end_scrolls_it() {
     let mut rig = Rig::new(30);
+    // The left end of what shows, read before anything has scrolled: the
+    // first tab starts there. It is not the same on every platform (the
+    // window's own controls stand left of the strip on some).
+    let view_left = rig.tab_rect(1).left();
     let from = rig.tab_rect(3).center();
     let last = rig.tab_rect(30);
     // The right end of what shows: the "+" stands just past it.
@@ -821,7 +825,9 @@ fn a_drag_held_at_the_rows_end_scrolls_it() {
 
     // And back: held at the left end it scrolls to the start.
     let from = rig.tab_rect(3).center();
-    let start = Pos2::new(rig.tab_rect(1).left().max(0.0) + 90.0, from.y);
+    // Ten points inside the left end of what shows, wherever that is, so
+    // the pointer is in the stretch that scrolls on every platform.
+    let start = Pos2::new(view_left + 10.0, from.y);
     let from = Pos2::new(from.x.min(end), from.y);
     rig.press(from);
     rig.drag(from, start);
