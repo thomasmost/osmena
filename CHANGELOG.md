@@ -97,6 +97,11 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- A drag scrolls a crowded strip. While the pointer of a drag is held
+  near an end of the row that has tabs out of sight past it, the row
+  scrolls that way at a steady pace, so a tab (or a folder) can be
+  taken to a place that could not be seen when the drag began.
+
 - A folder dragged off the strip moves as a folder. Let go over
   nothing it gets a window of its own; over another window of the
   profile it goes there, at the gap of the strip it was dropped on

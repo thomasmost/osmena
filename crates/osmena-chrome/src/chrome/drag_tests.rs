@@ -712,3 +712,73 @@ fn a_detached_folder_drag_is_dropped_as_a_folder() {
             .all(|c| !matches!(c, Command::MoveFolder { .. } | Command::MoveTabs { .. }))
     );
 }
+
+/// More tabs than fit: a drag held near an end of the row scrolls the
+/// row that way, so a tab can be taken to a place that was out of
+/// sight when the drag began.
+#[test]
+fn a_drag_held_at_the_rows_end_scrolls_it() {
+    let mut rig = Rig::new(30);
+    let from = rig.tab_rect(3).center();
+    let last = rig.tab_rect(30);
+    // The right end of what shows: the "+" stands just past it.
+    let plus = rig
+        .ctx
+        .read_response(Id::new(("new-tab", WindowId(1))))
+        .map(|r| r.rect);
+    let end = plus.map_or(SIZE.x - 120.0, |r| r.left()) - 10.0;
+    assert!(last.left() > end, "the last tab is out of sight");
+    let to = Pos2::new(end, from.y);
+    rig.press(from);
+    rig.drag(from, to);
+    // Held there, the pointer still: two seconds of frames.
+    for _ in 0..120 {
+        rig.frame(Vec::new());
+    }
+    assert!(
+        rig.tab_rect(30).right() <= end + 60.0,
+        "the row has scrolled to its end: the last tab is at {:?}",
+        rig.tab_rect(30)
+    );
+    rig.release(to);
+    assert_eq!(
+        rig.order().iter().position(|id| *id == 3),
+        Some(29),
+        "dropped past the tab that was out of sight"
+    );
+
+    // And back: held at the left end it scrolls to the start.
+    let from = rig.tab_rect(3).center();
+    let start = Pos2::new(rig.tab_rect(1).left().max(0.0) + 90.0, from.y);
+    let from = Pos2::new(from.x.min(end), from.y);
+    rig.press(from);
+    rig.drag(from, start);
+    for _ in 0..120 {
+        rig.frame(Vec::new());
+    }
+    rig.release(start);
+    let landed = rig.order().iter().position(|id| *id == 3);
+    assert!(
+        landed.is_some_and(|at| at <= 2),
+        "back at the front, landed at {landed:?}"
+    );
+}
+
+#[test]
+fn a_drag_scrolls_only_towards_tabs_that_are_out_of_sight() {
+    let view = (100.0, 500.0);
+    // Everything shows: nothing to scroll to, wherever the pointer is.
+    assert_eq!(drag_scroll(495.0, view, (100.0, 500.0)), 0.0);
+    assert_eq!(drag_scroll(105.0, view, (100.0, 400.0)), 0.0);
+    // More past the right end only.
+    let row = (100.0, 900.0);
+    assert_eq!(drag_scroll(300.0, view, row), 0.0);
+    assert_eq!(drag_scroll(500.0 - DRAG_SCROLL_EDGE, view, row), 1.0);
+    assert_eq!(drag_scroll(640.0, view, row), 1.0, "past the end too");
+    assert_eq!(drag_scroll(105.0, view, row), 0.0, "nothing to the left");
+    // Scrolled to the middle: both ways.
+    let row = (-200.0, 900.0);
+    assert_eq!(drag_scroll(110.0, view, row), -1.0);
+    assert_eq!(drag_scroll(490.0, view, row), 1.0);
+    assert_eq!(drag_scroll(300.0, view, row), 0.0);
+}

@@ -117,6 +117,14 @@ const ADDRESS_MARGIN: Margin = Margin::symmetric(12, 7);
 const FOLDER_NAME_MAX_CHARS: usize = 18;
 /// How long a tab or chip takes to slide to a new place in the strip.
 const STRIP_SLIDE_SECS: f32 = 0.12;
+
+/// How near an end of the row's view the pointer of a drag scrolls the
+/// row towards what is out of sight there.
+const DRAG_SCROLL_EDGE: f32 = 32.0;
+
+/// How fast such a drag scrolls the row, in points a second: about
+/// twelve of the narrowest tabs, steady for as long as it is held.
+const DRAG_SCROLL_SPEED: f32 = 480.0;
 /// The Launch Panel's field's font size.
 pub(crate) const LAUNCHER_FONT_SIZE: f32 = 22.0;
 /// The widest a history match's title and address are drawn.
@@ -1931,6 +1939,27 @@ fn strip_row(
         drag.origin = Pos2::new(left - look.left, top - row.top());
     }
     let detached = state.tab_drag.as_ref().is_some_and(|drag| drag.detached);
+    // Held near an end of a row with tabs out of sight there, the drag
+    // scrolls the row that way, so no place is out of its reach. The
+    // pointer may be still, so the frames are asked for.
+    if let Some(drag) = state.tab_drag.as_ref().filter(|drag| !drag.detached) {
+        let view = ui.clip_rect();
+        let towards = drag_scroll(
+            drag.pointer.x,
+            (view.left(), view.right()),
+            (row.left(), row.right()),
+        );
+        if towards != 0.0 {
+            let dt = ui.input(|i| i.stable_dt).min(0.05);
+            // egui's delta moves the content: to see what is further
+            // right, the content goes left.
+            ui.scroll_with_delta_animation(
+                Vec2::new(-towards * DRAG_SCROLL_SPEED * dt, 0.0),
+                egui::style::ScrollAnimation::none(),
+            );
+            ui.ctx().request_repaint();
+        }
+    }
     // In the row the dragged tabs keep to it; detached they go where
     // the pointer goes.
     let drag_left = drag_at.map(|(left, _)| {
@@ -2095,6 +2124,23 @@ fn strip_row(
                     });
                 });
         }
+    }
+}
+
+/// Which way a drag whose pointer is at `pointer` (its x) scrolls the
+/// row: 1 towards the tabs out of sight past the right end of `view`,
+/// -1 towards those past its left end, 0 when the pointer is near
+/// neither end or the `row` has nothing more that way. All are spans
+/// from left to right, in the same coordinates.
+fn drag_scroll(pointer: f32, view: (f32, f32), row: (f32, f32)) -> f32 {
+    let more_left = row.0 < view.0 - 0.5;
+    let more_right = row.1 > view.1 + 0.5;
+    if more_right && pointer >= view.1 - DRAG_SCROLL_EDGE {
+        1.0
+    } else if more_left && pointer <= view.0 + DRAG_SCROLL_EDGE {
+        -1.0
+    } else {
+        0.0
     }
 }
 
