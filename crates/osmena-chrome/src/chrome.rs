@@ -894,9 +894,13 @@ impl StripPlaces {
 #[derive(Clone, Debug, PartialEq)]
 struct TabDrag {
     tabs: Vec<TabId>,
-    /// The tab under the pointer when the drag began: its widget is the
-    /// one egui is dragging.
-    pressed: TabId,
+    /// The folder being dragged by its chip, whole: `tabs` are its
+    /// tabs, and it stays a folder where it lands. `None` for a drag of
+    /// tabs, which take the folder of the place they land.
+    folder: Option<FolderId>,
+    /// What was under the pointer when the drag began: its widget is
+    /// the one egui is dragging.
+    held: Held,
     /// Where on the pressed tab the pointer took hold, as a share of its
     /// width. A share and not a distance: the tab may change width under
     /// the pointer (an inactive tab becomes the active one as its drag
@@ -922,7 +926,33 @@ struct TabDrag {
 impl TabDrag {
     /// The widget egui is dragging while this drag is on.
     fn source(&self) -> Id {
-        Id::new(("tab", self.pressed))
+        match self.held {
+            Held::Tab(tab) => Id::new(("tab", tab)),
+            Held::Chip(folder) => Id::new(("chip", folder)),
+        }
+    }
+}
+
+/// What a drag took hold of: a tab, or a folder's chip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Held {
+    Tab(TabId),
+    Chip(FolderId),
+}
+
+/// A tab or a chip riding with the pointer in a drag.
+enum Ride<'a> {
+    Tab(&'a Tab),
+    Chip(&'a Chip),
+}
+
+impl Ride<'_> {
+    fn is(&self, held: Held) -> bool {
+        match (self, held) {
+            (Ride::Tab(tab), Held::Tab(id)) => tab.id == id,
+            (Ride::Chip(chip), Held::Chip(folder)) => chip.folder == folder,
+            _ => false,
+        }
     }
 }
 
@@ -1632,6 +1662,16 @@ impl Slot<'_> {
         }
     }
 
+    /// Where a dragged folder may land: beside a tab that is in no
+    /// folder, or beside another folder's chip (before the folder, or
+    /// after the collapsed one), never between a folder's tabs.
+    fn stands_between_folders(&self) -> bool {
+        match &self.kind {
+            SlotKind::Tab(tab) => tab.folder.is_none(),
+            SlotKind::Chip(_) => true,
+        }
+    }
+
     /// The key its slide is animated under.
     fn slide_id(&self) -> Id {
         match &self.kind {
@@ -1662,10 +1702,11 @@ impl<'a> RowBuilder<'a> {
     }
 
     /// A chip, standing for `hidden` tabs of its folder that are not
-    /// drawn (none when it is expanded).
-    fn add_chip(&mut self, chip: Chip, hidden: usize) {
+    /// drawn (none when it is expanded). `dragged` when its folder is
+    /// being dragged by it.
+    fn add_chip(&mut self, chip: Chip, hidden: usize, dragged: bool) {
         let width = chip.width;
-        self.push(SlotKind::Chip(chip), width, false, hidden);
+        self.push(SlotKind::Chip(chip), width, dragged, hidden);
     }
 
     fn push(&mut self, kind: SlotKind<'a>, width: f32, dragged: bool, tabs: usize) {
@@ -1719,6 +1760,7 @@ fn strip_row(
         .map(|drag| drag.tabs.clone())
         .unwrap_or_default();
     let is_dragged = |id: TabId| dragging.contains(&id);
+    let dragged_folder = state.tab_drag.as_ref().and_then(|drag| drag.folder);
 
     // What the row holds: the tabs that show, and the chips with the
     // widths their names give them.
@@ -1793,7 +1835,10 @@ fn strip_row(
                     is_dragged(tab.id),
                 );
             }
-            Entry::Chip(chip, hidden) => row.add_chip(chip, hidden),
+            Entry::Chip(chip, hidden) => {
+                let dragged = dragged_folder == Some(chip.folder);
+                row.add_chip(chip, hidden, dragged);
+            }
         }
     }
     let RowBuilder {
@@ -1830,21 +1875,47 @@ fn strip_row(
             .find(|slot| matches!(&slot.kind, SlotKind::Tab(tab) if tab.id == id))
             .map_or(share, |slot| slot.width)
     };
-    let block: f32 = dragging.iter().map(|id| dragged_width(*id) + spacing).sum();
-    let lead_width = dragging.first().map_or(share, |id| dragged_width(*id));
+    // What rides with the pointer: the dragged tabs, behind their
+    // folder's chip when a folder is dragged (the chip alone when the
+    // folder is collapsed, as it stands in the row).
+    let mut riders: Vec<(Ride<'_>, f32)> = Vec::new();
+    if state.tab_drag.is_some() {
+        let chip = dragged_folder.and_then(|folder| {
+            slots.iter().find_map(|slot| match &slot.kind {
+                SlotKind::Chip(chip) if chip.folder == folder => Some(chip),
+                _ => None,
+            })
+        });
+        if let Some(chip) = chip {
+            riders.push((Ride::Chip(chip), chip.width));
+        }
+        if chip.is_none_or(|chip| chip.expanded) {
+            for id in &dragging {
+                if let Some(tab) = window.tab(*id) {
+                    riders.push((Ride::Tab(tab), dragged_width(*id)));
+                }
+            }
+        }
+    }
+    let block: f32 = riders.iter().map(|(_, width)| width + spacing).sum();
+    let lead_width = riders.first().map_or(share, |(_, width)| *width);
     // The pointer as last seen: a frame that finds it gone (it crossed
     // the window's edge) does not end the drag, the button does.
     let pointer = state.tab_drag.as_ref().map(|drag| drag.pointer);
     let drag_at = state.tab_drag.as_ref().map(|drag| {
-        // The point held on the pressed tab stays under the pointer,
-        // whatever the tab's width has become since, with the dragged
-        // tabs before it to its left.
-        let before: f32 = dragging
+        // The point held on the pressed tab (or chip) stays under the
+        // pointer, whatever its width has become since, with what rides
+        // before it to its left.
+        let before: f32 = riders
             .iter()
-            .take_while(|id| **id != drag.pressed)
-            .map(|id| dragged_width(*id) + spacing)
+            .take_while(|(ride, _)| !ride.is(drag.held))
+            .map(|(_, width)| width + spacing)
             .sum();
-        let grab = before + drag.grab * dragged_width(drag.pressed);
+        let held_width = riders
+            .iter()
+            .find(|(ride, _)| ride.is(drag.held))
+            .map_or(lead_width, |(_, width)| *width);
+        let grab = before + drag.grab * held_width;
         (drag.pointer.x - grab, drag.pointer.y - drag.grab_y)
     });
     // Chromium's rule: more than a tab's height above or below the
@@ -1867,7 +1938,14 @@ fn strip_row(
         let centre = left + lead_width / 2.0;
         slots
             .iter()
-            .filter(|slot| !slot.dragged && slot.stands_for_tabs())
+            .filter(|slot| {
+                !slot.dragged
+                    && if dragged_folder.is_some() {
+                        slot.stands_between_folders()
+                    } else {
+                        slot.stands_for_tabs()
+                    }
+            })
             .find(|slot| row.left() + slot.compact + slot.width / 2.0 >= centre)
             .map_or(tab_count, |slot| slot.tab_index)
     });
@@ -1935,30 +2013,42 @@ fn strip_row(
         } else {
             (in_row, row.top())
         };
-        for id in &dragging {
-            let Some(tab) = window.tab(*id) else {
-                continue;
-            };
-            let width = dragged_width(*id);
-            ui.ctx()
-                .animate_value_with_time(Id::new(("strip-slide", tab.id)), x - row.left(), 0.0);
-            ui.ctx()
-                .animate_value_with_time(Id::new(("strip-width", tab.id)), width, 0.0);
-            let rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, TAB_HEIGHT))
+        let ctx = ui.ctx().clone();
+        let (target, target_late) = if detached {
+            (&mut over, &mut over_late)
+        } else {
+            (&mut *ui, &mut late)
+        };
+        for (ride, width) in &riders {
+            let rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(*width, TAB_HEIGHT))
                 .round_to_pixels(ppp);
-            if detached {
-                strip_tab(
-                    &mut over,
-                    rect,
-                    window,
-                    tab,
-                    look,
-                    state,
-                    commands,
-                    &mut over_late,
-                );
-            } else {
-                strip_tab(ui, rect, window, tab, look, state, commands, &mut late);
+            match ride {
+                Ride::Tab(tab) => {
+                    ctx.animate_value_with_time(
+                        Id::new(("strip-slide", tab.id)),
+                        x - row.left(),
+                        0.0,
+                    );
+                    ctx.animate_value_with_time(Id::new(("strip-width", tab.id)), *width, 0.0);
+                    strip_tab(
+                        target,
+                        rect,
+                        window,
+                        tab,
+                        look,
+                        state,
+                        commands,
+                        target_late,
+                    );
+                }
+                Ride::Chip(chip) => {
+                    ctx.animate_value_with_time(
+                        Id::new(("strip-slide", chip.folder)),
+                        x - row.left(),
+                        0.0,
+                    );
+                    strip_folder(target, rect, chip, window, state, commands, target_late);
+                }
             }
             x += width + spacing;
         }
@@ -1973,8 +2063,8 @@ fn strip_row(
             .expand2(Vec2::new(f32::from(TAB_CORNER), 1.0));
         ui.painter().with_clip_rect(clip).extend(late);
     }
-    // The drag is on for as long as egui holds the pressed tab: until
-    // the button is released (a drop, handled by the tab) or the hold
+    // The drag is on for as long as egui holds what was pressed: until
+    // the button is released (a drop, handled by the tab or chip) or the hold
     // is lost with no release (focus went elsewhere).
     if let Some(drag) = &state.tab_drag
         && !ui.ctx().is_being_dragged(drag.source())
@@ -2101,7 +2191,8 @@ fn strip_tab(
             .count();
         state.tab_drag = Some(TabDrag {
             tabs: targets,
-            pressed: tab.id,
+            folder: None,
+            held: Held::Tab(tab.id),
             grab,
             grab_y: (held.y - rect.top()).clamp(0.0, rect.height()),
             index,
@@ -2114,18 +2205,30 @@ fn strip_tab(
         && let Some(drag) = state.tab_drag.take()
     {
         let pointer = response.interact_pointer_pos().unwrap_or(drag.pointer);
-        if drag.detached {
-            state.tab_drop = Some(TabDrop {
-                tabs: drag.tabs,
-                pointer,
-                origin: drag.origin,
-            });
-        } else {
-            commands.push(Command::MoveTabs {
-                tabs: drag.tabs,
-                index: drag.index,
-            });
-        }
+        drop_drag(state, drag, pointer, commands);
+    }
+}
+
+/// A drag ended with the button let go at `pointer`: in the row the
+/// tabs (or the folder) move to the gap they were over; detached, the
+/// shell places them ([`TabDrop`]).
+fn drop_drag(state: &mut ChromeState, drag: TabDrag, pointer: Pos2, commands: &mut Vec<Command>) {
+    if drag.detached {
+        state.tab_drop = Some(TabDrop {
+            tabs: drag.tabs,
+            pointer,
+            origin: drag.origin,
+        });
+    } else if let Some(folder) = drag.folder {
+        commands.push(Command::MoveFolder {
+            folder,
+            index: drag.index,
+        });
+    } else {
+        commands.push(Command::MoveTabs {
+            tabs: drag.tabs,
+            index: drag.index,
+        });
     }
 }
 
@@ -2226,8 +2329,9 @@ fn text_top_centered(painter: &egui::Painter, font: &egui::FontId, y: f32) -> f3
 /// A folder's chip in the strip: its name with a disclosure glyph and,
 /// collapsed, its tab count. A click drops the list of its tabs down
 /// under it (another click, a click elsewhere, or Escape takes it away);
-/// a right click opens the folder's menu. Expanded, its tabs follow it in
-/// the strip, drawn by the caller.
+/// a right click opens the folder's menu; a drag moves the folder, the
+/// chip riding with its tabs. Expanded, its tabs follow it in the strip,
+/// drawn by the caller.
 fn strip_folder(
     ui: &mut Ui,
     rect: Rect,
@@ -2250,7 +2354,7 @@ fn strip_folder(
     let (folder, expanded, as_active, text_color) = (*folder, *expanded, *as_active, *text_color);
     let palette = &chip.palette;
     let response = ui
-        .interact(rect, Id::new(("chip", folder)), Sense::click())
+        .interact(rect, Id::new(("chip", folder)), Sense::click_and_drag())
         .on_hover_text(if expanded {
             format!("{name}: {} tabs", tabs.len())
         } else {
@@ -2333,6 +2437,41 @@ fn strip_folder(
                 .interact_pointer_pos()
                 .unwrap_or_else(|| rect.left_bottom()),
         });
+    }
+    if response.drag_started() {
+        state.open_folder = None;
+        let pointer = response
+            .interact_pointer_pos()
+            .unwrap_or_else(|| rect.center());
+        let held = ui.input(|i| i.pointer.press_origin()).unwrap_or(pointer);
+        let grab = if rect.width() > 0.0 {
+            ((held.x - rect.left()) / rect.width()).clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        // Where the folder is now, among the tabs that are not its own.
+        let index = window
+            .tabs
+            .iter()
+            .take_while(|t| t.folder != Some(folder))
+            .count();
+        state.tab_drag = Some(TabDrag {
+            tabs: tabs.clone(),
+            folder: Some(folder),
+            held: Held::Chip(folder),
+            grab,
+            grab_y: (held.y - rect.top()).clamp(0.0, rect.height()),
+            index,
+            detached: false,
+            origin: Pos2::ZERO,
+            pointer,
+        });
+    }
+    if response.drag_stopped()
+        && let Some(drag) = state.tab_drag.take()
+    {
+        let pointer = response.interact_pointer_pos().unwrap_or(drag.pointer);
+        drop_drag(state, drag, pointer, commands);
     }
     if state.open_folder != Some(folder) {
         return;

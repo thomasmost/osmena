@@ -91,6 +91,17 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Added
 
+- A folder is dragged by its chip. A press on the chip that travels
+  takes the whole folder along the strip, the chip riding with its
+  tabs after it (alone when the folder is collapsed); a click still
+  drops its list down. It lands as the folder it was, with its name
+  and whether it is expanded, through the new `Command::MoveFolder {
+  folder, index }` (the index counts the window's other tabs, as
+  `MoveTabs` does); a folder never lands inside another, the gap
+  opening before or after it instead. Tabs dragged as tabs, a
+  selection across folders included, still all take the folder of the
+  place they land.
+
 - Tabs dropped on another window's strip land in the gap they were
   dropped on, joining a folder when that is between two of its tabs
   (`ChromeState::strip_drop_index`, from how that strip stood in its

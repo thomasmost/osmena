@@ -358,7 +358,6 @@ fn a_drag_outlives_the_pointer_leaving_the_window() {
 }
 
 #[test]
-#[ignore = "reproduces the tab-drag bug; un-ignore with the fix"]
 fn a_folder_dragged_by_its_chip_moves_its_tabs_together() {
     let mut rig = Rig::new(5);
     rig.folder(7, &[2, 3], true);
@@ -371,7 +370,20 @@ fn a_folder_dragged_by_its_chip_moves_its_tabs_together() {
         Some(vec![TabId(2), TabId(3)]),
         "a press on the chip that moves is a drag of the folder's tabs"
     );
+    let chip = rig.chip_rect(7);
+    let second = rig.tab_rect(2);
+    assert!(
+        (second.left() - chip.right()).abs() <= 3.0 && chip.right() <= to.x + chip.width(),
+        "the chip rides with its tabs after it: {chip:?}, {second:?}"
+    );
     rig.release(to);
+    assert_eq!(
+        rig.answered.last(),
+        Some(&Command::MoveFolder {
+            folder: FolderId(7),
+            index: 3
+        })
+    );
     assert_eq!(rig.order(), vec![1, 4, 5, 2, 3]);
     let window = &rig.browser.windows[0];
     assert_eq!(
@@ -449,7 +461,7 @@ fn a_drag_takes_every_key() {
     let mut rig = Rig::new(4);
     assert!(!rig.state.takes_every_key());
     let from = rig.tab_rect(2).center();
-    let to = Pos2::new(rig.tab_rect(3).center().x, from.y);
+    let to = Pos2::new(rig.tab_rect(3).center().x - 6.0, from.y);
     rig.press(from);
     rig.drag(from, to);
     assert!(rig.state.takes_every_key());
@@ -604,4 +616,72 @@ fn a_point_past_a_collapsed_folder_counts_its_hidden_tabs() {
     let at = |x: f32| rig.state.strip_drop_index(Pos2::new(x, y));
     assert_eq!(at(chip.left() + 2.0), Some(1));
     assert_eq!(at(chip.right() - 2.0), Some(3));
+}
+
+/// A collapsed folder is its chip alone, and is dragged as that; it is
+/// still collapsed, and still a folder, where it lands.
+#[test]
+fn a_collapsed_folder_is_dragged_by_its_chip_alone() {
+    let mut rig = Rig::new(5);
+    rig.folder(7, &[2, 3], false);
+    let from = rig.chip_rect(7).center();
+    let to = Pos2::new(rig.tab_rect(5).right() - 2.0, from.y);
+    rig.press(from);
+    rig.drag(from, to);
+    let drag = rig.state.tab_drag.clone().expect("the drag is on");
+    assert_eq!(drag.folder, Some(FolderId(7)));
+    assert_eq!(drag.index, 3);
+    assert!(
+        rig.ctx.read_response(Id::new(("tab", TabId(2)))).is_none(),
+        "its tabs stay hidden"
+    );
+    rig.release(to);
+    assert_eq!(rig.order(), vec![1, 4, 5, 2, 3]);
+    let window = &rig.browser.windows[0];
+    assert_eq!(window.folder_tabs(FolderId(7)), [TabId(2), TabId(3)]);
+    assert!(!window.folder(FolderId(7)).expect("still a folder").expanded);
+}
+
+/// A folder dragged over another does not open a gap inside it: it
+/// lands before or after.
+#[test]
+fn a_folder_dragged_over_another_lands_beside_it() {
+    let mut rig = Rig::new(6);
+    rig.folder(7, &[2, 3], true);
+    rig.folder(8, &[4, 5], true);
+    let from = rig.chip_rect(7).center();
+    // Its own second tab's place is, once the folder is out of the
+    // row and the rest has closed up, in the middle of the other
+    // folder (the two chips are as wide as each other).
+    let to = Pos2::new(rig.tab_rect(3).center().x, from.y);
+    rig.press(from);
+    rig.drag(from, to);
+    assert_eq!(
+        rig.state.tab_drag.as_ref().map(|drag| drag.index),
+        Some(3),
+        "the gap is after the other folder's tabs"
+    );
+    rig.release(to);
+    let window = &rig.browser.windows[0];
+    assert_eq!(window.folder_tabs(FolderId(7)), [TabId(2), TabId(3)]);
+    assert_eq!(window.folder_tabs(FolderId(8)), [TabId(4), TabId(5)]);
+    assert_eq!(
+        rig.order(),
+        vec![1, 4, 5, 2, 3, 6],
+        "after the other folder, not in it"
+    );
+}
+
+/// A press on a chip that does not travel is still a click: it drops
+/// the list of the folder's tabs down.
+#[test]
+fn a_click_on_a_chip_still_lists_its_tabs() {
+    let mut rig = Rig::new(5);
+    rig.folder(7, &[2, 3], false);
+    let at = rig.chip_rect(7).center();
+    rig.press(at);
+    rig.release(at);
+    assert_eq!(rig.state.open_folder, Some(FolderId(7)));
+    assert_eq!(rig.state.tab_drag, None);
+    assert_eq!(rig.order(), vec![1, 2, 3, 4, 5]);
 }

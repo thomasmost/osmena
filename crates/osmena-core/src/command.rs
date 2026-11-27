@@ -76,6 +76,16 @@ pub enum Command {
         tabs: Vec<TabId>,
         index: usize,
     },
+    /// Move a folder along its window's strip: its tabs, together and
+    /// in their order, to `index` among the window's other tabs (as
+    /// `MoveTabs` counts). They stay in the folder, which keeps its
+    /// name and whether it is expanded. A folder does not go inside
+    /// another: an `index` between two tabs of one folder lands at that
+    /// folder's nearer end (the front when it is as near).
+    MoveFolder {
+        folder: FolderId,
+        index: usize,
+    },
     /// Open these tabs' URLs in a browser process for `profile` (another
     /// profile is another process: an engine's data directory belongs
     /// to one browser process at a time) and close
@@ -926,6 +936,10 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
         } => move_tabs_to_window(browser, tabs, *window, *index),
         Command::MoveTabs { tabs, index } => {
             move_tabs(browser, tabs, *index);
+            Vec::new()
+        }
+        Command::MoveFolder { folder, index } => {
+            move_folder(browser, *folder, *index);
             Vec::new()
         }
         Command::OpenTabsInProfile { tabs, profile } => {
@@ -2718,6 +2732,42 @@ fn move_tabs(browser: &mut Browser, tabs: &[TabId], index: usize) {
     }
 }
 
+/// Move a folder as a unit: see `Command::MoveFolder`.
+fn move_folder(browser: &mut Browser, folder: FolderId, index: usize) {
+    let Some(w) = browser
+        .window_of_folder(folder)
+        .and_then(|window| browser.window_mut(window))
+    else {
+        return;
+    };
+    let (moving, mut rest): (Vec<Tab>, Vec<Tab>) =
+        w.tabs.drain(..).partition(|tab| tab.folder == Some(folder));
+    let mut at = index.min(rest.len());
+    // Between two tabs of another folder: out to that folder's nearer
+    // end, so neither folder is split.
+    let around = at
+        .checked_sub(1)
+        .and_then(|i| rest.get(i))
+        .and_then(|before| before.folder)
+        .filter(|other| {
+            rest.get(at)
+                .is_some_and(|after| after.folder == Some(*other))
+        });
+    if let Some(other) = around {
+        let start = rest[..at]
+            .iter()
+            .rposition(|tab| tab.folder != Some(other))
+            .map_or(0, |i| i + 1);
+        let end = rest[at..]
+            .iter()
+            .position(|tab| tab.folder != Some(other))
+            .map_or(rest.len(), |i| at + i);
+        at = if at - start <= end - at { start } else { end };
+    }
+    rest.splice(at..at, moving);
+    w.tabs = rest;
+}
+
 /// Recreate `moving` (from index `already` on; the earlier ones are
 /// already in `window`, at its end) as new tabs at the end of `window`,
 /// activate the one standing in for the tab that was active in its old
@@ -3961,6 +4011,170 @@ mod tests {
         );
         assert_eq!(order(&b, window), [a, bb, c]);
         assert!(b.window(window).unwrap().folders.is_empty());
+    }
+
+    /// Six tabs, the second and third in folder "F", the fifth and
+    /// sixth in folder "G".
+    fn two_folders() -> (Browser, WindowId, Vec<TabId>, FolderId, FolderId) {
+        let (mut b, window, t) = window_with_tabs(6);
+        for (tabs, name) in [(vec![t[1], t[2]], "F"), (vec![t[4], t[5]], "G")] {
+            dispatch(
+                &mut b,
+                &Command::MoveTabsToFolder {
+                    tabs,
+                    folder: FolderTarget::New {
+                        name: name.to_string(),
+                    },
+                },
+            );
+        }
+        let f = b.tab(t[1]).unwrap().folder.expect("in F");
+        let g = b.tab(t[4]).unwrap().folder.expect("in G");
+        (b, window, t, f, g)
+    }
+
+    #[test]
+    fn a_folder_moves_as_a_unit_and_stays_a_folder() {
+        let (mut b, window, t, f, _g) = two_folders();
+        dispatch(
+            &mut b,
+            &Command::SetFolderExpanded {
+                folder: f,
+                expanded: true,
+            },
+        );
+        // To the front: index 0 among the four other tabs.
+        assert!(
+            dispatch(
+                &mut b,
+                &Command::MoveFolder {
+                    folder: f,
+                    index: 0
+                }
+            )
+            .is_empty(),
+            "nothing changes hands with the engine"
+        );
+        assert_eq!(order(&b, window), [t[1], t[2], t[0], t[3], t[4], t[5]]);
+        let w = b.window(window).unwrap();
+        assert_eq!(w.folder_tabs(f), [t[1], t[2]]);
+        let folder = w.folder(f).unwrap();
+        assert_eq!((folder.name.as_str(), folder.expanded), ("F", true));
+        // Between the two loose tabs.
+        dispatch(
+            &mut b,
+            &Command::MoveFolder {
+                folder: f,
+                index: 1,
+            },
+        );
+        assert_eq!(order(&b, window), [t[0], t[1], t[2], t[3], t[4], t[5]]);
+        // Past the end is the end; a folder from nowhere is ignored.
+        dispatch(
+            &mut b,
+            &Command::MoveFolder {
+                folder: f,
+                index: 9,
+            },
+        );
+        assert_eq!(order(&b, window), [t[0], t[3], t[4], t[5], t[1], t[2]]);
+        let before = b.windows.clone();
+        dispatch(
+            &mut b,
+            &Command::MoveFolder {
+                folder: FolderId(99),
+                index: 0,
+            },
+        );
+        assert_eq!(b.windows, before);
+        assert_eq!(b.window(window).unwrap().folder_tabs(f), [t[1], t[2]]);
+        assert_eq!(b.window(window).unwrap().folders.len(), 2);
+    }
+
+    #[test]
+    fn a_folder_dropped_inside_another_lands_at_its_nearer_end() {
+        // A third tab in G, so its ends are not equally near.
+        let (mut b, window, t, f, g) = two_folders();
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToFolder {
+                tabs: vec![t[3]],
+                folder: FolderTarget::Existing(g),
+            },
+        );
+        assert_eq!(b.window(window).unwrap().folder_tabs(g), [t[3], t[4], t[5]]);
+        dispatch(
+            &mut b,
+            &Command::MoveFolder {
+                folder: f,
+                index: 9,
+            },
+        );
+        assert_eq!(order(&b, window), [t[0], t[3], t[4], t[5], t[1], t[2]]);
+        // The others are t0, t3, t4, t5. Index 2 is between t3 and t4,
+        // one tab into G: its front is nearer.
+        dispatch(
+            &mut b,
+            &Command::MoveFolder {
+                folder: f,
+                index: 2,
+            },
+        );
+        assert_eq!(order(&b, window), [t[0], t[1], t[2], t[3], t[4], t[5]]);
+        // Index 3 is between t4 and t5, one tab from G's end.
+        dispatch(
+            &mut b,
+            &Command::MoveFolder {
+                folder: f,
+                index: 3,
+            },
+        );
+        assert_eq!(order(&b, window), [t[0], t[3], t[4], t[5], t[1], t[2]]);
+        let w = b.window(window).unwrap();
+        assert_eq!(w.folder_tabs(f), [t[1], t[2]]);
+        assert_eq!(w.folder_tabs(g), [t[3], t[4], t[5]]);
+    }
+
+    /// A selection is dragged as tabs, whatever folders its tabs were
+    /// in: they all take the folder of the place they land.
+    #[test]
+    fn tabs_of_different_folders_moved_together_take_the_landing_places_folder() {
+        let (mut b, window, t, f, g) = two_folders();
+        // One of F and one of G, to between the two loose tabs: neither
+        // keeps its folder. (The others are t0, t2, t3, t5.)
+        dispatch(
+            &mut b,
+            &Command::MoveTabs {
+                tabs: vec![t[1], t[4]],
+                index: 2,
+            },
+        );
+        assert_eq!(order(&b, window), [t[0], t[2], t[1], t[4], t[3], t[5]]);
+        assert_eq!(b.tab(t[1]).unwrap().folder, None);
+        assert_eq!(b.tab(t[4]).unwrap().folder, None);
+        // A loose tab and the one left in G, to inside F: F cannot be
+        // landed in between two of its tabs with one tab, so give it two.
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToFolder {
+                tabs: vec![t[1]],
+                folder: FolderTarget::Existing(f),
+            },
+        );
+        let w = b.window(window).unwrap();
+        assert_eq!(w.folder_tabs(f), [t[2], t[1]]);
+        // The others are t0, t2, t1, t3: index 2 is between F's two.
+        dispatch(
+            &mut b,
+            &Command::MoveTabs {
+                tabs: vec![t[4], t[5]],
+                index: 2,
+            },
+        );
+        assert_eq!(order(&b, window), [t[0], t[2], t[4], t[5], t[1], t[3]]);
+        assert_eq!(b.tab(t[4]).unwrap().folder, Some(f));
+        assert_eq!(b.tab(t[5]).unwrap().folder, Some(f), "it left G for F");
+        assert!(b.window(window).unwrap().folder(g).is_none(), "G is empty");
     }
 
     #[test]
