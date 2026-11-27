@@ -191,6 +191,12 @@ All notable changes to the osmena crates. The crates version together.
   placed by its outer corner on every platform (`set_outer_position`;
   `with_position` meant the content's corner on macOS). The placement
   is `tab_drop::torn_off_place`, a pure function.
+- Two folders of one name in a window stay two folders through a
+  session file: each tab names its folder by its place in the window's
+  list (`SessionTab::folder_index`), which is written beside the name.
+  A session file without it is read by name, as before. A folder whose
+  tabs the file has apart comes back gathered where its first tab is,
+  so the strip draws what the model holds.
 - A dragged tab keeps the point it was taken by under the pointer.
   An inactive tab becomes the active one as its drag begins and, in a
   crowded strip, grows from 40 points to 64; the hold was measured on

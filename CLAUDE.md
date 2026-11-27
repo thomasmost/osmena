@@ -207,7 +207,10 @@ No engine is needed; the workspace builds in under a minute.
   move or resize, and at exit (`save_session`), and reads it in `run`.
   `command::restore_session` rebuilds the windows: `open_window` for
   each with its active tab, the other tabs pushed as `Tab::deferred`
-  (no engine tab yet), folders by name, and a `PlaceWindow` action
+  (no engine tab yet), folders by their place in the window's list
+  (`SessionTab::folder_index`, so two folders of one name stay apart;
+  a file that names only a folder's name is read by name, as older
+  builds wrote it), every folder gathered, and a `PlaceWindow` action
   ahead of the `OpenWindow`, which the shell turns into window
   attributes (`pending_geometry`, dropped off-monitor). The active tab
   is never deferred: `show_tab` creates a deferred tab the moment it is

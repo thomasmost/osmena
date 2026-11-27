@@ -32,9 +32,15 @@ pub struct SessionTab {
     pub url: Url,
     #[serde(default)]
     pub title: String,
-    /// The folder's name, when the tab is in one.
+    /// The folder's name, when the tab is in one. Older builds know a
+    /// folder by this name only, so it is still written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
+    /// Which of the window's folders (its position in the window's
+    /// `folder` list) the tab is in. Two folders of one name are apart by
+    /// it; a file without it is read by name, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_index: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +120,9 @@ impl Session {
                         url: t.url.clone(),
                         title: t.title.clone(),
                         folder: t.folder.and_then(|id| w.folder(id)).map(|f| f.name.clone()),
+                        folder_index: t
+                            .folder
+                            .and_then(|id| w.folders.iter().position(|f| f.id == id)),
                     })
                     .collect(),
             })
@@ -183,11 +192,13 @@ mod tests {
                             url: Url::parse("https://a.example/").unwrap(),
                             title: "A".to_string(),
                             folder: None,
+                            folder_index: None,
                         },
                         SessionTab {
                             url: Url::parse("https://b.example/").unwrap(),
                             title: String::new(),
                             folder: Some("Reading".to_string()),
+                            folder_index: Some(0),
                         },
                     ],
                 },
@@ -199,6 +210,7 @@ mod tests {
                         url: Url::parse("https://c.example/").unwrap(),
                         title: "C".to_string(),
                         folder: None,
+                        folder_index: None,
                     }],
                 },
             ],

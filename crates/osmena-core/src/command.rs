@@ -1873,15 +1873,25 @@ pub fn restore_session(browser: &mut Browser, session: &Session) -> Vec<EngineAc
             if t.blocked.is_none() {
                 t.title = st.title.clone();
             }
-            t.folder = st.folder.as_ref().and_then(|name| {
-                folder_ids
-                    .iter()
-                    .find(|(n, _)| n == name)
-                    .map(|(_, id)| *id)
-            });
+            // The folder by its place in the window's list, which tells
+            // two of one name apart; a file that has no place names it.
+            t.folder = match st.folder_index.and_then(|at| folder_ids.get(at)) {
+                Some((_, id)) => Some(*id),
+                None => st.folder.as_ref().and_then(|name| {
+                    folder_ids
+                        .iter()
+                        .find(|(n, _)| n == name)
+                        .map(|(_, id)| *id)
+                }),
+            };
             tabs.push(t);
         }
         w.tabs = tabs;
+        // A folder's tabs are together, wherever the file put them, as
+        // every other way of moving them keeps them.
+        for (_, id) in &folder_ids {
+            w.gather_folder(*id);
+        }
         w.active = created.id;
         w.select_only(created.id);
         w.prune_folders();
@@ -5356,19 +5366,169 @@ mod tests {
                         url: url("https://a.example/"),
                         title: "A".to_string(),
                         folder: None,
+                        folder_index: None,
                     },
                     SessionTab {
                         url: url("https://b.example/"),
                         title: "B".to_string(),
                         folder: Some("Reading".to_string()),
+                        folder_index: Some(0),
                     },
                     SessionTab {
                         url: url("https://c.example/"),
                         title: "C".to_string(),
                         folder: Some("Reading".to_string()),
+                        folder_index: Some(0),
                     },
                 ],
             }],
+        }
+    }
+
+    /// One window with two folders named "Reading": the one around A and D
+    /// is expanded, the one around C collapsed, and B is loose.
+    fn two_folders_named_alike() -> crate::session::SessionWindow {
+        use crate::session::{SessionFolder, SessionTab, SessionWindow};
+        let tab = |page: &str, title: &str, folder: Option<(&str, usize)>| SessionTab {
+            url: url(page),
+            title: title.to_string(),
+            folder: folder.map(|(name, _)| name.to_string()),
+            folder_index: folder.map(|(_, index)| index),
+        };
+        SessionWindow {
+            active: 0,
+            geometry: None,
+            folders: vec![
+                SessionFolder {
+                    name: "Reading".to_string(),
+                    expanded: true,
+                },
+                SessionFolder {
+                    name: "Reading".to_string(),
+                    expanded: false,
+                },
+            ],
+            tabs: vec![
+                tab("https://a.example/", "A", Some(("Reading", 0))),
+                tab("https://d.example/", "D", Some(("Reading", 0))),
+                tab("https://b.example/", "B", None),
+                tab("https://c.example/", "C", Some(("Reading", 1))),
+            ],
+        }
+    }
+
+    /// Two folders of one name stay apart through a session file: their
+    /// names, members, order and expanded states come back as they were,
+    /// and saving them again writes the same.
+    #[test]
+    fn two_folders_of_one_name_come_back_apart() {
+        let window = two_folders_named_alike();
+        let saved = Session {
+            closed_tabs: Vec::new(),
+            windows: vec![window.clone()],
+        };
+        let back = Session::parse(&saved.to_toml().unwrap()).unwrap();
+        assert_eq!(back.windows[0], window, "the file keeps what was saved");
+        let mut b = browser();
+        restore_session(&mut b, &back);
+        let w = &b.windows[0];
+        let folders: Vec<(&str, bool)> = w
+            .folders
+            .iter()
+            .map(|f| (f.name.as_str(), f.expanded))
+            .collect();
+        assert_eq!(folders, vec![("Reading", true), ("Reading", false)]);
+        let ids: Vec<FolderId> = w.folders.iter().map(|f| f.id).collect();
+        let membership: Vec<Option<usize>> = w
+            .tabs
+            .iter()
+            .map(|t| t.folder.and_then(|id| ids.iter().position(|i| *i == id)))
+            .collect();
+        assert_eq!(membership, vec![Some(0), Some(0), None, Some(1)]);
+        let again = Session::capture(&b, &|_| None);
+        assert_eq!(again.windows[0].folders, window.folders);
+        let indices = |w: &crate::session::SessionWindow| {
+            w.tabs.iter().map(|t| t.folder_index).collect::<Vec<_>>()
+        };
+        assert_eq!(indices(&again.windows[0]), indices(&window));
+    }
+
+    /// A session file from before folders were kept apart names its folders
+    /// by name only; it restores as it always did.
+    #[test]
+    fn a_session_file_that_names_folders_by_name_still_restores() {
+        let text = r#"
+[[window]]
+active = 0
+
+[[window.folder]]
+name = "Reading"
+expanded = true
+
+[[window.tab]]
+url = "https://a.example/"
+title = "A"
+folder = "Reading"
+
+[[window.tab]]
+url = "https://b.example/"
+title = "B"
+"#;
+        let session = Session::parse(text).unwrap();
+        assert_eq!(session.windows[0].tabs[0].folder_index, None);
+        let mut b = browser();
+        restore_session(&mut b, &session);
+        let w = &b.windows[0];
+        assert_eq!(w.folders.len(), 1);
+        assert_eq!(w.folders[0].name, "Reading");
+        assert!(w.folders[0].expanded);
+        assert_eq!(w.tabs[0].folder, Some(w.folders[0].id));
+        assert_eq!(w.tabs[1].folder, None);
+    }
+
+    /// A folder whose tabs are apart in the file (written by hand, or by a
+    /// build that let them apart) comes back gathered where its first tab is,
+    /// so the strip draws what the model holds.
+    #[test]
+    fn a_folder_whose_tabs_are_apart_in_the_file_comes_back_together() {
+        use crate::session::{SessionFolder, SessionTab, SessionWindow};
+        let tab = |page: &str, title: &str, folder: Option<usize>| SessionTab {
+            url: url(page),
+            title: title.to_string(),
+            folder: folder.map(|_| "Reading".to_string()),
+            folder_index: folder,
+        };
+        let window = SessionWindow {
+            active: 0,
+            geometry: None,
+            folders: vec![SessionFolder {
+                name: "Reading".to_string(),
+                expanded: true,
+            }],
+            tabs: vec![
+                tab("https://a.example/", "A", Some(0)),
+                tab("https://b.example/", "B", None),
+                tab("https://c.example/", "C", Some(0)),
+            ],
+        };
+        let mut b = browser();
+        restore_session(
+            &mut b,
+            &Session {
+                closed_tabs: Vec::new(),
+                windows: vec![window],
+            },
+        );
+        let w = &b.windows[0];
+        let titles: Vec<&str> = w.tabs.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["A", "C", "B"],
+            "the folder's tabs are together"
+        );
+        match w.strip_items().first() {
+            Some(crate::model::StripItem::Folder { tabs, .. }) => assert_eq!(tabs.len(), 2),
+            other => panic!("the folder leads the strip, got {other:?}"),
         }
     }
 
