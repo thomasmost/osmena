@@ -307,13 +307,9 @@ fn a_tab_dropped_outside_the_window_is_a_tab_drop() {
     );
     rig.release(to);
     assert_eq!(rig.moves(), Vec::new());
-    assert_eq!(
-        rig.state.take_tab_drop(),
-        Some(TabDrop {
-            tabs: vec![TabId(2)],
-            pointer: to
-        })
-    );
+    let drop = rig.state.take_tab_drop().expect("a drop for the shell");
+    assert_eq!(drop.tabs, vec![TabId(2)]);
+    assert_eq!(drop.pointer, to);
     assert_eq!(rig.order(), vec![1, 2, 3, 4]);
 }
 
@@ -496,4 +492,83 @@ fn escape_cancels_a_drag() {
     assert_eq!(rig.moves(), Vec::new());
     assert_eq!(rig.state.take_tab_drop(), None);
     assert_eq!(rig.order(), vec![1, 2, 3, 4]);
+}
+
+/// A drag pulled more than a tab's height off the strip is detached,
+/// as in Chromium: the gap closes behind it, the tab rides with the
+/// pointer wherever that goes, and moving back over the strip puts it
+/// in the row again.
+#[test]
+fn a_drag_pulled_off_the_strip_detaches_and_comes_back() {
+    let mut rig = Rig::new(4);
+    let second = rig.tab_rect(2);
+    let fourth = rig.tab_rect(4);
+    let from = second.center();
+    let along = Pos2::new(from.x + 40.0, from.y);
+    let below = Pos2::new(along.x, second.bottom() + TAB_HEIGHT + 30.0);
+    rig.press(from);
+    rig.drag(from, along);
+    let drag = rig.state.tab_drag.clone().expect("the drag is on");
+    assert!(!drag.detached, "along the strip the tab is in the row");
+    assert_eq!(drag.index, 2, "between the third tab and the fourth");
+    assert!(
+        (rig.tab_rect(4).left() - fourth.left()).abs() < 1.0,
+        "the gap is open before the fourth tab"
+    );
+
+    rig.drag(along, below);
+    assert!(rig.state.tab_drag.as_ref().is_some_and(|d| d.detached));
+    assert!(
+        (rig.tab_rect(4).right() - fourth.left()).abs() < 3.0,
+        "the gap has closed: the fourth tab stands where the third did, at {:?}",
+        rig.tab_rect(4)
+    );
+    let riding = rig.tab_rect(2);
+    assert!(
+        riding.contains(below),
+        "the tab rides with the pointer off the strip: {riding:?}"
+    );
+    assert!((riding.center().x - below.x).abs() <= 1.0);
+    assert_eq!(rig.moves(), Vec::new());
+
+    rig.drag(below, along);
+    assert!(rig.state.tab_drag.as_ref().is_some_and(|d| !d.detached));
+    assert!(
+        (rig.tab_rect(4).left() - fourth.left()).abs() < 1.0,
+        "the gap is open again"
+    );
+    assert!((rig.tab_rect(2).top() - second.top()).abs() < 1.0);
+    rig.release(along);
+    assert_eq!(rig.order(), vec![1, 3, 2, 4]);
+    assert_eq!(rig.state.take_tab_drop(), None);
+}
+
+/// Let go while detached, the tabs are the shell's to place, even with
+/// the pointer still inside the window: over the page is where a new
+/// window is asked for. The drop says where that window's corner goes
+/// for the tab to stay under the pointer.
+#[test]
+fn a_detached_drag_dropped_inside_the_window_is_a_tab_drop() {
+    let mut rig = Rig::new(4);
+    let first = rig.tab_rect(1);
+    let second = rig.tab_rect(2);
+    let from = second.center();
+    let to = Pos2::new(from.x + 60.0, 300.0);
+    rig.press(from);
+    rig.drag(from, to);
+    rig.release(to);
+    assert_eq!(rig.moves(), Vec::new(), "nothing is reordered");
+    assert_eq!(rig.order(), vec![1, 2, 3, 4]);
+    let drop = rig.state.take_tab_drop().expect("a drop for the shell");
+    assert_eq!(drop.tabs, vec![TabId(2)]);
+    assert_eq!(drop.pointer, to);
+    // A window with its corner at `origin` has its first tab where the
+    // dragged one was held: the same point of the tab under the pointer.
+    let held = from - second.min;
+    let first_tab_at = drop.origin + first.min.to_vec2();
+    assert!(
+        (to - first_tab_at - held).length() <= 1.5,
+        "the corner {:?} puts the first tab at {first_tab_at:?}, held at {held:?}",
+        drop.origin
+    );
 }

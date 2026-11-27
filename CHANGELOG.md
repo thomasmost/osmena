@@ -6,6 +6,16 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Changed
 
+- `Command::MoveTabsToNewWindow` is a struct variant, `{ tabs, place }`
+  (it was `MoveTabsToNewWindow(Vec<TabId>)`): `place` is an optional
+  `WindowGeometry` for the new window, and when it is `Some`,
+  `dispatch` emits `EngineAction::PlaceWindow` ahead of the
+  `OpenWindow`, as a restored session does. Every literal needs the
+  field; `None` is the old behaviour.
+- Tabs dragged off the strip and dropped over their own window (over
+  the page, say) now open a new window there; it used to do nothing.
+  Every tab of a window dropped on that window still does nothing.
+
 - Every open profile can run in one process. An engine says so with the
   new `EngineInfo::profiles_in_process` (a required field: every
   `EngineInfo` literal needs it; `false` keeps a profile a process, as
@@ -72,6 +82,15 @@ All notable changes to the osmena crates. The crates version together.
   font.
 
 ### Added
+
+- Tabs tear off. A drag pulled more than a tab's height above or below
+  the strip is detached, as in Chromium: the gap it held in the row
+  closes, the tabs ride with the pointer over the window, and moving
+  back over the strip puts them in the row again. Let go while
+  detached, they get a window of their own, the size of the one they
+  left and placed so the tabs are under the pointer where they were
+  held (`TabDrop::origin`; a place off every monitor is left to the
+  system, as for a restored window).
 
 - `tools/glyphs/build.py` builds the chrome's two glyph fonts
   (`OsmenaIcons.ttf`, `OsmenaAvatars.ttf`) from the SVG drawings under

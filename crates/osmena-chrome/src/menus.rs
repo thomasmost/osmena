@@ -665,7 +665,10 @@ pub fn menu_bar(input: &MenuBarInput<'_>) -> Vec<MenuEntry> {
                 bound(CommandKind::PreviousTab, "Show Previous Tab", several_tabs),
                 MenuEntry::Separator,
                 on_tab("Move Tab to New Window", several_tabs, |tab| {
-                    Command::MoveTabsToNewWindow(vec![tab])
+                    Command::MoveTabsToNewWindow {
+                        tabs: vec![tab],
+                        place: None,
+                    }
                 }),
                 on_tab("Move Tab to Folder…", true, |tab| {
                     Command::PromptMoveToFolder(vec![tab])
@@ -1270,7 +1273,10 @@ pub fn tab_menu(
         MenuEntry::item(
             plural("Move tab to new window", "Move {n} tabs to new window"),
             has_rest,
-            Command::MoveTabsToNewWindow(targets.to_vec()),
+            Command::MoveTabsToNewWindow {
+                tabs: targets.to_vec(),
+                place: None,
+            },
         ),
         MenuEntry::Submenu {
             label: plural("Move tab to window", "Move {n} tabs to window"),
@@ -2881,7 +2887,10 @@ mod page_menu_tests {
         let tab = submenu(&entries, "Tab");
         assert_eq!(
             command(tab, "Move Tab to New Window"),
-            Command::MoveTabsToNewWindow(vec![TabId(1)])
+            Command::MoveTabsToNewWindow {
+                tabs: vec![TabId(1)],
+                place: None
+            }
         );
         assert!(is_enabled(tab, "Show Next Tab"));
 

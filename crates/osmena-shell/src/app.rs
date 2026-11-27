@@ -20,7 +20,6 @@ use osmena_core::{
 };
 use osmena_engine::{Engine, StripSnapshot, TabHost, Waker};
 use url::Url;
-use winit::dpi::PhysicalPosition;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 
@@ -33,8 +32,9 @@ use crate::media_prompt;
 use crate::profiles;
 use crate::repaint;
 use crate::settings_window::{SettingsOutcome, SettingsWindow};
+use crate::tab_drop::{DropTarget, drop_target};
 use crate::update::{self, Updater};
-use crate::window::BrowserWindow;
+use crate::window::{BrowserWindow, DroppedTabs};
 
 /// How long after a history change the file is written, so a run of
 /// page loads is saved once.
@@ -839,36 +839,40 @@ impl<E: Engine> ProfileApp<E> {
         self.windows.values_mut().find(|w| w.core_id() == id)
     }
 
-    /// The command for tabs dragged out of `source` and dropped at `point`
-    /// (physical screen pixels): move them to the other browser window
-    /// under the pointer, to a new window when the pointer is outside every
-    /// browser window, and nothing when it is still over the source window
-    /// (a drop inside the strip's own window reorders the tabs there, and
-    /// the chrome handles that itself).
+    /// The command for tabs dragged off the strip of `source` and let go:
+    /// to the other browser window of this profile under the pointer, or
+    /// to a new window where they were dropped ([`drop_target`] has the
+    /// rule).
     fn tab_drop_command(
         &self,
         source: winit::window::WindowId,
-        tabs: Vec<TabId>,
-        point: PhysicalPosition<f64>,
+        drop: DroppedTabs,
     ) -> Option<Command> {
-        if let Some(target) = self
+        let other = self
             .windows
             .iter()
-            .find(|(id, w)| **id != source && w.contains_screen_point(point))
-        {
-            return Some(Command::MoveTabsToWindow {
-                tabs,
-                window: target.1.core_id(),
-            });
+            .find(|(id, w)| **id != source && w.contains_screen_point(drop.point))
+            .map(|(_, w)| w.core_id());
+        let source = self.windows.get(&source)?;
+        let whole_window = self
+            .browser
+            .window(source.core_id())
+            .is_some_and(|w| w.tabs.iter().all(|tab| drop.tabs.contains(&tab.id)));
+        match drop_target(
+            other,
+            source.contains_screen_point(drop.point),
+            whole_window,
+        ) {
+            DropTarget::Window(window) => Some(Command::MoveTabsToWindow {
+                tabs: drop.tabs,
+                window,
+            }),
+            DropTarget::NewWindow => Some(Command::MoveTabsToNewWindow {
+                tabs: drop.tabs,
+                place: drop.place,
+            }),
+            DropTarget::Nothing => None,
         }
-        if self
-            .windows
-            .get(&source)
-            .is_some_and(|w| w.contains_screen_point(point))
-        {
-            return None;
-        }
-        Some(Command::MoveTabsToNewWindow(tabs))
     }
 
     pub(crate) fn run_commands(&mut self, commands: Vec<Command>, event_loop: &ActiveEventLoop) {
@@ -2101,8 +2105,8 @@ impl<E: Engine> ProfileApp<E> {
                 window.handle_event(&self.browser, &self.keymap, self.favicons.icons(), &event);
             let drop = window.take_tab_drop();
             self.run_commands(commands, event_loop);
-            if let Some((tabs, point)) = drop
-                && let Some(command) = self.tab_drop_command(window_id, tabs, point)
+            if let Some(drop) = drop
+                && let Some(command) = self.tab_drop_command(window_id, drop)
             {
                 self.run_commands(vec![command], event_loop);
             }

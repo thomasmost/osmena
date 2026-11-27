@@ -36,6 +36,7 @@ use winit::window::{CursorIcon, Fullscreen, ResizeDirection, Window, WindowAttri
 use crate::page::PageTexture;
 use crate::pinch::ZoomSteps;
 use crate::repaint::RepaintSchedule;
+use crate::tab_drop::torn_off_place;
 
 /// How close to a frameless window's edge (physical pixels at 1x) the
 /// pointer resizes it instead of acting on what is under it.
@@ -49,6 +50,17 @@ struct ShownPanel {
     /// The view's rectangle, in physical pixels from the window's top
     /// left.
     px: ViewPixels,
+}
+
+/// Tabs a drag let go off its strip: see [`BrowserWindow::take_tab_drop`].
+pub struct DroppedTabs {
+    pub tabs: Vec<TabId>,
+    /// Where the pointer was, in physical screen pixels (it may have
+    /// been outside the window).
+    pub point: PhysicalPosition<f64>,
+    /// Where a window made for the tabs goes: the size of the one they
+    /// left, placed so they stay under the pointer.
+    pub place: Option<WindowGeometry>,
 }
 
 pub struct BrowserWindow<E: Engine> {
@@ -587,21 +599,23 @@ impl<E: Engine> BrowserWindow<E> {
         }
     }
 
-    /// The tabs a drag that ended in this window carried, with the drop
-    /// point in physical screen pixels (the pointer may have been outside
-    /// this window). Taken once. `None` if the window's position is not
+    /// The tabs a drag that began in this window let go off its strip,
+    /// with where. Taken once. `None` if the window's position is not
     /// known.
-    pub fn take_tab_drop(&mut self) -> Option<(Vec<TabId>, PhysicalPosition<f64>)> {
+    pub fn take_tab_drop(&mut self) -> Option<DroppedTabs> {
         let drop = self.chrome.take_tab_drop()?;
         let origin = self.window.inner_position().ok()?;
         let scale = self.window.scale_factor();
-        Some((
-            drop.tabs,
-            PhysicalPosition::new(
+        Some(DroppedTabs {
+            tabs: drop.tabs,
+            point: PhysicalPosition::new(
                 f64::from(origin.x) + f64::from(drop.pointer.x) * scale,
                 f64::from(origin.y) + f64::from(drop.pointer.y) * scale,
             ),
-        ))
+            place: self
+                .geometry()
+                .map(|source| torn_off_place(source, (drop.origin.x, drop.origin.y), scale)),
+        })
     }
 
     /// Whether `point` (physical screen pixels) is over this window, frame

@@ -830,13 +830,18 @@ pub enum MenuRequest {
     BookmarkOverflow { from: usize, position: Pos2 },
 }
 
-/// A drag of tabs that ended outside the window: the tabs to move and
-/// where the pointer was when the button was released, in egui points of
-/// this window (outside it, since the drag held the pointer).
+/// A drag of tabs that ended off the strip (detached, or outside the
+/// window): the tabs to move and where the pointer was when the button
+/// was released, in egui points of this window (possibly outside it,
+/// since the drag held the pointer).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabDrop {
     pub tabs: Vec<TabId>,
     pub pointer: Pos2,
+    /// Where the top-left corner of a window made for these tabs goes,
+    /// in the same points, for them to stay under the pointer as they
+    /// were held: such a window lays its strip out as this one does.
+    pub origin: Pos2,
 }
 
 /// A drag of tabs along the strip: the tabs (in strip order), the tab
@@ -854,7 +859,17 @@ struct TabDrag {
     /// the pointer (an inactive tab becomes the active one as its drag
     /// begins and grows), and the point held must stay the point held.
     grab: f32,
+    /// How far under the pressed tab's top the pointer took hold.
+    grab_y: f32,
     index: usize,
+    /// The pointer is more than a tab's height off the strip, or out of
+    /// the window: the tabs have left the row (its gap is closed) and
+    /// ride with the pointer, and a drop is the shell's to place
+    /// ([`TabDrop`]).
+    detached: bool,
+    /// Where a window made for the dragged tabs would have its corner
+    /// now (see [`TabDrop::origin`]), as the last frame worked it out.
+    origin: Pos2,
     /// Where the pointer last was. A frame may see it gone (it left the
     /// window, which the system reports apart from its moves) while the
     /// button is still down and the drag still on.
@@ -1050,6 +1065,7 @@ pub fn draw(
             let strip_tabs = StripTabs {
                 palette: &palette,
                 room: tabs_width,
+                left: ui.cursor().left(),
             };
             let scrolled = egui::ScrollArea::horizontal()
                 .max_width(tabs_width)
@@ -1528,6 +1544,9 @@ pub fn background(ctx: &egui::Context, color: ChromeColor) -> [f32; 4] {
 struct StripTabs<'a> {
     palette: &'a Palette,
     room: f32,
+    /// Where the row begins when it is not scrolled, from the window's
+    /// left edge: where the first tab of a window stands.
+    left: f32,
 }
 
 /// A tab or a chip of the row before the tabs' widths are known.
@@ -1759,7 +1778,7 @@ fn strip_row(
     // The pointer as last seen: a frame that finds it gone (it crossed
     // the window's edge) does not end the drag, the button does.
     let pointer = state.tab_drag.as_ref().map(|drag| drag.pointer);
-    let drag_left = state.tab_drag.as_ref().map(|drag| {
+    let drag_at = state.tab_drag.as_ref().map(|drag| {
         // The point held on the pressed tab stays under the pointer,
         // whatever the tab's width has become since, with the dragged
         // tabs before it to its left.
@@ -1769,10 +1788,25 @@ fn strip_row(
             .map(|id| dragged_width(*id) + spacing)
             .sum();
         let grab = before + drag.grab * dragged_width(drag.pressed);
-        let rightmost = (row.right() - block + spacing).max(row.left());
-        (drag.pointer.x - grab).clamp(row.left(), rightmost)
+        (drag.pointer.x - grab, drag.pointer.y - drag.grab_y)
     });
-    let index = drag_left.map(|left| {
+    // Chromium's rule: more than a tab's height above or below the
+    // strip (or out of the window) the drag is detached. The row closes
+    // up behind it, and it comes back by coming back.
+    if let (Some(drag), Some((left, top))) = (state.tab_drag.as_mut(), drag_at) {
+        let near_row =
+            (row.top() - TAB_HEIGHT..=row.bottom() + TAB_HEIGHT).contains(&drag.pointer.y);
+        drag.detached = !near_row || !ui.ctx().content_rect().contains(drag.pointer);
+        drag.origin = Pos2::new(left - look.left, top - row.top());
+    }
+    let detached = state.tab_drag.as_ref().is_some_and(|drag| drag.detached);
+    // In the row the dragged tabs keep to it; detached they go where
+    // the pointer goes.
+    let drag_left = drag_at.map(|(left, _)| {
+        let rightmost = (row.right() - block + spacing).max(row.left());
+        left.clamp(row.left(), rightmost)
+    });
+    let index = drag_left.filter(|_| !detached).map(|left| {
         let centre = left + lead_width / 2.0;
         slots
             .iter()
@@ -1826,8 +1860,24 @@ fn strip_row(
     // The dragged tabs ride with the pointer, over the rest. Their slide
     // keys follow them with no delay, so on the drop they slide from
     // where they were let go to where they landed.
-    if let Some(left) = drag_left {
-        let mut x = left;
+    if let (Some(in_row), Some((free, top))) = (drag_left, drag_at) {
+        // Detached, they are drawn over everything in the window (the
+        // row's own painter is cut to the strip).
+        let mut over = ui.new_child(
+            egui::UiBuilder::new()
+                .layer_id(egui::LayerId::new(
+                    egui::Order::Tooltip,
+                    Id::new("tab-drag-layer"),
+                ))
+                .max_rect(ui.ctx().content_rect()),
+        );
+        over.set_clip_rect(ui.ctx().content_rect());
+        let mut over_late: Vec<egui::Shape> = Vec::new();
+        let (mut x, y) = if detached {
+            (free, top)
+        } else {
+            (in_row, row.top())
+        };
         for id in &dragging {
             let Some(tab) = window.tab(*id) else {
                 continue;
@@ -1837,11 +1887,25 @@ fn strip_row(
                 .animate_value_with_time(Id::new(("strip-slide", tab.id)), x - row.left(), 0.0);
             ui.ctx()
                 .animate_value_with_time(Id::new(("strip-width", tab.id)), width, 0.0);
-            let rect = Rect::from_min_size(Pos2::new(x, row.top()), Vec2::new(width, TAB_HEIGHT))
+            let rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, TAB_HEIGHT))
                 .round_to_pixels(ppp);
-            strip_tab(ui, rect, window, tab, look, state, commands, &mut late);
+            if detached {
+                strip_tab(
+                    &mut over,
+                    rect,
+                    window,
+                    tab,
+                    look,
+                    state,
+                    commands,
+                    &mut over_late,
+                );
+            } else {
+                strip_tab(ui, rect, window, tab, look, state, commands, &mut late);
+            }
             x += width + spacing;
         }
+        over.painter().extend(over_late);
     }
     if !late.is_empty() {
         // The flares reach past the first and last tab's rect, and the
@@ -1861,13 +1925,12 @@ fn strip_row(
         state.tab_drag = None;
     }
 
-    // Away from the row, the drag is headed for another window: say
-    // what it carries.
     if let (Some(drag), Some(pointer)) = (&state.tab_drag, pointer) {
         let count = drag.tabs.len();
-        let near_row = (row.top() - TAB_HEIGHT..=row.bottom() + TAB_HEIGHT).contains(&pointer.y);
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-        if !near_row || !ui.ctx().content_rect().contains(pointer) {
+        // Out of the window the tabs cannot be drawn; a note at the
+        // window's edge says what the pointer carries.
+        if !ui.ctx().content_rect().contains(pointer) {
             egui::Area::new(Id::new("tab-drag-overlay"))
                 .order(egui::Order::Tooltip)
                 .fixed_pos(pointer + Vec2::new(12.0, 12.0))
@@ -1983,7 +2046,10 @@ fn strip_tab(
             tabs: targets,
             pressed: tab.id,
             grab,
+            grab_y: (held.y - rect.top()).clamp(0.0, rect.height()),
             index,
+            detached: false,
+            origin: Pos2::ZERO,
             pointer,
         });
     }
@@ -1991,15 +2057,16 @@ fn strip_tab(
         && let Some(drag) = state.tab_drag.take()
     {
         let pointer = response.interact_pointer_pos().unwrap_or(drag.pointer);
-        if ui.ctx().content_rect().contains(pointer) {
-            commands.push(Command::MoveTabs {
-                tabs: drag.tabs,
-                index: drag.index,
-            });
-        } else {
+        if drag.detached {
             state.tab_drop = Some(TabDrop {
                 tabs: drag.tabs,
                 pointer,
+                origin: drag.origin,
+            });
+        } else {
+            commands.push(Command::MoveTabs {
+                tabs: drag.tabs,
+                index: drag.index,
             });
         }
     }

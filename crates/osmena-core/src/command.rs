@@ -50,8 +50,14 @@ pub enum Command {
     /// Move these tabs to a new window, in strip order. An engine's page
     /// cannot leave the native window it was created for, so each
     /// tab is recreated at its URL in the new window and closed here: the
-    /// page reloads and its history and form state are lost.
-    MoveTabsToNewWindow(Vec<TabId>),
+    /// page reloads and its history and form state are lost. `place` is
+    /// where the window goes when the tabs were dropped somewhere (a
+    /// drag out of the strip): a `PlaceWindow` action then comes before
+    /// the `OpenWindow`. `None` leaves the place to the system.
+    MoveTabsToNewWindow {
+        tabs: Vec<TabId>,
+        place: Option<WindowGeometry>,
+    },
     /// Move these tabs to the end of `window`'s strip, the same way.
     MoveTabsToWindow {
         tabs: Vec<TabId>,
@@ -906,7 +912,9 @@ pub fn dispatch(browser: &mut Browser, cmd: &Command) -> Vec<EngineAction> {
             remember_closed(browser, tabs);
             close_tabs(browser, tabs)
         }
-        Command::MoveTabsToNewWindow(tabs) => move_tabs_to_new_window(browser, tabs),
+        Command::MoveTabsToNewWindow { tabs, place } => {
+            move_tabs_to_new_window(browser, tabs, *place)
+        }
         Command::MoveTabsToWindow { tabs, window } => move_tabs_to_window(browser, tabs, *window),
         Command::MoveTabs { tabs, index } => {
             move_tabs(browser, tabs, *index);
@@ -2607,17 +2615,29 @@ fn moving_tabs(browser: &Browser, tabs: &[TabId]) -> Vec<(TabId, Url, bool)> {
         .collect()
 }
 
-fn move_tabs_to_new_window(browser: &mut Browser, tabs: &[TabId]) -> Vec<EngineAction> {
+fn move_tabs_to_new_window(
+    browser: &mut Browser,
+    tabs: &[TabId],
+    place: Option<WindowGeometry>,
+) -> Vec<EngineAction> {
     let moving = moving_tabs(browser, tabs);
     let Some((_, first_url, _)) = moving.first() else {
         return Vec::new();
     };
-    let mut actions = open_window(browser, first_url.clone());
+    let opened = open_window(browser, first_url.clone());
     let window = browser
         .windows
         .last()
         .expect("open_window pushed a window")
         .id;
+    // Where the tabs were dropped, said before the window opens (the
+    // shell makes the window there, or leaves a place off every
+    // monitor to the system).
+    let mut actions: Vec<EngineAction> = place
+        .map(|geometry| EngineAction::PlaceWindow { window, geometry })
+        .into_iter()
+        .collect();
+    actions.extend(opened);
     actions.extend(place_moved_tabs(browser, window, &moving, 1));
     actions
 }
@@ -3992,7 +4012,13 @@ mod tests {
     #[test]
     fn moving_tabs_to_a_new_window_recreates_them_there_and_closes_the_originals() {
         let (mut b, window, [a, bb, c]) = three_tabs();
-        let actions = dispatch(&mut b, &Command::MoveTabsToNewWindow(vec![c, a]));
+        let actions = dispatch(
+            &mut b,
+            &Command::MoveTabsToNewWindow {
+                tabs: vec![c, a],
+                place: None,
+            },
+        );
         assert_eq!(b.windows.len(), 2);
         let new = &b.windows[1];
         let urls: Vec<&str> = new.tabs.iter().map(|t| t.url.as_str()).collect();
@@ -4019,9 +4045,57 @@ mod tests {
     }
 
     #[test]
+    fn tabs_moved_to_a_new_window_at_a_place_have_it_placed_before_it_opens() {
+        let (mut b, _window, [a, _bb, _c]) = three_tabs();
+        let geometry = WindowGeometry {
+            x: 300,
+            y: 200,
+            width: 900,
+            height: 700,
+            maximized: false,
+        };
+        let actions = dispatch(
+            &mut b,
+            &Command::MoveTabsToNewWindow {
+                tabs: vec![a],
+                place: Some(geometry),
+            },
+        );
+        let new = b.windows[1].id;
+        assert_eq!(
+            actions[0],
+            EngineAction::PlaceWindow {
+                window: new,
+                geometry
+            }
+        );
+        assert!(matches!(actions[1], EngineAction::OpenWindow { window, .. } if window == new));
+        // With no place the system picks one, as before.
+        let (mut b, _window, [a, _bb, _c]) = three_tabs();
+        let actions = dispatch(
+            &mut b,
+            &Command::MoveTabsToNewWindow {
+                tabs: vec![a],
+                place: None,
+            },
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|x| matches!(x, EngineAction::PlaceWindow { .. }))
+        );
+    }
+
+    #[test]
     fn moving_every_tab_to_a_new_window_closes_the_old_window_without_quitting() {
         let (mut b, window, [a, bb, c]) = three_tabs();
-        let actions = dispatch(&mut b, &Command::MoveTabsToNewWindow(vec![a, bb, c]));
+        let actions = dispatch(
+            &mut b,
+            &Command::MoveTabsToNewWindow {
+                tabs: vec![a, bb, c],
+                place: None,
+            },
+        );
         assert_eq!(b.windows.len(), 1);
         assert_ne!(b.windows[0].id, window);
         assert!(actions.contains(&EngineAction::CloseWindow(window)));
@@ -4254,7 +4328,13 @@ mod tests {
     #[test]
     fn closing_a_window_remembers_its_tabs_but_moving_tabs_does_not() {
         let (mut b, window, [a, bb, c]) = three_tabs();
-        dispatch(&mut b, &Command::MoveTabsToNewWindow(vec![a]));
+        dispatch(
+            &mut b,
+            &Command::MoveTabsToNewWindow {
+                tabs: vec![a],
+                place: None,
+            },
+        );
         assert!(b.closed_tabs.is_empty(), "a moved tab is not a closed tab");
         let new_window = b.windows[1].id;
         dispatch(&mut b, &Command::CloseWindow(window));
@@ -7013,7 +7093,13 @@ mod tests {
         );
         // A tab moved to a new window is recreated there and closed
         // here: its panel does not follow.
-        let actions = dispatch(&mut b, &Command::MoveTabsToNewWindow(vec![t[1]]));
+        let actions = dispatch(
+            &mut b,
+            &Command::MoveTabsToNewWindow {
+                tabs: vec![t[1]],
+                place: None,
+            },
+        );
         assert!(
             actions.contains(&EngineAction::CloseView {
                 window,
