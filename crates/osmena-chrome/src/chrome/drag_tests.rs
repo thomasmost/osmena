@@ -829,10 +829,12 @@ fn a_drag_held_at_the_rows_end_scrolls_it() {
         rig.frame(Vec::new());
     }
     rig.release(start);
-    let landed = rig.order().iter().position(|id| *id == 3);
-    assert!(
-        landed.is_some_and(|at| at <= 2),
-        "back at the front, landed at {landed:?}"
+    // Scrolled to its start, the first tab is under the pointer: the drag
+    // lands in the gap beside it, after tab 1 (index 1 of the row).
+    assert_eq!(
+        rig.order().iter().position(|id| *id == 3),
+        Some(1),
+        "back at the front, beside the first tab"
     );
 }
 
