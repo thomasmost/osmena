@@ -159,6 +159,16 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Fixed
 
+- A folder's chip was drawn on top of a tab, and the row began well
+  right of where it should, whenever a folder and a tab of one window
+  had the same number (a profile's first folder while its first tab is
+  still open, which is what an extension's first `GroupTabs` makes).
+  The strip animated the chip's place and the tab's under one key
+  (`("strip-slide", id)`: a `FolderId` and a `TabId` hash as their
+  number), so the two pulled one value between their two places for as
+  long as both were in the row, and the value never came to rest.
+  The key names the kind now (`tab_slide_id`, `chip_slide_id`).
+
 - macOS: a tab can be dragged from anywhere on it. The transparent
   title bar a frameless window keeps lies over the upper part of the
   strip, and a press there moved the window instead of starting a drag

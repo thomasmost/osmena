@@ -266,6 +266,54 @@ impl Rig {
     }
 }
 
+/// A folder and a tab are numbered apart, each from 1, so the first
+/// folder of a profile has the number of its first tab. Their places in
+/// the row must not be animated under one key for that: the two would
+/// pull one value between their two places for as long as both are
+/// drawn, and sit on top of each other half way.
+#[test]
+fn a_folder_numbered_like_a_tab_does_not_share_its_place() {
+    let mut rig = Rig::new(3);
+    let first = rig.tab_rect(1);
+    // Folder 1 holds tab 2: the row is tab 1, the chip, tab 2, tab 3.
+    rig.folder(1, &[2], true);
+    let (tab, chip, inside, after) = (
+        rig.tab_rect(1),
+        rig.chip_rect(1),
+        rig.tab_rect(2),
+        rig.tab_rect(3),
+    );
+    assert_eq!(
+        tab.left(),
+        first.left(),
+        "tab 1 is the first of the row and stays where the row starts"
+    );
+    assert!(
+        chip.left() >= tab.right() - 1.0,
+        "the chip stands after tab 1, not on it: tab {tab:?}, chip {chip:?}"
+    );
+    assert!(
+        inside.left() >= chip.right() - 1.0 && after.left() >= inside.right() - 1.0,
+        "the folder's tab and the next follow the chip: {chip:?}, {inside:?}, {after:?}"
+    );
+    // And the row is at rest: the same a few frames on.
+    for _ in 0..10 {
+        rig.frame(Vec::new());
+    }
+    assert_eq!(rig.chip_rect(1), chip);
+    assert_eq!(rig.tab_rect(1), tab);
+
+    // The same with the folder's own tab numbered like it (a second tab
+    // joined a folder 2): the chip stands before its tabs.
+    let mut rig = Rig::new(3);
+    rig.folder(2, &[1, 2], true);
+    let (chip, one, two) = (rig.chip_rect(2), rig.tab_rect(1), rig.tab_rect(2));
+    assert!(
+        one.left() >= chip.right() - 1.0 && two.left() >= one.right() - 1.0,
+        "the chip, then its two tabs: {chip:?}, {one:?}, {two:?}"
+    );
+}
+
 #[test]
 fn a_tab_dragged_along_the_strip_is_moved_to_where_it_is_dropped() {
     let mut rig = Rig::new(4);

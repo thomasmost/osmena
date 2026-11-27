@@ -1701,10 +1701,25 @@ impl Slot<'_> {
     /// The key its slide is animated under.
     fn slide_id(&self) -> Id {
         match &self.kind {
-            SlotKind::Tab(tab) => Id::new(("strip-slide", tab.id)),
-            SlotKind::Chip(chip) => Id::new(("strip-slide", chip.folder)),
+            SlotKind::Tab(tab) => tab_slide_id(tab.id),
+            SlotKind::Chip(chip) => chip_slide_id(chip.folder),
         }
     }
+}
+
+/// The key a tab's place in the row is animated under. A tab and a
+/// folder are numbered apart, each from 1, and an id hashes as its
+/// number: the kind is part of the key, or the first folder's chip and
+/// the first tab would animate one value between their two places and
+/// be drawn on top of each other for as long as both are in the row.
+fn tab_slide_id(tab: TabId) -> Id {
+    Id::new(("strip-slide", "tab", tab))
+}
+
+/// The key a folder chip's place in the row is animated under
+/// (`tab_slide_id` has why it names the kind).
+fn chip_slide_id(folder: FolderId) -> Id {
+    Id::new(("strip-slide", "chip", folder))
 }
 
 /// The row being measured: its slots so far and where the next goes.
@@ -2070,11 +2085,7 @@ fn strip_row(
                 .round_to_pixels(ppp);
             match ride {
                 Ride::Tab(tab) => {
-                    ctx.animate_value_with_time(
-                        Id::new(("strip-slide", tab.id)),
-                        x - row.left(),
-                        0.0,
-                    );
+                    ctx.animate_value_with_time(tab_slide_id(tab.id), x - row.left(), 0.0);
                     ctx.animate_value_with_time(Id::new(("strip-width", tab.id)), *width, 0.0);
                     strip_tab(
                         target,
@@ -2088,11 +2099,7 @@ fn strip_row(
                     );
                 }
                 Ride::Chip(chip) => {
-                    ctx.animate_value_with_time(
-                        Id::new(("strip-slide", chip.folder)),
-                        x - row.left(),
-                        0.0,
-                    );
+                    ctx.animate_value_with_time(chip_slide_id(chip.folder), x - row.left(), 0.0);
                     strip_folder(target, rect, chip, window, state, commands, target_late);
                 }
             }
