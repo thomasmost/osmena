@@ -101,6 +101,22 @@ All notable changes to the osmena crates. The crates version together.
   window is moved by the strip's empty stretch and its grip alone
   (still zoomed by a double-click there; the traffic lights are
   untouched). A window with the system title bar is as before.
+- A drag of tabs no longer dies when its pointer leaves the window.
+  The system reports the pointer gone as an event apart from its
+  moves, and the strip took a frame without a pointer for the end of
+  the drag; it now goes by egui's own hold on the pressed tab and the
+  pointer's last known place.
+- Escape calls a drag of tabs off: the tabs slide back and the release
+  that follows does nothing. `ChromeState::takes_every_key` is true
+  while a drag is on, so the key reaches the chrome whatever has the
+  keyboard.
+- A dragged tab keeps the point it was taken by under the pointer.
+  An inactive tab becomes the active one as its drag begins and, in a
+  crowded strip, grows from 40 points to 64; the hold was measured on
+  the old width (and from where the pointer had got to, not where it
+  pressed), so the tab rode off-centre and could land a place too far
+  right. Of several tabs dragged together, the one pressed is the one
+  that stays under the pointer.
 
 - The toolbar's Reload is an arrow again: an arc turning clockwise
   into an arrowhead. It had been drawn as an all but closed ring with

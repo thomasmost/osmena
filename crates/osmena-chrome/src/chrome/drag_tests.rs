@@ -343,7 +343,6 @@ fn the_selected_tabs_are_dragged_together_in_strip_order() {
 /// (`CursorLeft`, which egui-winit turns into `PointerGone`), and goes
 /// on reporting where it is while the button is held.
 #[test]
-#[ignore = "reproduces the tab-drag bug; un-ignore with the fix"]
 fn a_drag_outlives_the_pointer_leaving_the_window() {
     let mut rig = Rig::new(4);
     let from = rig.tab_rect(2).center();
@@ -404,11 +403,62 @@ fn a_tab_is_dragged_in_a_strip_that_scrolls() {
         Some(vec![TabId(3)])
     );
     rig.release(to);
-    // Three or four places on: the tab grew to the active tab's width
-    // as the drag began, so its middle is right of the pointer's.
+    // Past tab 7: the tab became the active one as its drag began, the
+    // first tab gave up the active tab's width, and the others closed
+    // up under the pointer.
     let landed = rig.order().iter().position(|id| *id == 3);
-    assert!(matches!(landed, Some(5 | 6)), "landed at {landed:?}");
+    assert_eq!(landed, Some(6));
     assert_eq!(rig.moves().len(), 1);
+}
+
+/// A crowded strip: every tab at its least width, the active one
+/// wider. An inactive tab that is dragged becomes the active one and
+/// grows under the pointer; the point held stays the point held, so a
+/// tab taken by its middle rides with its middle under the pointer and
+/// lands where the pointer is.
+#[test]
+fn a_tab_that_grows_as_its_drag_begins_stays_under_the_pointer() {
+    const LEAST: f32 = 40.0;
+    const PITCH: f32 = LEAST + 2.0;
+    let mut rig = Rig::new(30);
+    let pressed = rig.tab_rect(4);
+    assert_eq!(pressed.width(), LEAST, "the strip is crowded");
+    let from = pressed.center();
+    // Six points short of the middle of the eighth place among the
+    // tabs that stay, once they are all at their least.
+    let left = rig.tab_rect(1).left();
+    let to = Pos2::new(left + LEAST / 2.0 + 7.0 * PITCH - 6.0, from.y);
+    rig.press(from);
+    rig.drag(from, to);
+    let riding = rig.tab_rect(4);
+    assert!(riding.width() > LEAST, "the dragged tab is the active one");
+    assert!(
+        (riding.center().x - to.x).abs() <= 1.0,
+        "its middle is at {}, the pointer at {}",
+        riding.center().x,
+        to.x
+    );
+    rig.release(to);
+    assert_eq!(
+        rig.order().iter().position(|id| *id == 4),
+        Some(7),
+        "before the tab whose middle is right of the pointer"
+    );
+}
+
+/// No key is the page's while a drag is on: the shell hands every key
+/// to the chrome, which is how Escape reaches the strip.
+#[test]
+fn a_drag_takes_every_key() {
+    let mut rig = Rig::new(4);
+    assert!(!rig.state.takes_every_key());
+    let from = rig.tab_rect(2).center();
+    let to = Pos2::new(rig.tab_rect(3).center().x, from.y);
+    rig.press(from);
+    rig.drag(from, to);
+    assert!(rig.state.takes_every_key());
+    rig.release(to);
+    assert!(!rig.state.takes_every_key());
 }
 
 /// A press that does not travel is a click: it activates and drags
@@ -428,7 +478,6 @@ fn a_press_that_stays_put_activates_the_tab_and_moves_nothing() {
 
 /// Escape while a drag is on puts the tabs back where they were.
 #[test]
-#[ignore = "reproduces the tab-drag bug; un-ignore with the fix"]
 fn escape_cancels_a_drag() {
     let mut rig = Rig::new(4);
     let from = rig.tab_rect(2).center();

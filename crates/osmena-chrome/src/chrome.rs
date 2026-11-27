@@ -798,8 +798,10 @@ impl ChromeState {
     /// open, focused or not: the downloads popover, the Launch Panel and a
     /// prompt. A prompt of buttons alone gives egui no focused widget, so
     /// the shell must send it the keys itself or its Escape never arrives.
+    /// A drag of tabs counts too: Escape calls it off, and no key is the
+    /// page's while the pointer holds its tab.
     pub fn takes_every_key(&self) -> bool {
-        self.downloads_open || self.has_launcher() || self.has_prompt()
+        self.downloads_open || self.has_launcher() || self.has_prompt() || self.tab_drag.is_some()
     }
 }
 
@@ -837,15 +839,33 @@ pub struct TabDrop {
     pub pointer: Pos2,
 }
 
-/// A drag of tabs along the strip: the tabs (in strip order), how far
-/// into the pressed tab the pointer took hold, and where the tabs would
+/// A drag of tabs along the strip: the tabs (in strip order), the tab
+/// the pointer took hold of and where on it, and where the tabs would
 /// land now (the index `Command::MoveTabs` takes), as the last frame
 /// worked it out.
 #[derive(Clone, Debug, PartialEq)]
 struct TabDrag {
     tabs: Vec<TabId>,
+    /// The tab under the pointer when the drag began: its widget is the
+    /// one egui is dragging.
+    pressed: TabId,
+    /// Where on the pressed tab the pointer took hold, as a share of its
+    /// width. A share and not a distance: the tab may change width under
+    /// the pointer (an inactive tab becomes the active one as its drag
+    /// begins and grows), and the point held must stay the point held.
     grab: f32,
     index: usize,
+    /// Where the pointer last was. A frame may see it gone (it left the
+    /// window, which the system reports apart from its moves) while the
+    /// button is still down and the drag still on.
+    pointer: Pos2,
+}
+
+impl TabDrag {
+    /// The widget egui is dragging while this drag is on.
+    fn source(&self) -> Id {
+        Id::new(("tab", self.pressed))
+    }
 }
 
 /// An uploaded icon texture, fitted to `px` pixels (`favicon::fit`). The
@@ -1617,6 +1637,19 @@ fn strip_row(
 ) {
     let spacing = ui.spacing().item_spacing.x;
     let ppp = ui.painter().pixels_per_point();
+    // Escape calls a drag off: the tabs slide back to where they were,
+    // and the release that follows finds no drag to end. Read before
+    // the tabs are drawn, since egui lets go of its own drag on the same
+    // key and the tab would take that for a drop.
+    if state.tab_drag.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        state.tab_drag = None;
+        ui.ctx().stop_dragging();
+    }
+    if let Some(drag) = state.tab_drag.as_mut()
+        && let Some(pointer) = ui.ctx().pointer_latest_pos()
+    {
+        drag.pointer = pointer;
+    }
     let dragging: Vec<TabId> = state
         .tab_drag
         .as_ref()
@@ -1723,10 +1756,21 @@ fn strip_row(
     };
     let block: f32 = dragging.iter().map(|id| dragged_width(*id) + spacing).sum();
     let lead_width = dragging.first().map_or(share, |id| dragged_width(*id));
-    let pointer = ui.ctx().pointer_latest_pos();
-    let drag_left = state.tab_drag.as_ref().zip(pointer).map(|(drag, pointer)| {
+    // The pointer as last seen: a frame that finds it gone (it crossed
+    // the window's edge) does not end the drag, the button does.
+    let pointer = state.tab_drag.as_ref().map(|drag| drag.pointer);
+    let drag_left = state.tab_drag.as_ref().map(|drag| {
+        // The point held on the pressed tab stays under the pointer,
+        // whatever the tab's width has become since, with the dragged
+        // tabs before it to its left.
+        let before: f32 = dragging
+            .iter()
+            .take_while(|id| **id != drag.pressed)
+            .map(|id| dragged_width(*id) + spacing)
+            .sum();
+        let grab = before + drag.grab * dragged_width(drag.pressed);
         let rightmost = (row.right() - block + spacing).max(row.left());
-        (pointer.x - drag.grab).clamp(row.left(), rightmost)
+        (drag.pointer.x - grab).clamp(row.left(), rightmost)
     });
     let index = drag_left.map(|left| {
         let centre = left + lead_width / 2.0;
@@ -1744,7 +1788,6 @@ fn strip_row(
     // the rest: its body flares out over its neighbours' feet.
     let mut late: Vec<egui::Shape> = Vec::new();
     // The slots that stay, each sliding to where it belongs now.
-    let mut live_drag = false;
     for slot in &slots {
         if slot.dragged {
             continue;
@@ -1773,7 +1816,7 @@ fn strip_row(
         .round_to_pixels(ppp);
         match &slot.kind {
             SlotKind::Tab(tab) => {
-                live_drag |= strip_tab(ui, rect, window, tab, look, state, commands, &mut late);
+                strip_tab(ui, rect, window, tab, look, state, commands, &mut late);
             }
             SlotKind::Chip(chip) => {
                 strip_folder(ui, rect, chip, window, state, commands, &mut late)
@@ -1796,7 +1839,7 @@ fn strip_row(
                 .animate_value_with_time(Id::new(("strip-width", tab.id)), width, 0.0);
             let rect = Rect::from_min_size(Pos2::new(x, row.top()), Vec2::new(width, TAB_HEIGHT))
                 .round_to_pixels(ppp);
-            live_drag |= strip_tab(ui, rect, window, tab, look, state, commands, &mut late);
+            strip_tab(ui, rect, window, tab, look, state, commands, &mut late);
             x += width + spacing;
         }
     }
@@ -1809,8 +1852,12 @@ fn strip_row(
             .expand2(Vec2::new(f32::from(TAB_CORNER), 1.0));
         ui.painter().with_clip_rect(clip).extend(late);
     }
-    if !live_drag {
-        // The drag ended without a drop here (focus went elsewhere).
+    // The drag is on for as long as egui holds the pressed tab: until
+    // the button is released (a drop, handled by the tab) or the hold
+    // is lost with no release (focus went elsewhere).
+    if let Some(drag) = &state.tab_drag
+        && !ui.ctx().is_being_dragged(drag.source())
+    {
         state.tab_drag = None;
     }
 
@@ -1840,7 +1887,7 @@ fn strip_row(
 
 /// One tab of the strip at `rect`, with everything a tab answers to:
 /// click, Ctrl/Shift click, middle click, the close control, the context
-/// menu, and dragging. Returns whether the tab is being dragged.
+/// menu, and dragging.
 #[allow(clippy::too_many_arguments)]
 fn strip_tab(
     ui: &mut Ui,
@@ -1851,7 +1898,7 @@ fn strip_tab(
     state: &mut ChromeState,
     commands: &mut Vec<Command>,
     late: &mut Vec<egui::Shape>,
-) -> bool {
+) {
     let is_active = tab.id == window.active;
     let is_selected = window.is_selected(tab.id);
     let px = favicon::icon_px(FAVICON_SIZE, ui.painter().pixels_per_point());
@@ -1913,9 +1960,17 @@ fn strip_tab(
         if !is_selected {
             commands.push(Command::ActivateTab(tab.id));
         }
-        let grab = response
+        let pointer = response
             .interact_pointer_pos()
-            .map_or(rect.width() / 2.0, |pointer| pointer.x - rect.left());
+            .unwrap_or_else(|| rect.center());
+        // The point held is where the button went down, not where the
+        // pointer has got to by the time the press counts as a drag.
+        let held = ui.input(|i| i.pointer.press_origin()).unwrap_or(pointer);
+        let grab = if rect.width() > 0.0 {
+            ((held.x - rect.left()) / rect.width()).clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
         // Where the tabs are now, among the others: the drop that would
         // change nothing, until the row works out a better one.
         let index = window
@@ -1926,14 +1981,16 @@ fn strip_tab(
             .count();
         state.tab_drag = Some(TabDrag {
             tabs: targets,
+            pressed: tab.id,
             grab,
             index,
+            pointer,
         });
     }
     if response.drag_stopped()
         && let Some(drag) = state.tab_drag.take()
-        && let Some(pointer) = response.interact_pointer_pos()
     {
+        let pointer = response.interact_pointer_pos().unwrap_or(drag.pointer);
         if ui.ctx().content_rect().contains(pointer) {
             commands.push(Command::MoveTabs {
                 tabs: drag.tabs,
@@ -1946,7 +2003,6 @@ fn strip_tab(
             });
         }
     }
-    response.dragged()
 }
 
 /// A folder's chip, measured before the row is laid out: what it says
