@@ -193,11 +193,13 @@ pub fn torn_off_screen(at_drop: Option<Screen>, at_source: Option<Screen>) -> Op
 /// The place of a window made for tabs torn off as `torn`, on the monitor
 /// `screen` under the drop. The window is the size it was in points,
 /// scaled to that monitor, unless the source was maximized, when it is
-/// [`NEW_WINDOW_SIZE`]; it is never larger than the monitor, and pulled
-/// back onto the monitor if the drop was near its edge. It is placed by
-/// the corner `torn.frame` measures from (see [`recorded_corner`]), which
-/// is the corner `with_position` takes, so its content corner is where the
-/// origin puts it.
+/// [`NEW_WINDOW_SIZE`]; its content is never larger than the monitor, and
+/// if the drop was near the monitor's edge the corner it is placed by is
+/// pulled back so that the content's span from that corner lies on the
+/// monitor. A system frame is not counted in that span and may overhang
+/// the edge. It is placed by the corner `torn.frame` measures from (see
+/// [`recorded_corner`]), which is the corner `with_position` takes, so its
+/// content corner is where the origin puts it.
 pub fn torn_off_place(torn: &TornOff, screen: Screen) -> WindowGeometry {
     let source = torn.source;
     let (points_width, points_height) = if source.maximized {
@@ -237,7 +239,8 @@ pub fn torn_off_place(torn: &TornOff, screen: Screen) -> WindowGeometry {
 
 /// `at`, moved so that a span of `size` starting there lies within the
 /// `span` that starts at `start`, as far as it can (a span larger than the
-/// monitor starts at its edge).
+/// monitor starts at its edge). `size` is the content's: a window's frame
+/// is outside it.
 fn fit_on(at: i64, start: i32, span: u32, size: u32) -> i32 {
     let low = i64::from(start);
     let high = (low + i64::from(span) - i64::from(size)).max(low);

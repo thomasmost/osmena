@@ -193,9 +193,10 @@ All notable changes to the osmena crates. The crates version together.
   over it still changes nothing, and now only when that window is in
   front.
 - A window torn off a maximized one opens at the size a new window
-  does, not at the maximized size, and never larger than the monitor it
-  is placed on; a drop near a monitor's edge pulls it back onto the
-  monitor. A window not maximized keeps its size in points, so it is
+  does, not at the maximized size, and its content is never larger than
+  the monitor it is placed on; a drop near a monitor's edge pulls its
+  content back onto the monitor (a system frame is not counted and may
+  overhang the edge). A window not maximized keeps its size in points, so it is
   the same window on a monitor of another scale. Its frame is taken
   off its content corner in the monitor's pixels, and it is placed by
   the corner the platform's position takes: its content corner on macOS
