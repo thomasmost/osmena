@@ -58,6 +58,69 @@ pub fn note_focus<W: Copy + PartialEq>(recent: &mut Vec<W>, window: W) {
     recent.insert(0, window);
 }
 
+/// A window's outer frame on the screen, in physical pixels: the area the
+/// window occupies, its title bar and frame included.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl FrameRect {
+    /// Whether the point (physical pixels) is in the frame: the left and top
+    /// edges are in, the right and bottom ones are not.
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        x >= f64::from(self.x)
+            && y >= f64::from(self.y)
+            && x < f64::from(self.x) + f64::from(self.width)
+            && y < f64::from(self.y) + f64::from(self.height)
+    }
+}
+
+/// A window of the profile as a drop sees it: its frame, where it is known,
+/// and whether it is minimized.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowFrame<W> {
+    pub window: W,
+    pub frame: Option<FrameRect>,
+    pub minimized: bool,
+}
+
+/// The windows a drop at `point` (physical pixels) is over: those whose
+/// frame holds the point, not counting a minimized one. A minimized window
+/// keeps its frame on macOS, where it is not seen, so the pointer over it
+/// is not over a window.
+pub fn under_point<W: Copy>(windows: &[WindowFrame<W>], point: (f64, f64)) -> Vec<W> {
+    windows
+        .iter()
+        .filter(|w| {
+            !w.minimized
+                && w.frame
+                    .is_some_and(|frame| frame.contains(point.0, point.1))
+        })
+        .map(|w| w.window)
+        .collect()
+}
+
+/// Where tabs let go off `source`'s strip at `point` go, from the plain
+/// facts: the profile's windows and their frames, the focus order `recent`,
+/// the source's tabs and the tabs dropped. The tabs are all the source's
+/// when every one of its tabs is among the dropped.
+pub fn tab_drop_target<W: Copy + PartialEq, T: PartialEq>(
+    windows: &[WindowFrame<W>],
+    point: (f64, f64),
+    recent: &[W],
+    source: W,
+    source_tabs: &[T],
+    dropped: &[T],
+) -> DropTarget<W> {
+    let under = under_point(windows, point);
+    let whole_window = source_tabs.iter().all(|tab| dropped.contains(tab));
+    drop_destination(&under, recent, source, whole_window)
+}
+
 /// A monitor in physical pixels, with its scale factor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Screen {
@@ -245,6 +308,101 @@ mod tests {
             drop_destination(&[1, 7], &[1], 1, false),
             DropTarget::NewWindow
         );
+    }
+
+    /// A window of the profile with its outer frame on the screen, in
+    /// physical pixels, and whether it is minimized.
+    fn window(id: u8, x: i32, y: i32, width: u32, height: u32, minimized: bool) -> WindowFrame<u8> {
+        WindowFrame {
+            window: id,
+            frame: Some(FrameRect {
+                x,
+                y,
+                width,
+                height,
+            }),
+            minimized,
+        }
+    }
+
+    /// Window 1 (the source) and window 7 overlap at (150, 150). The
+    /// source's tabs are 10 and 11; a drop of tab 10 alone is part of them.
+    fn overlapping() -> [WindowFrame<u8>; 2] {
+        [
+            window(1, 0, 0, 200, 200, false),
+            window(7, 100, 100, 200, 200, false),
+        ]
+    }
+
+    /// A window that is minimized keeps its frame on macOS, so the pointer
+    /// over it is not over a window the user can see. Window 7 had the
+    /// keyboard more recently than the source, but it is minimized: the
+    /// drop is the source's own, torn off.
+    #[test]
+    fn a_minimized_window_under_the_pointer_takes_no_drop() {
+        let windows = [
+            window(1, 0, 0, 200, 200, false),
+            window(7, 100, 100, 200, 200, true),
+        ];
+        assert_eq!(
+            tab_drop_target(&windows, (150.0, 150.0), &[7, 1], 1, &[10, 11], &[10]),
+            DropTarget::NewWindow
+        );
+    }
+
+    /// The point is over the source and window 7 (in front, having the
+    /// keyboard last): window 7 takes the tabs, into its strip.
+    #[test]
+    fn the_tab_drop_target_is_the_front_window_under_the_point() {
+        assert_eq!(
+            tab_drop_target(&overlapping(), (150.0, 150.0), &[7, 1], 1, &[10, 11], &[10]),
+            DropTarget::Window(7)
+        );
+    }
+
+    /// The same windows, the source in front: the drop is the source's own,
+    /// and as only some of its tabs are dropped they are torn off.
+    #[test]
+    fn the_tab_drop_target_is_the_source_when_it_is_in_front() {
+        assert_eq!(
+            tab_drop_target(&overlapping(), (150.0, 150.0), &[1, 7], 1, &[10, 11], &[10]),
+            DropTarget::NewWindow
+        );
+    }
+
+    /// Every tab of the source dropped over it, in front: nothing moves.
+    #[test]
+    fn every_tab_of_the_source_dropped_over_it_in_front_changes_nothing() {
+        assert_eq!(
+            tab_drop_target(&overlapping(), (50.0, 50.0), &[1], 1, &[10, 11], &[11, 10]),
+            DropTarget::Nothing
+        );
+    }
+
+    /// A point over neither window tears the tabs off, wherever the source's
+    /// tabs are; a point just past a window's right edge is not in it.
+    #[test]
+    fn a_point_over_no_window_tears_the_tabs_off() {
+        assert_eq!(
+            tab_drop_target(&overlapping(), (200.0, 50.0), &[1], 1, &[10], &[10]),
+            DropTarget::NewWindow,
+            "x = 200 is the first point past window 1's right edge"
+        );
+        assert_eq!(
+            tab_drop_target(&overlapping(), (5000.0, 5000.0), &[1], 1, &[10], &[10]),
+            DropTarget::NewWindow
+        );
+    }
+
+    /// A window whose frame is not known is under no point.
+    #[test]
+    fn a_window_with_no_known_frame_is_under_no_point() {
+        let unknown = WindowFrame {
+            window: 7u8,
+            frame: None,
+            minimized: false,
+        };
+        assert!(under_point(&[unknown], (0.0, 0.0)).is_empty());
     }
 
     #[test]

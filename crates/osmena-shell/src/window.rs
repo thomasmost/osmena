@@ -36,7 +36,7 @@ use winit::window::{CursorIcon, Fullscreen, ResizeDirection, Window, WindowAttri
 use crate::page::PageTexture;
 use crate::pinch::ZoomSteps;
 use crate::repaint::RepaintSchedule;
-use crate::tab_drop::{NEW_WINDOW_SIZE, PositionCorner, TornOff, recorded_corner};
+use crate::tab_drop::{FrameRect, NEW_WINDOW_SIZE, PositionCorner, TornOff, recorded_corner};
 
 /// How close to a frameless window's edge (physical pixels at 1x) the
 /// pointer resizes it instead of acting on what is under it.
@@ -657,17 +657,22 @@ impl<E: Engine> BrowserWindow<E> {
         ))
     }
 
-    /// Whether `point` (physical screen pixels) is over this window, frame
-    /// included. False if the window's position is not known.
-    pub fn contains_screen_point(&self, point: PhysicalPosition<f64>) -> bool {
-        let Ok(origin) = self.window.outer_position() else {
-            return false;
-        };
+    /// The window's outer frame on the screen, in physical pixels, frame
+    /// included. `None` if its position is not known.
+    pub fn screen_frame(&self) -> Option<FrameRect> {
+        let origin = self.window.outer_position().ok()?;
         let size = self.window.outer_size();
-        point.x >= f64::from(origin.x)
-            && point.y >= f64::from(origin.y)
-            && point.x < f64::from(origin.x) + f64::from(size.width)
-            && point.y < f64::from(origin.y) + f64::from(size.height)
+        Some(FrameRect {
+            x: origin.x,
+            y: origin.y,
+            width: size.width,
+            height: size.height,
+        })
+    }
+
+    /// Whether the window is minimized. Where winit cannot tell, it is not.
+    pub fn is_minimized(&self) -> bool {
+        self.window.is_minimized() == Some(true)
     }
 
     /// Who the pointer belongs to right now: the side holding a capture,
