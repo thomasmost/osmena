@@ -37,6 +37,7 @@ mod profiles;
 mod repaint;
 mod settings_window;
 mod shell;
+mod titlebar;
 mod update;
 mod window;
 

@@ -92,6 +92,16 @@ All notable changes to the osmena crates. The crates version together.
 
 ### Fixed
 
+- macOS: a tab can be dragged from anywhere on it. The transparent
+  title bar a frameless window keeps lies over the upper part of the
+  strip, and a press there moved the window instead of starting a drag
+  of the tab, because winit's content view left
+  `mouseDownCanMoveWindow` at AppKit's default. The shell now makes
+  that answer "no" for a frameless window's content view, so the
+  window is moved by the strip's empty stretch and its grip alone
+  (still zoomed by a double-click there; the traffic lights are
+  untouched). A window with the system title bar is as before.
+
 - The toolbar's Reload is an arrow again: an arc turning clockwise
   into an arrowhead. It had been drawn as an all but closed ring with
   a tick on it.

@@ -145,6 +145,12 @@ impl<E: Engine> BrowserWindow<E> {
         let window = event_loop
             .create_window(attributes)
             .map_err(|e| EngineError(format!("creating window: {e}")))?;
+        // The title bar macOS keeps over the strip must not take a press
+        // on a tab for a move of the window.
+        if crate::titlebar::content_refuses_window_moves(frameless, cfg!(target_os = "macos")) {
+            #[cfg(target_os = "macos")]
+            crate::titlebar::keep_presses(&window);
+        }
 
         let size = non_zero(window.inner_size());
         let display_handle = event_loop

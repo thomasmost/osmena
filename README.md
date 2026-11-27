@@ -223,7 +223,10 @@ The engine contract, in `osmena-engine`:
   window, double-click it to maximize, right-click it on Windows for the
   system menu) and, except on macOS, ends in minimize, maximize, and close
   controls; the edges still resize. On macOS the title bar turns
-  transparent and the strip leaves room for the traffic lights. The
+  transparent and the strip leaves room for the traffic lights; a press
+  on the strip is the chrome's, never the title bar's
+  (`osmena-shell`'s `titlebar.rs`), so tabs drag from anywhere on them
+  and only the empty stretch moves the window. The
   setting "Use the system title bar and borders" (`system_title_bar` in
   `settings.toml`) restores the system frame; on macOS it applies to
   windows opened afterwards.
